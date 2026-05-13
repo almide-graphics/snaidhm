@@ -1,0 +1,11 @@
+[package]
+name = "snaidhm"
+version = "0.0.1"
+description = "Compute-shader-first 2D/3D renderer for Almide"
+
+[dependencies]
+lumen = { git = "https://github.com/dubhlux/lumen.git" }
+
+[targets]
+wasm = true
+rust = true
