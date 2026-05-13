@@ -146,6 +146,65 @@ function buildShadows() {
   return { data, count: shadows.length };
 }
 
+// ── Paint descriptors (per-path) ──
+
+function buildPaints(pathCount) {
+  // 16 floats per paint (64 bytes, vec4-aligned)
+  // Layout: [type,pad,pad,pad, color0.rgba, color1.rgba, params.xyzw]
+  const data = new Float32Array(pathCount * 16);
+  const u32 = new Uint32Array(data.buffer);
+
+  function solid(pid, r, g, b, a) {
+    const o = pid * 16;
+    u32[o] = 0;
+    data[o+4] = r; data[o+5] = g; data[o+6] = b; data[o+7] = a;
+  }
+
+  function linearGrad(pid, c0, c1, sx, sy, ex, ey) {
+    const o = pid * 16;
+    u32[o] = 1;
+    data[o+4] = c0[0]; data[o+5] = c0[1]; data[o+6] = c0[2]; data[o+7] = c0[3];
+    data[o+8] = c1[0]; data[o+9] = c1[1]; data[o+10] = c1[2]; data[o+11] = c1[3];
+    data[o+12] = sx; data[o+13] = sy; data[o+14] = ex; data[o+15] = ey;
+  }
+
+  function radialGrad(pid, c0, c1, cx, cy, radius) {
+    const o = pid * 16;
+    u32[o] = 2;
+    data[o+4] = c0[0]; data[o+5] = c0[1]; data[o+6] = c0[2]; data[o+7] = c0[3];
+    data[o+8] = c1[0]; data[o+9] = c1[1]; data[o+10] = c1[2]; data[o+11] = c1[3];
+    data[o+12] = cx; data[o+13] = cy; data[o+14] = radius;
+  }
+
+  // 0: Background card — solid white
+  solid(0, 1.0, 1.0, 1.0, 1.0);
+
+  // 1: Header bar — linear gradient (deep blue top → lighter blue bottom)
+  linearGrad(1,
+    [0.12, 0.22, 0.58, 1.0],
+    [0.28, 0.48, 0.88, 1.0],
+    -0.85, 0.85, -0.85, 0.55);
+
+  // 2: Red circle — radial gradient (bright center → deeper edge)
+  radialGrad(2, [1.0, 0.55, 0.5, 0.9], [0.82, 0.18, 0.12, 0.9], -0.5, 0.0, 0.18);
+
+  // 3: Green circle
+  radialGrad(3, [0.45, 0.92, 0.55, 0.9], [0.12, 0.62, 0.22, 0.9], 0.0, 0.0, 0.18);
+
+  // 4: Blue circle
+  radialGrad(4, [0.5, 0.7, 1.0, 0.9], [0.15, 0.35, 0.82, 0.9], 0.5, 0.0, 0.18);
+
+  // 5-7: Bottom cards — solid
+  solid(5, 0.95, 0.95, 0.98, 1.0);
+  solid(6, 0.95, 0.95, 0.98, 1.0);
+  solid(7, 0.95, 0.95, 0.98, 1.0);
+
+  // 8-12: Accent dots
+  for (let i = 8; i < pathCount; i++) solid(i, 1.0, 1.0, 1.0, 0.8);
+
+  return data;
+}
+
 // ── Flatten + tile ──
 
 function flattenBeziers(beziers) {
@@ -251,11 +310,12 @@ async function main() {
   const atlas = generateSDFAtlas(font, chars, 48, 6);
 
   // Build scene
-  const { beziers } = buildShapes();
+  const { beziers, pathCount } = buildShapes();
   const segments = flattenBeziers(beziers);
   const { tileCounts, tileSegIds } = assignTiles(segments);
   const textQuads = buildTextQuads(font, atlas);
   const shadowScene = buildShadows();
+  const paintData = buildPaints(pathCount);
 
   console.log(`Shapes: ${segments.length} segments | Text: ${textQuads.indices.length / 6} glyphs`);
 
@@ -293,6 +353,8 @@ async function main() {
   const paramsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const shadowBuf = device.createBuffer({ size: shadowScene.data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(shadowBuf, 0, shadowScene.data);
+  const paintBuf = device.createBuffer({ size: paintData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(paintBuf, 0, paintData);
   device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([WIDTH, HEIGHT, segCount, TILES_X, TILES_Y, shadowScene.count, 0, 0]));
 
   // Path compute pipeline
@@ -303,6 +365,7 @@ async function main() {
     { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
     { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+    { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
   ]});
   const pathPipeline = device.createComputePipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [pathBGL] }),
@@ -315,6 +378,7 @@ async function main() {
     { binding: 3, resource: { buffer: pixelBuf } },
     { binding: 4, resource: { buffer: paramsBuf } },
     { binding: 5, resource: { buffer: shadowBuf } },
+    { binding: 6, resource: { buffer: paintBuf } },
   ]});
 
   // Fullscreen quad pipeline (path output)

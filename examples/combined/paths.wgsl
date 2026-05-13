@@ -38,6 +38,33 @@ struct Shadow {
   color: vec4<f32>,
 }
 
+// Paint descriptor: per-path color/gradient
+struct Paint {
+  paint_type: u32,  // 0=solid, 1=linear, 2=radial
+  _p0: u32, _p1: u32, _p2: u32,
+  color0: vec4<f32>,
+  color1: vec4<f32>,
+  grad_params: vec4<f32>,  // linear: start.xy, end.xy | radial: center.xy, radius, _
+}
+
+fn evaluate_paint(paint: Paint, p: vec2<f32>) -> vec4<f32> {
+  if paint.paint_type == 1u {
+    // Linear gradient
+    let start = paint.grad_params.xy;
+    let dir = paint.grad_params.zw - start;
+    let t = clamp(dot(p - start, dir) / dot(dir, dir), 0.0, 1.0);
+    return mix(paint.color0, paint.color1, t);
+  } else if paint.paint_type == 2u {
+    // Radial gradient
+    let center = paint.grad_params.xy;
+    let radius = paint.grad_params.z;
+    let t = clamp(length(p - center) / radius, 0.0, 1.0);
+    return mix(paint.color0, paint.color1, t);
+  }
+  // Solid
+  return paint.color0;
+}
+
 // Fine rasterize: per-tile winding fill
 @group(0) @binding(0) var<storage, read>       segments: array<LineSeg>;
 @group(0) @binding(1) var<storage, read>       tile_counts: array<u32>;
@@ -45,6 +72,7 @@ struct Shadow {
 @group(0) @binding(3) var<storage, read_write> pixels: array<u32>;
 @group(0) @binding(4) var<uniform>             params: Params;
 @group(0) @binding(5) var<storage, read>       shadows: array<Shadow>;
+@group(0) @binding(6) var<storage, read>       paints: array<Paint>;
 
 // Analytical area coverage (Vello-style)
 // p0, p1 in pixel-local coordinates where pixel occupies [0,1] x [0,1]
@@ -125,21 +153,20 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
 
   var area = 0.0;
   var current_path = 0xFFFFFFFFu;
-  var current_color = vec4<f32>(0.0);
 
   for (var i = 0u; i < count; i++) {
     let seg_idx = tile_seg_ids[tile_base + i];
     let seg = segments[seg_idx];
 
     if (seg.path_id != current_path) {
-      // Apply previous path: area → coverage
+      // Apply previous path with paint evaluation at this pixel
       let coverage = min(abs(area), 1.0);
       if coverage > 1e-4 {
-        color = mix(color, current_color.rgb, coverage * current_color.a);
+        let paint_color = evaluate_paint(paints[current_path], p);
+        color = mix(color, paint_color.rgb, coverage * paint_color.a);
       }
       area = 0.0;
       current_path = seg.path_id;
-      current_color = seg.color;
     }
 
     // Convert segment from NDC to pixel-local coordinates
@@ -157,7 +184,8 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
   // Apply last path
   let last_coverage = min(abs(area), 1.0);
   if last_coverage > 1e-4 {
-    color = mix(color, current_color.rgb, last_coverage * current_color.a);
+    let last_paint = evaluate_paint(paints[current_path], p);
+    color = mix(color, last_paint.rgb, last_coverage * last_paint.a);
   }
 
   pixels[py * params.width + px] = pack_color(color.x, color.y, color.z, 1.0);
