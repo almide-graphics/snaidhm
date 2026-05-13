@@ -68,6 +68,27 @@ fn end_pass(pass: Int) -> Unit = _
 @extern(wasm, "gpu", "finish_and_submit")
 fn finish_and_submit(device: Int, encoder: Int) -> Unit = _
 
+// ── Compute pipeline ──
+
+@extern(wasm, "gpu", "create_compute_pipeline")
+fn create_compute_pipeline(device: Int, shader: Int, entry_id: Int) -> Int = _
+
+// ── Bind group ──
+
+@extern(wasm, "gpu", "create_bind_group")
+fn create_bind_group(device: Int, pipeline: Int, group_idx: Int, entries_ptr: Int, entries_count: Int) -> Int = _
+
+@extern(wasm, "gpu", "set_bind_group")
+fn set_bind_group(pass: Int, index: Int, bind_group: Int) -> Unit = _
+
+// ── Compute pass ──
+
+@extern(wasm, "gpu", "begin_compute_pass")
+fn begin_compute_pass(encoder: Int) -> Int = _
+
+@extern(wasm, "gpu", "dispatch_workgroups")
+fn dispatch_workgroups(pass: Int, x: Int, y: Int, z: Int) -> Unit = _
+
 // ── Debug ──
 
 @extern(wasm, "gpu", "log_int")

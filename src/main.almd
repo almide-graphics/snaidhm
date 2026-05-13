@@ -1,44 +1,57 @@
-// snaidhm — WebGPU triangle in Almide
+// snaidhm — Compute + Render in Almide
 //
-// First proof: Almide -> WASM -> WebGPU rendering pipeline.
-// JS handles async device init, passes handle to render().
+// Compute shader fills a pixel buffer with a gradient.
+// Fullscreen quad displays the result.
+// This is "Phase 0" of snaidhm in Almide.
 
 import self.web.gpu as gpu
 
-// Triangle shader (WGSL) as a static string
-let SHADER = """
-  @vertex
-  fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-    var pos = array<vec2<f32>, 3>(
-      vec2<f32>( 0.0,  0.5),
-      vec2<f32>(-0.5, -0.5),
-      vec2<f32>( 0.5, -0.5),
-    );
-    return vec4<f32>(pos[i], 0.0, 1.0);
-  }
-
-  @fragment
-  fn fs() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.3, 0.7, 1.0, 1.0);
-  }
-  """
+let WIDTH = 512
+let HEIGHT = 512
 
 @export(wasm, "render")
 fn render(device: Int) -> Unit = {
   let format = gpu.get_preferred_format()
-  let ctx = gpu.configure_canvas(device, format)
+  let _ctx = gpu.configure_canvas(device, format)
 
-  // Create shader module — pass string pointer + length through WASM memory
-  // For now, use a simplified approach: the JS runtime handles shader creation
-  // by reading the string from WASM memory
-  let shader = gpu.create_shader(device, 0, 0)
+  // Shaders are loaded by the JS runtime via shader IDs:
+  // 0 = compute shader, 1 = fullscreen quad shader
+  let compute_shader = gpu.create_shader(device, 0, 0)
+  let quad_shader = gpu.create_shader(device, 1, 0)
 
-  let pipeline = gpu.create_render_pipeline(device, shader, 0, 2, 0, 2, format)
+  // Pixel buffer: WIDTH * HEIGHT * 4 bytes (RGBA u8 packed as u32)
+  let pixel_buf = gpu.create_buffer(device, WIDTH * HEIGHT * 4, int.bor(gpu.STORAGE, gpu.COPY_SRC))
 
+  // Uniform buffer: width, height
+  let params_buf = gpu.create_buffer(device, 8, int.bor(gpu.UNIFORM, gpu.COPY_DST))
+
+  // Compute pipeline
+  let compute_pipeline = gpu.create_compute_pipeline(device, compute_shader, 0)
+
+  // Bind group for compute: [storage buffer, uniform buffer]
+  // entries_ptr = 0 signals "auto-bind buffers in order"
+  let compute_bg = gpu.create_bind_group(device, compute_pipeline, 0, 0, 2)
+
+  // Render pipeline (fullscreen quad)
+  let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
+  let quad_bg = gpu.create_bind_group(device, quad_pipeline, 0, 0, 2)
+
+  // Encode and submit
   let encoder = gpu.begin_encoder(device)
-  let pass = gpu.begin_render_pass(encoder, 0.05, 0.05, 0.1, 1.0)
-  gpu.set_pipeline(pass, pipeline)
-  gpu.draw(pass, 3)
-  gpu.end_pass(pass)
+
+  // Compute pass: fill pixel buffer
+  let compute_pass = gpu.begin_compute_pass(encoder)
+  gpu.set_pipeline(compute_pass, compute_pipeline)
+  gpu.set_bind_group(compute_pass, 0, compute_bg)
+  gpu.dispatch_workgroups(compute_pass, WIDTH / 16, HEIGHT / 16, 1)
+  gpu.end_pass(compute_pass)
+
+  // Render pass: display
+  let render_pass = gpu.begin_render_pass(encoder, 0.0, 0.0, 0.0, 1.0)
+  gpu.set_pipeline(render_pass, quad_pipeline)
+  gpu.set_bind_group(render_pass, 0, quad_bg)
+  gpu.draw(render_pass, 6)
+  gpu.end_pass(render_pass)
+
   gpu.finish_and_submit(device, encoder)
 }
