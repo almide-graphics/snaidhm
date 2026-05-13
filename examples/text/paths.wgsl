@@ -66,6 +66,19 @@ fn pack_color(r: f32, g: f32, b: f32, a: f32) -> u32 {
   return ri | (gi << 8u) | (bi << 16u) | (ai << 24u);
 }
 
+// Evaluate winding for all segments of a given path at a single point.
+// Returns the total winding number.
+fn eval_winding_at(p: vec2<f32>, tile_base: u32, count: u32, target_path: u32) -> f32 {
+  var winding = 0.0;
+  for (var i = 0u; i < count; i++) {
+    let seg = segments[tile_seg_ids[tile_base + i]];
+    if (seg.path_id == target_path) {
+      winding += wind_line(p, seg.p0, seg.p1);
+    }
+  }
+  return winding;
+}
+
 @compute @workgroup_size(16, 16)
 fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(workgroup_id) wg: vec3<u32>) {
@@ -77,50 +90,39 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
   let count = min(tile_counts[tile_id], MAX_SEGS_PER_TILE);
   let tile_base = tile_id * MAX_SEGS_PER_TILE;
 
-  let p = vec2<f32>(
-    f32(px) / f32(params.width) * 2.0 - 1.0,
-    1.0 - f32(py) / f32(params.height) * 2.0,
+  // Pixel center in NDC
+  let px_ndc = f32(px) / f32(params.width) * 2.0 - 1.0;
+  let py_ndc = 1.0 - f32(py) / f32(params.height) * 2.0;
+  let half_px = 1.0 / f32(params.width);  // half pixel in NDC
+
+  // 4x supersampling offsets (rotated grid for better quality)
+  let offsets = array<vec2<f32>, 4>(
+    vec2<f32>(-0.375 * half_px, -0.125 * half_px),
+    vec2<f32>( 0.125 * half_px, -0.375 * half_px),
+    vec2<f32>( 0.375 * half_px,  0.125 * half_px),
+    vec2<f32>(-0.125 * half_px,  0.375 * half_px),
   );
 
-  // AA pixel size in NDC
-  let px_size = 2.0 / f32(params.width);
-
   var color = vec3<f32>(0.95, 0.95, 0.97);
-  var winding = 0.0;
-  var min_dist = 1000.0;  // closest segment distance for this path
-  var current_path = 0xFFFFFFFFu;
-  var current_color = vec4<f32>(0.0);
 
+  // Collect unique paths in this tile (track path transitions)
+  var prev_path = 0xFFFFFFFFu;
   for (var i = 0u; i < count; i++) {
-    let seg_idx = tile_seg_ids[tile_base + i];
-    let seg = segments[seg_idx];
+    let seg = segments[tile_seg_ids[tile_base + i]];
+    if (seg.path_id == prev_path) { continue; }
+    prev_path = seg.path_id;
 
-    if (seg.path_id != current_path) {
-      // Apply previous path with AA
-      if (abs(winding) > 0.01) {
-        // Inside: full coverage. Edge: smooth falloff based on distance.
-        let inside = abs(winding) >= 1.0;
-        let edge_aa = smoothstep(px_size * 1.5, 0.0, min_dist);
-        let coverage = select(edge_aa, 1.0, inside);
-        color = mix(color, current_color.rgb, coverage * current_color.a);
-      }
-      winding = 0.0;
-      min_dist = 1000.0;
-      current_path = seg.path_id;
-      current_color = seg.color;
+    // Evaluate coverage via 4x supersampling
+    var coverage = 0.0;
+    for (var s = 0u; s < 4u; s++) {
+      let sp = vec2<f32>(px_ndc + offsets[s].x, py_ndc + offsets[s].y);
+      let w = eval_winding_at(sp, tile_base, count, seg.path_id);
+      if (abs(w) >= 0.5) { coverage += 0.25; }
     }
 
-    winding += wind_line(p, seg.p0, seg.p1);
-    let d = dist_to_segment(p, seg.p0, seg.p1);
-    min_dist = min(min_dist, d);
-  }
-
-  // Apply last path with AA
-  if (abs(winding) > 0.01) {
-    let inside = abs(winding) >= 1.0;
-    let edge_aa = smoothstep(px_size * 1.5, 0.0, min_dist);
-    let coverage = select(edge_aa, 1.0, inside);
-    color = mix(color, current_color.rgb, coverage * current_color.a);
+    if (coverage > 0.0) {
+      color = mix(color, seg.color.rgb, coverage * seg.color.a);
+    }
   }
 
   pixels[py * params.width + px] = pack_color(color.x, color.y, color.z, 1.0);
