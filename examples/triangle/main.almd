@@ -1,64 +1,27 @@
-// Phase 0: Triangle — minimal @gpu → WGSL proof
+// Phase 0: Triangle — Almide source that compiles to WGSL
 //
-// This file defines the TARGET developer experience.
-// The Almide compiler must:
-//   1. Extract @gpu(vertex) and @gpu(fragment) functions → emit WGSL
-//   2. Generate bind group layout from function signatures
-//   3. Host code compiles to WASM, calls WebGPU API
+// Compile: almide main.almd --target wgsl
+// Output should match triangle.wgsl (hand-written reference)
 
-import lumen.vec2 as v2
-import lumen.vec4 as v4
-import snaidhm.gpu as gpu
-
-// --- Shader code (compiles to WGSL) ---
-
-struct VertexOutput {
-  @builtin(position) pos: Vec4,
-  @location(0) color: Vec4,
+type VertexOutput = {
+  @builtin(position) pos: Float,
+  @location(0) color: Float,
 }
 
 @gpu(vertex)
 fn vs_main(@builtin(vertex_index) idx: UInt32) -> VertexOutput = {
-  // Hardcoded triangle vertices
-  let positions = [
-    v2.new( 0.0,  0.5),   // top
-    v2.new(-0.5, -0.5),   // bottom-left
-    v2.new( 0.5, -0.5),   // bottom-right
-  ]
-  let colors = [
-    v4.new(1.0, 0.0, 0.0, 1.0),  // red
-    v4.new(0.0, 1.0, 0.0, 1.0),  // green
-    v4.new(0.0, 0.0, 1.0, 1.0),  // blue
-  ]
+  let positions_x = [0.0, -0.5, 0.5]
+  let positions_y = [0.5, -0.5, -0.5]
+  let colors = [1.0, 0.0, 0.0]
+
   VertexOutput {
-    pos: v4.new(positions[idx].x, positions[idx].y, 0.0, 1.0),
+    pos: positions_x[idx],
     color: colors[idx],
   }
 }
 
 @gpu(fragment)
-fn fs_main(@location(0) color: Vec4) -> @location(0) Vec4 = {
+@location(0)
+fn fs_main(@location(0) color: Float) -> Float = {
   color
-}
-
-// --- Host code (compiles to WASM) ---
-
-effect fn main() -> Unit = {
-  let surface = gpu.create_surface("canvas")
-  let device = gpu.request_device(surface)
-
-  let pipeline = gpu.create_render_pipeline(device, {
-    vertex: vs_main,      // compiler resolves to generated WGSL
-    fragment: fs_main,    // compiler resolves to generated WGSL
-    format: gpu.TextureFormat.Bgra8Unorm,
-  })
-
-  gpu.render_loop(device, surface, fn(frame) {
-    let pass = frame.begin_render_pass({
-      clear_color: v4.new(0.0, 0.0, 0.0, 1.0),
-    })
-    pass.set_pipeline(pipeline)
-    pass.draw(3)  // 3 vertices
-    pass.end()
-  })
 }
