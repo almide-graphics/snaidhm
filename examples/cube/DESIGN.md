@@ -216,18 +216,39 @@ The compiler can:
 2. Auto-generate the `@group/@binding` module-level declaration
 3. Or require the user to declare them explicitly (more control)
 
-## Decision Needed
+## Decisions Made
 
-Before implementing, decide:
+### 3. @group/@binding numbering → AUTO-ASSIGNED BY COMPILER
 
-1. **Module-level vs param-only for uniforms**: explicit `let uniforms` at module
-   level, or implicit via `@uniform` param annotation on the function?
-2. **Vec/Mat types**: lumen dependency, built-in registration, or lenient checking?
-3. **@group/@binding numbering**: manual (user assigns), or auto-assigned by compiler?
+User never writes `@group(0) @binding(0)`. The compiler assigns automatically:
+
+- All uniforms → `group(0)`, bindings numbered by declaration order
+- All storage buffers → `group(1)`, bindings numbered by declaration order
+- Manual `@binding(N)` override available but never required
+
+**Rationale**: `@group(0) @binding(0)` is WGSL plumbing, not user intent.
+Almide's principle is "LLM writes what the data IS, not where it LIVES."
+The compiler knows the bind group layout because it sees all the declarations.
+
+This also means the host-side bind group layout can be auto-generated
+from the same compiler pass — single source of truth.
+
+```almide
+// User writes:
+@gpu(vertex)
+fn vs_main(@uniform mvp: Mat4, @location(0) pos: Vec3) -> VertexOutput = { ... }
+
+// Compiler emits WGSL:
+// @group(0) @binding(0) var<uniform> __uniform_0: __Uniforms_0;
+// ... with mvp field, auto-numbered
+```
+
+### 1. Module-level vs param-only → TBD (leaning param-only for Phase 0.3)
+### 2. Vec/Mat types → TBD (leaning lenient checking)
 
 ## Next Steps
 
-1. Pick a design direction
+1. Decide remaining two questions (uniform declaration model, Vec/Mat types)
 2. Implement the minimal parser/checker changes
 3. Write cube's main.almd
 4. Compile and verify against cube.wgsl
