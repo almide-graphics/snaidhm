@@ -91,7 +91,6 @@ function assignTiles(segments) {
     const minY = Math.min(seg.p0[1], seg.p1[1]);
     const maxY = Math.max(seg.p0[1], seg.p1[1]);
 
-    const pxMinX = (minX + 1) * 0.5 * WIDTH;
     const pxMaxX = (maxX + 1) * 0.5 * WIDTH;
     const pxMinY = (1 - maxY) * 0.5 * HEIGHT;
     const pxMaxY = (1 - minY) * 0.5 * HEIGHT;
