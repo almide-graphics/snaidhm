@@ -250,24 +250,39 @@ function assignTiles(segments) {
 
 // ── SDF text quads ──
 
+function measureText(text, size, font, atlas) {
+  const scale = size * 2 / HEIGHT / font.unitsPerEm;
+  let width = 0;
+  for (const ch of text) {
+    const glyph = atlas.glyphs.get(ch);
+    width += (glyph?.advance || font.unitsPerEm * 0.3) * scale;
+  }
+  return width;
+}
+
 function buildTextQuads(font, atlas) {
+  // x: anchor position. align: "left" (default), "center", "right"
+  // y: baseline position in NDC
   const lines = [
-    { text: "snaidhm", size: 40, x: -0.55, y: 0.62, color: [1, 1, 1, 1] },
-    { text: "GPU path renderer", size: 16, x: -0.38, y: 0.56, color: [0.8, 0.85, 1, 0.9] },
-    { text: "Fill", size: 14, x: -0.42, y: -0.02, color: [1, 1, 1, 1] },
-    { text: "Stroke", size: 14, x: 0.08, y: -0.02, color: [1, 1, 1, 1] },
-    { text: "SDF", size: 14, x: 0.58, y: -0.02, color: [1, 1, 1, 1] },
-    { text: "Card A", size: 12, x: -0.75, y: -0.4, color: [0.3, 0.3, 0.4, 1] },
-    { text: "Card B", size: 12, x: -0.2, y: -0.4, color: [0.3, 0.3, 0.4, 1] },
-    { text: "Card C", size: 12, x: 0.35, y: -0.4, color: [0.3, 0.3, 0.4, 1] },
-    { text: "Shapes + Text", size: 18, x: -0.35, y: -0.68, color: [0.5, 0.5, 0.6, 1] },
-    { text: "in one frame", size: 18, x: -0.3, y: -0.78, color: [0.5, 0.5, 0.6, 1] },
+    { text: "snaidhm", size: 40, x: 0.0, y: 0.64, align: "center", color: [1, 1, 1, 1] },
+    { text: "GPU path renderer", size: 14, x: 0.0, y: 0.57, align: "center", color: [0.8, 0.85, 1, 0.9] },
+    { text: "Fill", size: 13, x: -0.5, y: -0.02, align: "center", color: [1, 1, 1, 1] },
+    { text: "Stroke", size: 13, x: 0.0, y: -0.02, align: "center", color: [1, 1, 1, 1] },
+    { text: "SDF", size: 13, x: 0.5, y: -0.02, align: "center", color: [1, 1, 1, 1] },
+    { text: "Card A", size: 11, x: -0.8, y: -0.4, color: [0.3, 0.3, 0.4, 1] },
+    { text: "Card B", size: 11, x: -0.25, y: -0.4, color: [0.3, 0.3, 0.4, 1] },
+    { text: "Card C", size: 11, x: 0.3, y: -0.4, color: [0.3, 0.3, 0.4, 1] },
+    { text: "Shapes + Text", size: 16, x: 0.0, y: -0.68, align: "center", color: [0.5, 0.5, 0.6, 1] },
+    { text: "in one frame", size: 16, x: 0.0, y: -0.78, align: "center", color: [0.5, 0.5, 0.6, 1] },
   ];
 
   const vertices = [], indices = [];
   for (const line of lines) {
-    let cursorX = line.x;
     const scale = line.size * 2 / HEIGHT / font.unitsPerEm;
+    const textWidth = measureText(line.text, line.size, font, atlas);
+    let cursorX = line.x;
+    if (line.align === "center") cursorX -= textWidth / 2;
+    else if (line.align === "right") cursorX -= textWidth;
     for (const ch of line.text) {
       const glyph = atlas.glyphs.get(ch);
       if (!glyph || glyph.atlasW === 0) {
