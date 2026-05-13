@@ -243,8 +243,116 @@ fn vs_main(@uniform mvp: Mat4, @location(0) pos: Vec3) -> VertexOutput = { ... }
 // ... with mvp field, auto-numbered
 ```
 
-### 1. Module-level vs param-only → TBD (leaning param-only for Phase 0.3)
-### 2. Vec/Mat types → TBD (leaning lenient checking)
+### 1. Uniform declaration model → PARAM-ONLY
+
+Uniforms appear as function parameters with `@uniform` annotation:
+
+```almide
+@gpu(vertex)
+fn vs_main(
+  @uniform mvp: Mat4,
+  @location(0) position: Vec3,
+  @location(1) color: Vec3,
+) -> VertexOutput = { ... }
+```
+
+The compiler:
+1. Separates `@uniform` params from vertex input params
+2. Generates a wrapper struct (e.g. `__Uniforms_vs_main`)
+3. Emits `@group(0) @binding(N) var<uniform>` at module level in WGSL
+4. Rewrites references to the param as `__uniforms.mvp` in the function body
+
+**Why param-only**: zero new syntax. A function declares everything it
+needs as parameters — the annotation tells the compiler where the data
+comes from (uniform buffer vs vertex buffer vs compute storage). This
+is the purest expression of "declare intent, compiler decides strategy."
+
+**When to add module-level**: when multiple @gpu functions share the
+same uniform (e.g. vs + fs both read camera matrix). Param-only forces
+duplication; module-level enables sharing. This is a Phase 1+ concern.
+
+### 2. Vec/Mat types → LENIENT CHECKING FOR @GPU FUNCTIONS
+
+The type checker accepts unknown `Named` types inside `@gpu` functions
+without error. The WGSL emitter maps well-known names:
+
+| Almide | WGSL |
+|--------|------|
+| Vec2 | vec2<f32> |
+| Vec3 | vec3<f32> |
+| Vec4 | vec4<f32> |
+| Mat3 | mat3x3<f32> |
+| Mat4 | mat4x4<f32> |
+
+Unknown types in @gpu functions are emitted as-is (user-defined structs).
+
+**Why lenient**: lumen integration is the right long-term answer, but
+requires the Almide package resolver to work at type-check time. Lenient
+checking lets us ship Phase 0.3 now. When lumen is wired in, the lenient
+path becomes a fallback for types lumen doesn't define.
+
+**Implementation**: add a flag to the checker context when inside a @gpu
+function. When resolving a Named type fails, check the flag — if set,
+emit a warning instead of an error and create a `Ty::Named(name, [])`.
+
+### Summary: What cube's main.almd will look like
+
+```almide
+type VertexOutput = {
+  @builtin(position) pos: Vec4,
+  @location(0) color: Vec3,
+}
+
+@gpu(vertex)
+fn vs_main(
+  @uniform mvp: Mat4,
+  @location(0) position: Vec3,
+  @location(1) color: Vec3,
+) -> VertexOutput = {
+  VertexOutput {
+    pos: mvp * Vec4.from(position, 1.0),
+    color: color,
+  }
+}
+
+@gpu(fragment)
+@location(0)
+fn fs_main(@location(0) color: Vec3) -> Vec4 = {
+  Vec4.from(color, 1.0)
+}
+```
+
+### Expected WGSL output
+
+```wgsl
+struct VertexOutput {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) color: vec3<f32>,
+}
+
+struct __Uniforms_vs_main {
+  mvp: mat4x4<f32>,
+}
+
+@group(0) @binding(0)
+var<uniform> __uniforms_0: __Uniforms_vs_main;
+
+@vertex
+fn vs_main(
+  @location(0) position: vec3<f32>,
+  @location(1) color: vec3<f32>,
+) -> VertexOutput {
+  var output: VertexOutput;
+  output.pos = __uniforms_0.mvp * vec4<f32>(position, 1.0);
+  output.color = color;
+  return output;
+}
+
+@fragment
+fn fs_main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
+  return vec4<f32>(color, 1.0);
+}
+```
 
 ## Next Steps
 
