@@ -13,73 +13,12 @@ let _device, _context, _format, _wasmMemory;
 // Buffers tracked for auto-binding
 let _lastBuffers = [];
 
-const COMPUTE_SHADER = `
-@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
-@group(0) @binding(1) var<uniform> params: vec2<u32>;
+// Streaming data builder
+let _dataChunks = [];
+let _dataIsF32 = [];
 
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let w = params.x;
-  let h = params.y;
-  if (gid.x >= w || gid.y >= h) { return; }
-  let u = f32(gid.x) / f32(w);
-  let v = f32(gid.y) / f32(h);
-
-  // Gradient with circle
-  let dx = u - 0.5;
-  let dy = v - 0.5;
-  let d = sqrt(dx*dx + dy*dy);
-  let ring = smoothstep(0.28, 0.3, d) - smoothstep(0.3, 0.32, d);
-
-  let r = u32(clamp((0.15 + u * 0.4 + ring * 0.6) * 255.0, 0.0, 255.0));
-  let g = u32(clamp((0.1 + v * 0.3 + ring * 0.8) * 255.0, 0.0, 255.0));
-  let b = u32(clamp((0.3 + (1.0-v) * 0.5 + ring * 0.5) * 255.0, 0.0, 255.0));
-  pixels[gid.y * w + gid.x] = r | (g << 8u) | (b << 16u) | (255u << 24u);
-}
-`;
-
-const QUAD_SHADER = `
-struct Params { width: u32, height: u32 }
-
-struct VSOut {
-  @builtin(position) pos: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-}
-
-@vertex
-fn vs(@builtin(vertex_index) i: u32) -> VSOut {
-  var p = array<vec2<f32>, 6>(
-    vec2(-1.0,-1.0), vec2(1.0,-1.0), vec2(-1.0,1.0),
-    vec2(-1.0,1.0),  vec2(1.0,-1.0), vec2(1.0,1.0),
-  );
-  var uv = array<vec2<f32>, 6>(
-    vec2(0.0,1.0), vec2(1.0,1.0), vec2(0.0,0.0),
-    vec2(0.0,0.0), vec2(1.0,1.0), vec2(1.0,0.0),
-  );
-  var out: VSOut;
-  out.pos = vec4<f32>(p[i], 0.0, 1.0);
-  out.uv = uv[i];
-  return out;
-}
-
-@group(0) @binding(0) var<storage, read> pixels: array<u32>;
-@group(0) @binding(1) var<uniform> params: Params;
-
-@fragment
-fn fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-  let px = u32(uv.x * f32(params.width));
-  let py = u32(uv.y * f32(params.height));
-  let c = pixels[py * params.width + px];
-  return vec4<f32>(
-    f32(c & 0xFFu) / 255.0,
-    f32((c >> 8u) & 0xFFu) / 255.0,
-    f32((c >> 16u) & 0xFFu) / 255.0,
-    1.0
-  );
-}
-`;
-
-const SHADERS = [COMPUTE_SHADER, QUAD_SHADER];
+// Shaders loaded from files at init
+let SHADERS = [];
 
 export function createImports(canvas) {
   return { gpu: {
@@ -97,13 +36,11 @@ export function createImports(canvas) {
     },
 
     create_buffer(deviceId, size, usage) {
-      const buf = g(deviceId).createBuffer({ size: N(size), usage: N(usage) });
+      const sz = N(size), us = N(usage);
+      console.log(`create_buffer: size=${sz} usage=0x${us.toString(16)}`);
+      const buf = g(deviceId).createBuffer({ size: sz, usage: us });
       const id = h(buf);
       _lastBuffers.push(id);
-      // Auto-upload params for uniform buffers (width, height)
-      if (N(usage) & 0x0040) { // UNIFORM
-        g(deviceId).queue.writeBuffer(buf, 0, new Uint32Array([512, 512]));
-      }
       return B(id);
     },
 
@@ -115,15 +52,15 @@ export function createImports(canvas) {
     create_compute_pipeline(deviceId, shaderId, entryId) {
       return B(h(g(deviceId).createComputePipeline({
         layout: "auto",
-        compute: { module: g(shaderId), entryPoint: "main" },
+        compute: { module: g(shaderId), entryPoint: "fine" },
       })));
     },
 
     create_render_pipeline(deviceId, shaderId, _vp, _vl, _fp, _fl, _fmt) {
       return B(h(g(deviceId).createRenderPipeline({
         layout: "auto",
-        vertex: { module: g(shaderId), entryPoint: "vs" },
-        fragment: { module: g(shaderId), entryPoint: "fs", targets: [{ format: _format }] },
+        vertex: { module: g(shaderId), entryPoint: "vs_fullscreen" },
+        fragment: { module: g(shaderId), entryPoint: "fs_fullscreen", targets: [{ format: _format }] },
         primitive: { topology: "triangle-list" },
       })));
     },
@@ -165,6 +102,22 @@ export function createImports(canvas) {
       g(deviceId).queue.submit([g(encoderId).finish()]);
     },
 
+    // Streaming data builder
+    begin_data() { _dataChunks = []; _dataIsF32 = []; },
+    push_f32(v) { _dataChunks.push(v); _dataIsF32.push(true); },
+    push_u32(v) { _dataChunks.push(N(v)); _dataIsF32.push(false); },
+    flush_to_buffer(deviceId, bufferId) {
+      const buf = new ArrayBuffer(_dataChunks.length * 4);
+      const f32 = new Float32Array(buf);
+      const u32 = new Uint32Array(buf);
+      for (let i = 0; i < _dataChunks.length; i++) {
+        if (_dataIsF32[i]) f32[i] = _dataChunks[i];
+        else u32[i] = _dataChunks[i];
+      }
+      g(deviceId).queue.writeBuffer(g(bufferId), 0, new Uint8Array(buf));
+      _dataChunks = []; _dataIsF32 = [];
+    },
+
     log_int(v) { console.log("[gpu]", N(v)); },
     log_str(ptr, len) {
       console.log("[gpu]", new TextDecoder().decode(
@@ -179,6 +132,10 @@ export async function init(wasmUrl, canvas) {
   _device = await adapter.requestDevice();
   _format = navigator.gpu.getPreferredCanvasFormat();
 
+  // Load shader (single file has both compute + render entry points)
+  const shaderCode = await fetch("./raster.wgsl").then(r => r.text());
+  SHADERS = [shaderCode, shaderCode];
+
   const wasi = new Proxy({}, { get(_, n) {
     if (n === "proc_exit") return () => {};
     if (n === "fd_prestat_get") return () => 8;
@@ -192,7 +149,11 @@ export async function init(wasmUrl, canvas) {
 
   if (instance.exports._start) try { instance.exports._start(); } catch (_) {}
   if (instance.exports.render) {
-    instance.exports.render(B(h(_device)));
-    console.log("snaidhm: Almide compute + render complete");
+    try {
+      instance.exports.render(B(h(_device)));
+      console.log("snaidhm: Almide path rasterizer complete");
+    } catch (e) {
+      console.error("render error:", e);
+    }
   }
 }

@@ -89,6 +89,20 @@ fn begin_compute_pass(encoder: Int) -> Int = _
 @extern(wasm, "gpu", "dispatch_workgroups")
 fn dispatch_workgroups(pass: Int, x: Int, y: Int, z: Int) -> Unit = _
 
+// ── Buffer data streaming (no raw pointers needed) ──
+
+@extern(wasm, "gpu", "begin_data")
+fn begin_data() -> Unit = _
+
+@extern(wasm, "gpu", "push_f32")
+fn push_f32(value: Float) -> Unit = _
+
+@extern(wasm, "gpu", "push_u32")
+fn push_u32(value: Int) -> Unit = _
+
+@extern(wasm, "gpu", "flush_to_buffer")
+fn flush_to_buffer(device: Int, buffer: Int) -> Unit = _
+
 // ── Debug ──
 
 @extern(wasm, "gpu", "log_int")
