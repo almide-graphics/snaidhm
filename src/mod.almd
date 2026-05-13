@@ -167,9 +167,14 @@ fn render_scene(
   }
   let seg_count = list.len(segments)
 
-  // ── Tile assignment ──
+  // ── Tile assignment (all columns left of max_x) ──
+  // Correct for non-zero winding fill. Backdrop optimization deferred to DDA pass.
   var tile_counts: List[Int] = list.repeat(0, num_tiles)
   var tile_seg_ids: List[Int] = list.repeat(0, num_tiles * MAX_SEGS)
+
+  let w_f = int.to_float(WIDTH)
+  let h_f = int.to_float(HEIGHT)
+  let tile_f = int.to_float(TILE)
 
   for si in 0..seg_count {
     let seg = segments[si]
@@ -177,9 +182,9 @@ fn render_scene(
     let max_x = float.max(seg.p0.x, seg.p1.x)
     let min_y = float.min(seg.p0.y, seg.p1.y)
     let max_y = float.max(seg.p0.y, seg.p1.y)
-    let t_max_x = int.min(tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * int.to_float(WIDTH) / int.to_float(TILE))))
-    let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * int.to_float(HEIGHT) / int.to_float(TILE))))
-    let t_max_y = int.min(tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * int.to_float(HEIGHT) / int.to_float(TILE))))
+    let t_max_x = int.min(tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * w_f / tile_f)))
+    let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)))
+    let t_max_y = int.min(tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)))
     for ty in t_min_y..=t_max_y {
       for tx in 0..=t_max_x {
         let tid = ty * tiles_x + tx
