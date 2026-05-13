@@ -1,0 +1,60 @@
+// Phase 0.5: 10K Particles — Almide source that compiles to WGSL
+//
+// Compile: almide main.almd --target wgsl
+
+type Particle = {
+  pos: Vec2,
+  vel: Vec2,
+  life: Float,
+}
+
+type SimParams = {
+  dt: Float,
+  count: UInt32,
+  seed: Float,
+}
+
+@gpu(compute, workgroup = "256")
+fn simulate(
+  @storage(read) prev: List[Particle],
+  @storage(read_write) next: List[Particle],
+  @uniform params: SimParams,
+  @builtin(global_invocation_id) gid: Vec3,
+) -> Unit = {
+  let id = gid.x
+  let p = prev[id]
+  let gravity = Vec2(0.0, -2.0)
+
+  let new_vel = p.vel + gravity * params.dt
+  let new_pos = p.pos + new_vel * params.dt
+  let new_life = p.life - params.dt
+
+  next[id] = Particle {
+    pos: new_pos,
+    vel: new_vel,
+    life: new_life,
+  }
+}
+
+type VertexOutput = {
+  @builtin(position) pos: Vec4,
+  @location(0) alpha: Float,
+}
+
+@gpu(vertex)
+fn vs_render(
+  @storage(read) particles: List[Particle],
+  @builtin(vertex_index) idx: UInt32,
+) -> VertexOutput = {
+  let p = particles[idx]
+  VertexOutput {
+    pos: Vec4(p.pos, 0.0, 1.0),
+    alpha: p.life / 3.0,
+  }
+}
+
+@gpu(fragment)
+@location(0)
+fn fs_render(@location(0) alpha: Float) -> Vec4 = {
+  Vec4(0.3, 0.7, 1.0, alpha)
+}
