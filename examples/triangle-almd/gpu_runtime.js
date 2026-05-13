@@ -16,6 +16,7 @@ let _lastBuffers = [];
 // Streaming data builder
 let _dataChunks = [];
 let _dataIsF32 = [];
+let _bindingEntries = [];
 
 // Shaders loaded from files at init
 let SHADERS = [];
@@ -65,15 +66,13 @@ export function createImports(canvas) {
       })));
     },
 
-    create_bind_group(deviceId, pipelineId, groupIdx, _ptr, count) {
-      const pipeline = g(pipelineId);
-      const layout = pipeline.getBindGroupLayout(N(groupIdx));
-      const entries = [];
-      // Auto-bind: use the last N created buffers
-      const bufs = _lastBuffers.slice(-N(count));
-      for (let i = 0; i < bufs.length; i++) {
-        entries.push({ binding: i, resource: { buffer: g(bufs[i]) } });
-      }
+    // Explicit bind group API
+    begin_bindings() { _bindingEntries = []; },
+    add_buffer_binding(bufferId) { _bindingEntries.push(g(bufferId)); },
+    create_bound_group(deviceId, pipelineId, groupIdx) {
+      const layout = g(pipelineId).getBindGroupLayout(N(groupIdx));
+      const entries = _bindingEntries.map((buf, i) => ({ binding: i, resource: { buffer: buf } }));
+      _bindingEntries = [];
       return B(h(g(deviceId).createBindGroup({ layout, entries })));
     },
 

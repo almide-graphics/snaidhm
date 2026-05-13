@@ -1,7 +1,6 @@
-// snaidhm — Path rasterizer in Almide
+// snaidhm — Full UI renderer in Almide
 //
-// Full pipeline: shapes → flatten beziers → tile assign → compute raster → display
-// All orchestrated from Almide via WASM → WebGPU.
+// Shapes + shadows + gradients, all from Almide → WASM → WebGPU.
 
 import self.web.gpu as gpu
 import math
@@ -16,6 +15,8 @@ let MAX_SEGS = 64
 type Vec2 = { x: Float, y: Float }
 type Cubic = { a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], path_id: Int }
 type Seg = { p0: Vec2, p1: Vec2, color: List[Float], path_id: Int }
+type Shadow = { cx: Float, cy: Float, hw: Float, hh: Float, cr: Float, ox: Float, oy: Float, blur: Float, color: List[Float] }
+type Paint = { kind: Int, c0: List[Float], c1: List[Float], params: List[Float] }
 
 // ── Bezier math ──
 
@@ -23,34 +24,18 @@ fn cubic_eval(a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) -> Vec2 = {
   let u = 1.0 - t
   let uu = u * u
   let tt = t * t
-  {
-    x: uu * u * a.x + 3.0 * uu * t * b.x + 3.0 * u * tt * c.x + tt * t * d.x,
-    y: uu * u * a.y + 3.0 * uu * t * b.y + 3.0 * u * tt * c.y + tt * t * d.y,
-  }
+  { x: uu*u*a.x + 3.0*uu*t*b.x + 3.0*u*tt*c.x + tt*t*d.x,
+    y: uu*u*a.y + 3.0*uu*t*b.y + 3.0*u*tt*c.y + tt*t*d.y }
 }
 
 fn wang_n(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Int = {
-  let d1x = c.x - 2.0 * b.x + a.x
-  let d1y = c.y - 2.0 * b.y + a.y
-  let d2x = d.x - 2.0 * c.x + b.x
-  let d2y = d.y - 2.0 * c.y + b.y
-  let dd = float.max(math.sqrt(d1x * d1x + d1y * d1y), math.sqrt(d2x * d2x + d2y * d2y))
+  let d1x = c.x - 2.0*b.x + a.x
+  let d1y = c.y - 2.0*b.y + a.y
+  let d2x = d.x - 2.0*c.x + b.x
+  let d2y = d.y - 2.0*c.y + b.y
+  let dd = float.max(math.sqrt(d1x*d1x + d1y*d1y), math.sqrt(d2x*d2x + d2y*d2y))
   let tol = 0.5 / int.to_float(WIDTH)
-  let n = float.ceil(math.sqrt(3.0 * dd / (4.0 * tol)))
-  int.max(1, int.min(256, float.to_int(n)))
-}
-
-// ── Shape builders ──
-
-fn circle_cubics(cx: Float, cy: Float, r: Float, color: List[Float], pid: Int) -> List[Cubic] = {
-  let k = 0.5522847498 * r
-  let c = color
-  [
-    { a: { x: cx, y: cy + r }, b: { x: cx + k, y: cy + r }, c: { x: cx + r, y: cy + k }, d: { x: cx + r, y: cy }, color: c, path_id: pid },
-    { a: { x: cx + r, y: cy }, b: { x: cx + r, y: cy - k }, c: { x: cx + k, y: cy - r }, d: { x: cx, y: cy - r }, color: c, path_id: pid },
-    { a: { x: cx, y: cy - r }, b: { x: cx - k, y: cy - r }, c: { x: cx - r, y: cy - k }, d: { x: cx - r, y: cy }, color: c, path_id: pid },
-    { a: { x: cx - r, y: cy }, b: { x: cx - r, y: cy + k }, c: { x: cx - k, y: cy + r }, d: { x: cx, y: cy + r }, color: c, path_id: pid },
-  ]
+  int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
 }
 
 fn flatten_cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], pid: Int) -> List[Seg] = {
@@ -63,39 +48,151 @@ fn flatten_cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], pid: In
   })
 }
 
-// ── Upload + render ──
+// ── Shape builders ──
+
+fn circle_cubics(cx: Float, cy: Float, r: Float, c: List[Float], pid: Int) -> List[Cubic] = {
+  let k = 0.5522847498 * r
+  [
+    { a: {x:cx,y:cy+r}, b: {x:cx+k,y:cy+r}, c: {x:cx+r,y:cy+k}, d: {x:cx+r,y:cy}, color:c, path_id:pid },
+    { a: {x:cx+r,y:cy}, b: {x:cx+r,y:cy-k}, c: {x:cx+k,y:cy-r}, d: {x:cx,y:cy-r}, color:c, path_id:pid },
+    { a: {x:cx,y:cy-r}, b: {x:cx-k,y:cy-r}, c: {x:cx-r,y:cy-k}, d: {x:cx-r,y:cy}, color:c, path_id:pid },
+    { a: {x:cx-r,y:cy}, b: {x:cx-r,y:cy+k}, c: {x:cx-k,y:cy+r}, d: {x:cx,y:cy+r}, color:c, path_id:pid },
+  ]
+}
+
+fn round_rect_cubics(x: Float, y: Float, w: Float, h: Float, r: Float, c: List[Float], pid: Int) -> List[Cubic] = {
+  let k = 0.5522847498 * r
+  [
+    { a: {x:x+r,y:y+h}, b: {x:x+r,y:y+h}, c: {x:x+w-r,y:y+h}, d: {x:x+w-r,y:y+h}, color:c, path_id:pid },
+    { a: {x:x+w-r,y:y+h}, b: {x:x+w-r+k,y:y+h}, c: {x:x+w,y:y+h-r+k}, d: {x:x+w,y:y+h-r}, color:c, path_id:pid },
+    { a: {x:x+w,y:y+h-r}, b: {x:x+w,y:y+h-r}, c: {x:x+w,y:y+r}, d: {x:x+w,y:y+r}, color:c, path_id:pid },
+    { a: {x:x+w,y:y+r}, b: {x:x+w,y:y+r-k}, c: {x:x+w-r+k,y:y}, d: {x:x+w-r,y:y}, color:c, path_id:pid },
+    { a: {x:x+w-r,y:y}, b: {x:x+w-r,y:y}, c: {x:x+r,y:y}, d: {x:x+r,y:y}, color:c, path_id:pid },
+    { a: {x:x+r,y:y}, b: {x:x+r-k,y:y}, c: {x:x,y:y+r-k}, d: {x:x,y:y+r}, color:c, path_id:pid },
+    { a: {x:x,y:y+r}, b: {x:x,y:y+r}, c: {x:x,y:y+h-r}, d: {x:x,y:y+h-r}, color:c, path_id:pid },
+    { a: {x:x,y:y+h-r}, b: {x:x,y:y+h-r+k}, c: {x:x+r-k,y:y+h}, d: {x:x+r,y:y+h}, color:c, path_id:pid },
+  ]
+}
+
+// ── Paint constructors ──
+
+fn solid(r: Float, g: Float, b: Float, a: Float) -> Paint =
+  { kind: 0, c0: [r,g,b,a], c1: [0.0,0.0,0.0,0.0], params: [0.0,0.0,0.0,0.0] }
+
+fn linear_grad(c0: List[Float], c1: List[Float], sx: Float, sy: Float, ex: Float, ey: Float) -> Paint =
+  { kind: 1, c0: c0, c1: c1, params: [sx, sy, ex, ey] }
+
+fn radial_grad(c0: List[Float], c1: List[Float], cx: Float, cy: Float, radius: Float) -> Paint =
+  { kind: 2, c0: c0, c1: c1, params: [cx, cy, radius, 0.0] }
+
+// ── Shadow constructors ──
+
+fn rect_shadow(x: Float, y: Float, w: Float, h: Float, r: Float, ox: Float, oy: Float, blur: Float, col: List[Float]) -> Shadow =
+  { cx: x+w/2.0, cy: y+h/2.0, hw: w/2.0, hh: h/2.0, cr: r, ox: ox, oy: oy, blur: blur, color: col }
+
+fn circ_shadow(cx: Float, cy: Float, rad: Float, ox: Float, oy: Float, blur: Float, col: List[Float]) -> Shadow =
+  { cx: cx, cy: cy, hw: rad, hh: rad, cr: rad, ox: ox, oy: oy, blur: blur, color: col }
+
+// ── Upload helpers ──
+
+fn upload_shadows(device: Int, shadows: List[Shadow]) -> Int = {
+  let buf = gpu.create_buffer(device, list.len(shadows) * 48, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  gpu.begin_data()
+  for s in shadows {
+    gpu.push_f32(s.cx)
+    gpu.push_f32(s.cy)
+    gpu.push_f32(s.hw)
+    gpu.push_f32(s.hh)
+    gpu.push_f32(s.cr)
+    gpu.push_f32(s.ox)
+    gpu.push_f32(s.oy)
+    gpu.push_f32(s.blur)
+    gpu.push_f32(s.color[0])
+    gpu.push_f32(s.color[1])
+    gpu.push_f32(s.color[2])
+    gpu.push_f32(s.color[3])
+  }
+  gpu.flush_to_buffer(device, buf)
+  buf
+}
+
+fn upload_paints(device: Int, paints: List[Paint]) -> Int = {
+  let buf = gpu.create_buffer(device, list.len(paints) * 64, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  gpu.begin_data()
+  for p in paints {
+    gpu.push_u32(p.kind)
+    gpu.push_u32(0)
+    gpu.push_u32(0)
+    gpu.push_u32(0)
+    gpu.push_f32(p.c0[0])
+    gpu.push_f32(p.c0[1])
+    gpu.push_f32(p.c0[2])
+    gpu.push_f32(p.c0[3])
+    gpu.push_f32(p.c1[0])
+    gpu.push_f32(p.c1[1])
+    gpu.push_f32(p.c1[2])
+    gpu.push_f32(p.c1[3])
+    gpu.push_f32(p.params[0])
+    gpu.push_f32(p.params[1])
+    gpu.push_f32(p.params[2])
+    gpu.push_f32(p.params[3])
+  }
+  gpu.flush_to_buffer(device, buf)
+  buf
+}
+
+// ── Main render ──
 
 @export(wasm, "render")
 fn render(device: Int) -> Unit = {
   let format = gpu.get_preferred_format()
   let _ctx = gpu.configure_canvas(device, format)
-
-  // Compute tile grid constants inside function (module-level const folding
-  // doesn't work reliably for derived values in WASM target)
   let tiles_x = WIDTH / TILE
   let tiles_y = HEIGHT / TILE
   let num_tiles = tiles_x * tiles_y
 
-  // Build scene: 3 circles
-  let white = [1.0, 1.0, 1.0, 1.0]
-  let red = [1.0, 0.4, 0.35, 0.9]
-  let green = [0.3, 0.85, 0.45, 0.9]
-  let blue = [0.35, 0.55, 1.0, 0.9]
+  let dummy_color = [0.5, 0.5, 0.5, 1.0]
 
-  let all_cubics = circle_cubics(0.0, 0.0, 0.85, white, 0)
-    + circle_cubics(-0.4, 0.0, 0.22, red, 1)
-    + circle_cubics(0.0, 0.0, 0.22, green, 2)
-    + circle_cubics(0.4, 0.0, 0.22, blue, 3)
+  // ── Scene definition (matches JS combined demo) ──
+  let all_cubics =
+    round_rect_cubics(-0.9, -0.9, 1.8, 1.8, 0.08, dummy_color, 0)             // bg card
+    + round_rect_cubics(-0.85, 0.55, 1.7, 0.3, 0.04, dummy_color, 1)          // header
+    + circle_cubics(-0.5, 0.0, 0.18, dummy_color, 2)                           // red circle
+    + circle_cubics(0.0, 0.0, 0.18, dummy_color, 3)                            // green circle
+    + circle_cubics(0.5, 0.0, 0.18, dummy_color, 4)                            // blue circle
+    + round_rect_cubics(-0.85, -0.85, 0.5, 0.55, 0.04, dummy_color, 5)        // card A
+    + round_rect_cubics(-0.3, -0.85, 0.5, 0.55, 0.04, dummy_color, 6)         // card B
+    + round_rect_cubics(0.25, -0.85, 0.6, 0.55, 0.04, dummy_color, 7)         // card C
 
-  // Flatten all cubics
+  let shadows = [
+    rect_shadow(-0.9, -0.9, 1.8, 1.8, 0.08, 0.01, -0.02, 0.08, [0.0,0.0,0.0,0.2]),
+    circ_shadow(-0.5, 0.0, 0.18, 0.008, -0.015, 0.04, [0.0,0.0,0.0,0.25]),
+    circ_shadow(0.0, 0.0, 0.18, 0.008, -0.015, 0.04, [0.0,0.0,0.0,0.25]),
+    circ_shadow(0.5, 0.0, 0.18, 0.008, -0.015, 0.04, [0.0,0.0,0.0,0.25]),
+    rect_shadow(-0.85, -0.85, 0.5, 0.55, 0.04, 0.005, -0.01, 0.03, [0.0,0.0,0.0,0.15]),
+    rect_shadow(-0.3, -0.85, 0.5, 0.55, 0.04, 0.005, -0.01, 0.03, [0.0,0.0,0.0,0.15]),
+    rect_shadow(0.25, -0.85, 0.6, 0.55, 0.04, 0.005, -0.01, 0.03, [0.0,0.0,0.0,0.15]),
+  ]
+
+  let paints = [
+    solid(1.0, 1.0, 1.0, 1.0),
+    linear_grad([0.12,0.22,0.58,1.0], [0.28,0.48,0.88,1.0], -0.85, 0.85, -0.85, 0.55),
+    radial_grad([1.0,0.55,0.5,0.9], [0.82,0.18,0.12,0.9], -0.5, 0.0, 0.18),
+    radial_grad([0.45,0.92,0.55,0.9], [0.12,0.62,0.22,0.9], 0.0, 0.0, 0.18),
+    radial_grad([0.5,0.7,1.0,0.9], [0.15,0.35,0.82,0.9], 0.5, 0.0, 0.18),
+    solid(0.95, 0.95, 0.98, 1.0),
+    solid(0.95, 0.95, 0.98, 1.0),
+    solid(0.95, 0.95, 0.98, 1.0),
+  ]
+
+  // ── Flatten ──
   var segments: List[Seg] = []
   for cub in all_cubics {
     segments = segments + flatten_cubic(cub.a, cub.b, cub.c, cub.d, cub.color, cub.path_id)
   }
-
   let seg_count = list.len(segments)
 
-  // Tile assignment
+  // ── Tile assignment ──
   var tile_counts: List[Int] = list.repeat(0, num_tiles)
   var tile_seg_ids: List[Int] = list.repeat(0, num_tiles * MAX_SEGS)
 
@@ -119,7 +216,7 @@ fn render(device: Int) -> Unit = {
     }
   }
 
-  // Upload segments buffer: 12 floats per segment (48 bytes)
+  // ── Upload buffers ──
   let seg_buf = gpu.create_buffer(device, seg_count * 48, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
   for seg in segments {
@@ -138,20 +235,18 @@ fn render(device: Int) -> Unit = {
   }
   gpu.flush_to_buffer(device, seg_buf)
 
-  // Upload tile counts
   let tc_buf = gpu.create_buffer(device, num_tiles * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
   for c in tile_counts { gpu.push_u32(c) }
   gpu.flush_to_buffer(device, tc_buf)
 
-  // Upload tile segment IDs
   let ts_buf = gpu.create_buffer(device, num_tiles * MAX_SEGS * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
   for id in tile_seg_ids { gpu.push_u32(id) }
   gpu.flush_to_buffer(device, ts_buf)
 
-  // Pixel buffer + params
   let pixel_buf = gpu.create_buffer(device, WIDTH * HEIGHT * 4, gpu.STORAGE)
+
   let params_buf = gpu.create_buffer(device, 32, int.bor(gpu.UNIFORM, gpu.COPY_DST))
   gpu.begin_data()
   gpu.push_u32(WIDTH)
@@ -159,22 +254,36 @@ fn render(device: Int) -> Unit = {
   gpu.push_u32(seg_count)
   gpu.push_u32(tiles_x)
   gpu.push_u32(tiles_y)
-  gpu.push_u32(0)
+  gpu.push_u32(list.len(shadows))
   gpu.push_u32(0)
   gpu.push_u32(0)
   gpu.flush_to_buffer(device, params_buf)
 
-  // Pipelines
+  let shadow_buf = upload_shadows(device, shadows)
+  let paint_buf = upload_paints(device, paints)
+
+  // ── Pipelines + bind groups ──
   let compute_shader = gpu.create_shader(device, 0, 0)
   let quad_shader = gpu.create_shader(device, 1, 0)
 
   let compute_pipeline = gpu.create_compute_pipeline(device, compute_shader, 0)
-  let compute_bg = gpu.create_bind_group(device, compute_pipeline, 0, 0, 5)
+  gpu.begin_bindings()
+  gpu.add_buffer_binding(seg_buf)
+  gpu.add_buffer_binding(tc_buf)
+  gpu.add_buffer_binding(ts_buf)
+  gpu.add_buffer_binding(pixel_buf)
+  gpu.add_buffer_binding(params_buf)
+  gpu.add_buffer_binding(shadow_buf)
+  gpu.add_buffer_binding(paint_buf)
+  let compute_bg = gpu.create_bound_group(device, compute_pipeline, 0)
 
   let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
-  let quad_bg = gpu.create_bind_group(device, quad_pipeline, 0, 0, 2)
+  gpu.begin_bindings()
+  gpu.add_buffer_binding(pixel_buf)
+  gpu.add_buffer_binding(params_buf)
+  let quad_bg = gpu.create_bound_group(device, quad_pipeline, 0)
 
-  // Render
+  // ── Render ──
   let encoder = gpu.begin_encoder(device)
 
   let cp = gpu.begin_compute_pass(encoder)
@@ -190,6 +299,5 @@ fn render(device: Int) -> Unit = {
   gpu.end_pass(rp)
 
   gpu.finish_and_submit(device, encoder)
-
   gpu.log_int(seg_count)
 }
