@@ -36,22 +36,7 @@ async function main() {
   console.timeEnd("SDF atlas");
   console.log(`Atlas: ${atlas.atlasWidth}×${atlas.atlasHeight}, ${atlas.glyphs.size} glyphs`);
 
-  // Debug: render atlas to a visible canvas
-  const debugCanvas = document.createElement("canvas");
-  debugCanvas.width = atlas.atlasWidth;
-  debugCanvas.height = atlas.atlasHeight;
-  debugCanvas.style.cssText = "position:fixed;top:0;left:0;border:1px solid red;background:#000;image-rendering:pixelated;max-width:100vw;";
-  document.body.appendChild(debugCanvas);
-  const dctx = debugCanvas.getContext("2d");
-  const imgData = dctx.createImageData(atlas.atlasWidth, atlas.atlasHeight);
-  for (let i = 0; i < atlas.atlasData.length; i++) {
-    const v = atlas.atlasData[i];
-    imgData.data[i * 4] = v;
-    imgData.data[i * 4 + 1] = v;
-    imgData.data[i * 4 + 2] = v;
-    imgData.data[i * 4 + 3] = 255;
-  }
-  dctx.putImageData(imgData, 0, 0);
+
 
   // Build text quads
   const lines = [
@@ -68,7 +53,9 @@ async function main() {
 
   for (const line of lines) {
     let cursorX = line.x;
-    const scale = line.size / font.unitsPerEm;
+    // Convert pixel font size to NDC scale:
+    // unitsPerEm → size pixels → size * 2/HEIGHT NDC units
+    const scale = line.size * 2 / HEIGHT / font.unitsPerEm;
 
     for (const ch of line.text) {
       const glyph = atlas.glyphs.get(ch);
@@ -84,20 +71,21 @@ async function main() {
       const x1 = cursorX + (glyph.bounds.xMax + pad) * scale;
       const y1 = line.y + (glyph.bounds.yMax + pad) * scale;
 
-      // Atlas UVs
+      // Atlas UVs (WebGPU: UV origin = top-left, V down)
       const u0 = glyph.atlasX / atlas.atlasWidth;
-      const v0 = (glyph.atlasY + glyph.atlasH) / atlas.atlasHeight; // flip V
+      const v0 = glyph.atlasY / atlas.atlasHeight;
       const u1 = (glyph.atlasX + glyph.atlasW) / atlas.atlasWidth;
-      const v1 = glyph.atlasY / atlas.atlasHeight;
+      const v1 = (glyph.atlasY + glyph.atlasH) / atlas.atlasHeight;
 
       const c = line.color;
       const vi = vertices.length / 8;
 
       // 4 vertices per quad
-      vertices.push(x0, y0, u0, v0, c[0], c[1], c[2], c[3]); // bottom-left
-      vertices.push(x1, y0, u1, v0, c[0], c[1], c[2], c[3]); // bottom-right
-      vertices.push(x1, y1, u1, v1, c[0], c[1], c[2], c[3]); // top-right
-      vertices.push(x0, y1, u0, v1, c[0], c[1], c[2], c[3]); // top-left
+      // NDC: y0=bottom, y1=top. UV: v0=top of SDF, v1=bottom of SDF
+      vertices.push(x0, y0, u0, v1, c[0], c[1], c[2], c[3]); // bottom-left
+      vertices.push(x1, y0, u1, v1, c[0], c[1], c[2], c[3]); // bottom-right
+      vertices.push(x1, y1, u1, v0, c[0], c[1], c[2], c[3]); // top-right
+      vertices.push(x0, y1, u0, v0, c[0], c[1], c[2], c[3]); // top-left
 
       // 2 triangles
       indices.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
@@ -126,10 +114,20 @@ async function main() {
     format: "r8unorm",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
+  // WebGPU requires bytesPerRow aligned to 256
+  const bytesPerRow = Math.ceil(atlas.atlasWidth / 256) * 256;
+  // Repack data with proper row alignment
+  const alignedData = new Uint8Array(bytesPerRow * atlas.atlasHeight);
+  for (let row = 0; row < atlas.atlasHeight; row++) {
+    alignedData.set(
+      atlas.atlasData.subarray(row * atlas.atlasWidth, row * atlas.atlasWidth + atlas.atlasWidth),
+      row * bytesPerRow,
+    );
+  }
   device.queue.writeTexture(
     { texture },
-    atlas.atlasData,
-    { bytesPerRow: atlas.atlasWidth },
+    alignedData,
+    { bytesPerRow },
     [atlas.atlasWidth, atlas.atlasHeight],
   );
 

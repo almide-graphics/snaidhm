@@ -37,13 +37,15 @@ fn vs_main(
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let dist = textureSample(sdf_texture, sdf_sampler, in.uv).r;
 
+  // Debug: show raw SDF value as grayscale
+  // return vec4<f32>(dist, dist, dist, 1.0);
+
   // SDF: 0.5 = edge (stored as 128/255 ≈ 0.502)
-  // Smoothstep for antialiasing
-  let edge = 0.5;
+  let edge = 0.502;
   // Adaptive smoothing based on screen-space derivatives
   let dx = dpdx(in.uv.x) * params.atlas_width;
   let dy = dpdy(in.uv.y) * params.atlas_height;
-  let spread = 0.5 * length(vec2<f32>(dx, dy));
+  let spread = clamp(0.5 * length(vec2<f32>(dx, dy)), 0.02, 0.5);
   let alpha = smoothstep(edge - spread, edge + spread, dist);
 
   if (alpha < 0.01) { discard; }
