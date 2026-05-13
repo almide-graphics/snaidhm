@@ -92,6 +92,60 @@ function buildShapes() {
   return { beziers, pathCount: pathId };
 }
 
+// ── Scene: shadows (SDF-based analytical soft shadows) ──
+
+function buildShadows() {
+  const shadows = [];
+
+  function addRectShadow(x, y, w, h, r, ox, oy, blur, color) {
+    shadows.push({
+      centerX: x + w / 2, centerY: y + h / 2,
+      halfW: w / 2, halfH: h / 2,
+      cornerRadius: r, offsetX: ox, offsetY: oy, blur, color,
+    });
+  }
+
+  function addCircleShadow(cx, cy, radius, ox, oy, blur, color) {
+    shadows.push({
+      centerX: cx, centerY: cy,
+      halfW: radius, halfH: radius,
+      cornerRadius: radius, offsetX: ox, offsetY: oy, blur, color,
+    });
+  }
+
+  // Main card — large soft shadow
+  addRectShadow(-0.9, -0.9, 1.8, 1.8, 0.08,  0.01, -0.02, 0.08, [0, 0, 0, 0.2]);
+
+  // Circles — medium shadow
+  addCircleShadow(-0.5, 0.0, 0.18,  0.008, -0.015, 0.04, [0, 0, 0, 0.25]);
+  addCircleShadow( 0.0, 0.0, 0.18,  0.008, -0.015, 0.04, [0, 0, 0, 0.25]);
+  addCircleShadow( 0.5, 0.0, 0.18,  0.008, -0.015, 0.04, [0, 0, 0, 0.25]);
+
+  // Bottom cards — subtle shadow
+  addRectShadow(-0.85, -0.85, 0.5, 0.55, 0.04,  0.005, -0.01, 0.03, [0, 0, 0, 0.15]);
+  addRectShadow(-0.3,  -0.85, 0.5, 0.55, 0.04,  0.005, -0.01, 0.03, [0, 0, 0, 0.15]);
+  addRectShadow( 0.25, -0.85, 0.6, 0.55, 0.04,  0.005, -0.01, 0.03, [0, 0, 0, 0.15]);
+
+  // Pack into Float32Array: 12 floats per shadow (48 bytes, vec4-aligned)
+  const data = new Float32Array(shadows.length * 12);
+  for (let i = 0; i < shadows.length; i++) {
+    const s = shadows[i], o = i * 12;
+    data[o + 0] = s.centerX;
+    data[o + 1] = s.centerY;
+    data[o + 2] = s.halfW;
+    data[o + 3] = s.halfH;
+    data[o + 4] = s.cornerRadius;
+    data[o + 5] = s.offsetX;
+    data[o + 6] = s.offsetY;
+    data[o + 7] = s.blur;
+    data[o + 8] = s.color[0];
+    data[o + 9] = s.color[1];
+    data[o + 10] = s.color[2];
+    data[o + 11] = s.color[3];
+  }
+  return { data, count: shadows.length };
+}
+
 // ── Flatten + tile ──
 
 function flattenBeziers(beziers) {
@@ -201,6 +255,7 @@ async function main() {
   const segments = flattenBeziers(beziers);
   const { tileCounts, tileSegIds } = assignTiles(segments);
   const textQuads = buildTextQuads(font, atlas);
+  const shadowScene = buildShadows();
 
   console.log(`Shapes: ${segments.length} segments | Text: ${textQuads.indices.length / 6} glyphs`);
 
@@ -236,7 +291,9 @@ async function main() {
   device.queue.writeBuffer(tileSegBuf, 0, tileSegIds);
   const pixelBuf = device.createBuffer({ size: WIDTH * HEIGHT * 4, usage: GPUBufferUsage.STORAGE });
   const paramsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([WIDTH, HEIGHT, segCount, TILES_X, TILES_Y, 0, 0, 0]));
+  const shadowBuf = device.createBuffer({ size: shadowScene.data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(shadowBuf, 0, shadowScene.data);
+  device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([WIDTH, HEIGHT, segCount, TILES_X, TILES_Y, shadowScene.count, 0, 0]));
 
   // Path compute pipeline
   const pathBGL = device.createBindGroupLayout({ entries: [
@@ -245,6 +302,7 @@ async function main() {
     { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+    { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
   ]});
   const pathPipeline = device.createComputePipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [pathBGL] }),
@@ -256,6 +314,7 @@ async function main() {
     { binding: 2, resource: { buffer: tileSegBuf } },
     { binding: 3, resource: { buffer: pixelBuf } },
     { binding: 4, resource: { buffer: paramsBuf } },
+    { binding: 5, resource: { buffer: shadowBuf } },
   ]});
 
   // Fullscreen quad pipeline (path output)

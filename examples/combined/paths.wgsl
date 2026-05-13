@@ -22,9 +22,20 @@ struct Params {
   seg_count: u32,
   tiles_x: u32,
   tiles_y: u32,
-  _pad0: u32,
+  shadow_count: u32,
   _pad1: u32,
   _pad2: u32,
+}
+
+// SDF shadow: analytical soft shadow via signed distance field
+struct Shadow {
+  center: vec2<f32>,
+  half_size: vec2<f32>,
+  corner_radius: f32,
+  offset_x: f32,
+  offset_y: f32,
+  blur: f32,
+  color: vec4<f32>,
 }
 
 // Fine rasterize: per-tile winding fill
@@ -33,29 +44,41 @@ struct Params {
 @group(0) @binding(2) var<storage, read>       tile_seg_ids: array<u32>;
 @group(0) @binding(3) var<storage, read_write> pixels: array<u32>;
 @group(0) @binding(4) var<uniform>             params: Params;
+@group(0) @binding(5) var<storage, read>       shadows: array<Shadow>;
 
-fn wind_line(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
-  let e = b - a;
-  let w = p - a;
-  if (a.y <= p.y) {
-    if (b.y > p.y) {
-      if (e.x * w.y - e.y * w.x > 0.0) { return 1.0; }
-    }
-  } else {
-    if (b.y <= p.y) {
-      if (e.x * w.y - e.y * w.x < 0.0) { return -1.0; }
-    }
-  }
-  return 0.0;
+// Analytical area coverage (Vello-style)
+// p0, p1 in pixel-local coordinates where pixel occupies [0,1] x [0,1]
+// Returns signed area: sum over closed path = ±1 inside, 0 outside
+fn seg_area(p0: vec2<f32>, p1: vec2<f32>) -> f32 {
+  let y = p0.y;
+  let delta = p1 - p0;
+  let y0 = clamp(y, 0.0, 1.0);
+  let y1 = clamp(y + delta.y, 0.0, 1.0);
+  let dy = y0 - y1;
+  if abs(dy) < 1e-9 { return 0.0; }
+  let inv_dy = 1.0 / delta.y;
+  let t0 = (y0 - y) * inv_dy;
+  let t1 = (y1 - y) * inv_dy;
+  let x0 = p0.x + t0 * delta.x;
+  let x1 = p0.x + t1 * delta.x;
+  // The -1e-6 epsilon on xmin guarantees xmax - xmin > 0 even for
+  // perfectly vertical segments, so no special case is needed.
+  let xmin = min(min(x0, x1), 1.0) - 1e-6;
+  let xmax = max(x0, x1);
+  let b = min(xmax, 1.0);
+  let c = max(b, 0.0);
+  let d = max(xmin, 0.0);
+  let a = (b + 0.5 * (d * d - c * c) - xmin) / (xmax - xmin);
+  // Flip convention: tile assignment uses rightward ray (segments to the RIGHT
+  // of pixel are in tile), but the Vello formula gives a≈1 for segments to the
+  // LEFT. (1-a) makes segments to the RIGHT contribute fully.
+  return (1.0 - a) * dy;
 }
 
-// Signed distance from point to line segment
-fn dist_to_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
-  let ab = b - a;
-  let ap = p - a;
-  let t = clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0);
-  let closest = a + t * ab;
-  return length(p - closest);
+// SDF for rounded rectangle (p relative to center, b = half_size, r = corner radius)
+fn sd_rounded_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+  let q = abs(p) - b + vec2<f32>(r, r);
+  return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0, 0.0))) - r;
 }
 
 fn pack_color(r: f32, g: f32, b: f32, a: f32) -> u32 {
@@ -82,12 +105,25 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
     1.0 - f32(py) / f32(params.height) * 2.0,
   );
 
-  // AA pixel size in NDC
-  let px_size = 2.0 / f32(params.width);
-
   var color = vec3<f32>(0.95, 0.95, 0.97);
-  var winding = 0.0;
-  var min_dist = 1000.0;  // closest segment distance for this path
+
+  // ── Shadows (SDF-based, before path fills) ──
+  for (var si = 0u; si < params.shadow_count; si++) {
+    let shadow = shadows[si];
+    let sp = p - vec2<f32>(shadow.offset_x, shadow.offset_y);
+    let d = sd_rounded_box(sp - shadow.center, shadow.half_size, shadow.corner_radius);
+    let shadow_alpha = (1.0 - smoothstep(-shadow.blur * 0.3, shadow.blur, d)) * shadow.color.a;
+    color = mix(color, shadow.color.rgb, shadow_alpha);
+  }
+
+  // ── Path fills (analytical area coverage) ──
+  // NDC → pixel coordinate scale factors
+  let ndc_to_px = 0.5 * f32(params.width);
+  let ndc_to_py = 0.5 * f32(params.height);
+  let px_f = f32(px);
+  let py_f = f32(py);
+
+  var area = 0.0;
   var current_path = 0xFFFFFFFFu;
   var current_color = vec4<f32>(0.0);
 
@@ -96,31 +132,32 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
     let seg = segments[seg_idx];
 
     if (seg.path_id != current_path) {
-      // Apply previous path with AA
-      if (abs(winding) > 0.01) {
-        // Inside: full coverage. Edge: smooth falloff based on distance.
-        let inside = abs(winding) >= 1.0;
-        let edge_aa = smoothstep(px_size * 1.5, 0.0, min_dist);
-        let coverage = select(edge_aa, 1.0, inside);
+      // Apply previous path: area → coverage
+      let coverage = min(abs(area), 1.0);
+      if coverage > 1e-4 {
         color = mix(color, current_color.rgb, coverage * current_color.a);
       }
-      winding = 0.0;
-      min_dist = 1000.0;
+      area = 0.0;
       current_path = seg.path_id;
       current_color = seg.color;
     }
 
-    winding += wind_line(p, seg.p0, seg.p1);
-    let d = dist_to_segment(p, seg.p0, seg.p1);
-    min_dist = min(min_dist, d);
+    // Convert segment from NDC to pixel-local coordinates
+    let sp0 = vec2<f32>(
+      (seg.p0.x + 1.0) * ndc_to_px - px_f,
+      (1.0 - seg.p0.y) * ndc_to_py - py_f,
+    );
+    let sp1 = vec2<f32>(
+      (seg.p1.x + 1.0) * ndc_to_px - px_f,
+      (1.0 - seg.p1.y) * ndc_to_py - py_f,
+    );
+    area += seg_area(sp0, sp1);
   }
 
-  // Apply last path with AA
-  if (abs(winding) > 0.01) {
-    let inside = abs(winding) >= 1.0;
-    let edge_aa = smoothstep(px_size * 1.5, 0.0, min_dist);
-    let coverage = select(edge_aa, 1.0, inside);
-    color = mix(color, current_color.rgb, coverage * current_color.a);
+  // Apply last path
+  let last_coverage = min(abs(area), 1.0);
+  if last_coverage > 1e-4 {
+    color = mix(color, current_color.rgb, last_coverage * current_color.a);
   }
 
   pixels[py * params.width + px] = pack_color(color.x, color.y, color.z, 1.0);
