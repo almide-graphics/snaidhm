@@ -1,0 +1,366 @@
+// snaidhm — Combined renderer: path fill/stroke + SDF text
+//
+// Pass 1: Compute — tiled winding fill for shapes
+// Pass 2: Render — fullscreen quad (path output) + SDF text quads on top
+//
+// This is the target architecture: shapes via compute path renderer,
+// text via SDF atlas, both in the same frame.
+
+import { TTFFont } from "./ttf.js";
+import { generateSDFAtlas } from "./sdf.js";
+
+const WIDTH = 512;
+const HEIGHT = 512;
+const TILE_SIZE = 16;
+const TILES_X = WIDTH / TILE_SIZE;
+const TILES_Y = HEIGHT / TILE_SIZE;
+const NUM_TILES = TILES_X * TILES_Y;
+const MAX_SEGS_PER_TILE = 512;
+
+// ── Bezier math ──
+
+function cubicEval(p0, p1, p2, p3, t) {
+  const u = 1 - t, uu = u * u, tt = t * t;
+  return [
+    uu * u * p0[0] + 3 * uu * t * p1[0] + 3 * u * tt * p2[0] + tt * t * p3[0],
+    uu * u * p0[1] + 3 * uu * t * p1[1] + 3 * u * tt * p2[1] + tt * t * p3[1],
+  ];
+}
+
+function wangSegments(p0, p1, p2, p3, tol) {
+  const d1 = [p2[0] - 2 * p1[0] + p0[0], p2[1] - 2 * p1[1] + p0[1]];
+  const d2 = [p3[0] - 2 * p2[0] + p1[0], p3[1] - 2 * p2[1] + p1[1]];
+  const dd = Math.max(Math.hypot(d1[0], d1[1]), Math.hypot(d2[0], d2[1]));
+  return Math.max(1, Math.min(256, Math.ceil(Math.sqrt(3 * dd / (4 * tol)))));
+}
+
+// ── Scene: shapes ──
+
+function buildShapes() {
+  const beziers = [];
+  let pathId = 0;
+
+  function addCubic(p0, p1, p2, p3, color) {
+    beziers.push({ p0, p1, p2, p3, color, pathId });
+  }
+  function closePath() { pathId++; }
+
+  function circle(cx, cy, r, color) {
+    const k = 0.5522847498 * r;
+    addCubic([cx, cy+r], [cx+k, cy+r], [cx+r, cy+k], [cx+r, cy], color);
+    addCubic([cx+r, cy], [cx+r, cy-k], [cx+k, cy-r], [cx, cy-r], color);
+    addCubic([cx, cy-r], [cx-k, cy-r], [cx-r, cy-k], [cx-r, cy], color);
+    addCubic([cx-r, cy], [cx-r, cy+k], [cx-k, cy+r], [cx, cy+r], color);
+    closePath();
+  }
+
+  function roundRect(x, y, w, h, r, color) {
+    const k = 0.5522847498 * r;
+    addCubic([x+r, y+h], [x+r, y+h], [x+w-r, y+h], [x+w-r, y+h], color);
+    addCubic([x+w-r, y+h], [x+w-r+k, y+h], [x+w, y+h-r+k], [x+w, y+h-r], color);
+    addCubic([x+w, y+h-r], [x+w, y+h-r], [x+w, y+r], [x+w, y+r], color);
+    addCubic([x+w, y+r], [x+w, y+r-k], [x+w-r+k, y], [x+w-r, y], color);
+    addCubic([x+w-r, y], [x+w-r, y], [x+r, y], [x+r, y], color);
+    addCubic([x+r, y], [x+r-k, y], [x, y+r-k], [x, y+r], color);
+    addCubic([x, y+r], [x, y+r], [x, y+h-r], [x, y+h-r], color);
+    addCubic([x, y+h-r], [x, y+h-r+k], [x+r-k, y+h], [x+r, y+h], color);
+    closePath();
+  }
+
+  // Background card
+  roundRect(-0.9, -0.9, 1.8, 1.8, 0.08, [1.0, 1.0, 1.0, 1.0]);
+
+  // Header bar
+  roundRect(-0.85, 0.55, 1.7, 0.3, 0.04, [0.2, 0.35, 0.75, 1.0]);
+
+  // Decorative circles
+  circle(-0.5, 0.0, 0.18, [1.0, 0.35, 0.3, 0.9]);
+  circle(0.0, 0.0, 0.18, [0.3, 0.8, 0.4, 0.9]);
+  circle(0.5, 0.0, 0.18, [0.3, 0.5, 1.0, 0.9]);
+
+  // Bottom cards
+  roundRect(-0.85, -0.85, 0.5, 0.55, 0.04, [0.95, 0.95, 0.98, 1.0]);
+  roundRect(-0.3, -0.85, 0.5, 0.55, 0.04, [0.95, 0.95, 0.98, 1.0]);
+  roundRect(0.25, -0.85, 0.6, 0.55, 0.04, [0.95, 0.95, 0.98, 1.0]);
+
+  // Accent dots
+  for (let i = 0; i < 5; i++) {
+    const x = -0.6 + i * 0.3;
+    circle(x, 0.4, 0.025, [1.0, 1.0, 1.0, 0.8]);
+  }
+
+  return { beziers, pathCount: pathId };
+}
+
+// ── Flatten + tile ──
+
+function flattenBeziers(beziers) {
+  const tol = 0.5 / WIDTH;
+  const segments = [];
+  for (const bez of beziers) {
+    const n = wangSegments(bez.p0, bez.p1, bez.p2, bez.p3, tol);
+    for (let i = 0; i < n; i++) {
+      segments.push({
+        p0: cubicEval(bez.p0, bez.p1, bez.p2, bez.p3, i / n),
+        p1: cubicEval(bez.p0, bez.p1, bez.p2, bez.p3, (i + 1) / n),
+        color: bez.color, pathId: bez.pathId,
+      });
+    }
+  }
+  return segments;
+}
+
+function assignTiles(segments) {
+  const tileCounts = new Uint32Array(NUM_TILES);
+  const tileSegIds = new Uint32Array(NUM_TILES * MAX_SEGS_PER_TILE);
+  for (let si = 0; si < segments.length; si++) {
+    const seg = segments[si];
+    const maxX = Math.max(seg.p0[0], seg.p1[0]);
+    const minY = Math.min(seg.p0[1], seg.p1[1]);
+    const maxY = Math.max(seg.p0[1], seg.p1[1]);
+    const tMaxX = Math.min(TILES_X - 1, Math.floor((maxX + 1) * 0.5 * WIDTH / TILE_SIZE));
+    const tMinY = Math.max(0, Math.floor((1 - maxY) * 0.5 * HEIGHT / TILE_SIZE));
+    const tMaxY = Math.min(TILES_Y - 1, Math.floor((1 - minY) * 0.5 * HEIGHT / TILE_SIZE));
+    for (let ty = tMinY; ty <= tMaxY; ty++) {
+      for (let tx = 0; tx <= tMaxX; tx++) {
+        const tileId = ty * TILES_X + tx;
+        const slot = tileCounts[tileId];
+        if (slot < MAX_SEGS_PER_TILE) {
+          tileSegIds[tileId * MAX_SEGS_PER_TILE + slot] = si;
+          tileCounts[tileId]++;
+        }
+      }
+    }
+  }
+  return { tileCounts, tileSegIds };
+}
+
+// ── SDF text quads ──
+
+function buildTextQuads(font, atlas) {
+  const lines = [
+    { text: "snaidhm", size: 40, x: -0.55, y: 0.62, color: [1, 1, 1, 1] },
+    { text: "GPU path renderer", size: 16, x: -0.38, y: 0.56, color: [0.8, 0.85, 1, 0.9] },
+    { text: "Fill", size: 14, x: -0.42, y: -0.02, color: [1, 1, 1, 1] },
+    { text: "Stroke", size: 14, x: 0.08, y: -0.02, color: [1, 1, 1, 1] },
+    { text: "SDF", size: 14, x: 0.58, y: -0.02, color: [1, 1, 1, 1] },
+    { text: "Card A", size: 12, x: -0.75, y: -0.4, color: [0.3, 0.3, 0.4, 1] },
+    { text: "Card B", size: 12, x: -0.2, y: -0.4, color: [0.3, 0.3, 0.4, 1] },
+    { text: "Card C", size: 12, x: 0.35, y: -0.4, color: [0.3, 0.3, 0.4, 1] },
+    { text: "Shapes + Text", size: 18, x: -0.35, y: -0.68, color: [0.5, 0.5, 0.6, 1] },
+    { text: "in one frame", size: 18, x: -0.3, y: -0.78, color: [0.5, 0.5, 0.6, 1] },
+  ];
+
+  const vertices = [], indices = [];
+  for (const line of lines) {
+    let cursorX = line.x;
+    const scale = line.size * 2 / HEIGHT / font.unitsPerEm;
+    for (const ch of line.text) {
+      const glyph = atlas.glyphs.get(ch);
+      if (!glyph || glyph.atlasW === 0) {
+        cursorX += (glyph?.advance || font.unitsPerEm * 0.3) * scale;
+        continue;
+      }
+      const pad = glyph.padding / glyph.sdfScale;
+      const x0 = cursorX + (glyph.bounds.xMin - pad) * scale;
+      const y0 = line.y + (glyph.bounds.yMin - pad) * scale;
+      const x1 = cursorX + (glyph.bounds.xMax + pad) * scale;
+      const y1 = line.y + (glyph.bounds.yMax + pad) * scale;
+      const u0 = glyph.atlasX / atlas.atlasWidth;
+      const v0 = glyph.atlasY / atlas.atlasHeight;
+      const u1 = (glyph.atlasX + glyph.atlasW) / atlas.atlasWidth;
+      const v1 = (glyph.atlasY + glyph.atlasH) / atlas.atlasHeight;
+      const c = line.color, vi = vertices.length / 8;
+      vertices.push(x0, y0, u0, v1, c[0], c[1], c[2], c[3]);
+      vertices.push(x1, y0, u1, v1, c[0], c[1], c[2], c[3]);
+      vertices.push(x1, y1, u1, v0, c[0], c[1], c[2], c[3]);
+      vertices.push(x0, y1, u0, v0, c[0], c[1], c[2], c[3]);
+      indices.push(vi, vi+1, vi+2, vi, vi+2, vi+3);
+      cursorX += glyph.advance * scale;
+    }
+  }
+  return { vertices: new Float32Array(vertices), indices: new Uint32Array(indices) };
+}
+
+// ── WebGPU ──
+
+async function main() {
+  if (!navigator.gpu) { document.body.textContent = "WebGPU not supported"; return; }
+
+  // Load font
+  const fontBuffer = await fetch("font.ttf").then(r => r.arrayBuffer());
+  const font = new TTFFont(fontBuffer);
+
+  // SDF atlas
+  const chars = [];
+  for (let i = 32; i < 127; i++) chars.push(String.fromCharCode(i));
+  const atlas = generateSDFAtlas(font, chars, 48, 6);
+
+  // Build scene
+  const { beziers } = buildShapes();
+  const segments = flattenBeziers(beziers);
+  const { tileCounts, tileSegIds } = assignTiles(segments);
+  const textQuads = buildTextQuads(font, atlas);
+
+  console.log(`Shapes: ${segments.length} segments | Text: ${textQuads.indices.length / 6} glyphs`);
+
+  // WebGPU setup
+  const canvas = document.getElementById("canvas");
+  const adapter = await navigator.gpu.requestAdapter();
+  const device = await adapter.requestDevice();
+  const context = canvas.getContext("webgpu");
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({ device, format, alphaMode: "premultiplied" });
+
+  const pathShader = device.createShaderModule({ code: await fetch("paths.wgsl").then(r => r.text()) });
+  const textShader = device.createShaderModule({ code: await fetch("text.wgsl").then(r => r.text()) });
+
+  // ── Path renderer buffers ──
+
+  const segCount = segments.length;
+  const segData = new Float32Array(segCount * 12);
+  for (let i = 0; i < segCount; i++) {
+    const s = segments[i], o = i * 12;
+    segData[o] = s.p0[0]; segData[o+1] = s.p0[1];
+    segData[o+2] = s.p1[0]; segData[o+3] = s.p1[1];
+    segData[o+4] = s.color[0]; segData[o+5] = s.color[1];
+    segData[o+6] = s.color[2]; segData[o+7] = s.color[3];
+    new Uint32Array(segData.buffer)[i * 12 + 8] = s.pathId;
+  }
+
+  const segBuffer = device.createBuffer({ size: segData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(segBuffer, 0, segData);
+  const tileCountBuf = device.createBuffer({ size: tileCounts.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(tileCountBuf, 0, tileCounts);
+  const tileSegBuf = device.createBuffer({ size: tileSegIds.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(tileSegBuf, 0, tileSegIds);
+  const pixelBuf = device.createBuffer({ size: WIDTH * HEIGHT * 4, usage: GPUBufferUsage.STORAGE });
+  const paramsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(paramsBuf, 0, new Uint32Array([WIDTH, HEIGHT, segCount, TILES_X, TILES_Y, 0, 0, 0]));
+
+  // Path compute pipeline
+  const pathBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+    { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+  ]});
+  const pathPipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [pathBGL] }),
+    compute: { module: pathShader, entryPoint: "fine" },
+  });
+  const pathBG = device.createBindGroup({ layout: pathBGL, entries: [
+    { binding: 0, resource: { buffer: segBuffer } },
+    { binding: 1, resource: { buffer: tileCountBuf } },
+    { binding: 2, resource: { buffer: tileSegBuf } },
+    { binding: 3, resource: { buffer: pixelBuf } },
+    { binding: 4, resource: { buffer: paramsBuf } },
+  ]});
+
+  // Fullscreen quad pipeline (path output)
+  const quadBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+  ]});
+  const quadPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [quadBGL] }),
+    vertex: { module: pathShader, entryPoint: "vs_fullscreen" },
+    fragment: { module: pathShader, entryPoint: "fs_fullscreen", targets: [{ format }] },
+    primitive: { topology: "triangle-list" },
+  });
+  const quadBG = device.createBindGroup({ layout: quadBGL, entries: [
+    { binding: 0, resource: { buffer: pixelBuf } },
+    { binding: 1, resource: { buffer: paramsBuf } },
+  ]});
+
+  // ── SDF text pipeline ──
+
+  const sdfTexture = device.createTexture({
+    size: [atlas.atlasWidth, atlas.atlasHeight],
+    format: "r8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  const bytesPerRow = Math.ceil(atlas.atlasWidth / 256) * 256;
+  const alignedData = new Uint8Array(bytesPerRow * atlas.atlasHeight);
+  for (let row = 0; row < atlas.atlasHeight; row++) {
+    alignedData.set(atlas.atlasData.subarray(row * atlas.atlasWidth, row * atlas.atlasWidth + atlas.atlasWidth), row * bytesPerRow);
+  }
+  device.queue.writeTexture({ texture: sdfTexture }, alignedData, { bytesPerRow }, [atlas.atlasWidth, atlas.atlasHeight]);
+
+  const sdfSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+
+  const textVertBuf = device.createBuffer({ size: textQuads.vertices.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(textVertBuf, 0, textQuads.vertices);
+  const textIdxBuf = device.createBuffer({ size: textQuads.indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(textIdxBuf, 0, textQuads.indices);
+  const textParamsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(textParamsBuf, 0, new Float32Array([atlas.atlasWidth, atlas.atlasHeight, WIDTH, HEIGHT]));
+
+  const textBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+  ]});
+  const textPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [textBGL] }),
+    vertex: {
+      module: textShader, entryPoint: "vs_main",
+      buffers: [{ arrayStride: 32, attributes: [
+        { shaderLocation: 0, offset: 0, format: "float32x2" },
+        { shaderLocation: 1, offset: 8, format: "float32x2" },
+        { shaderLocation: 2, offset: 16, format: "float32x4" },
+      ]}],
+    },
+    fragment: {
+      module: textShader, entryPoint: "fs_main",
+      targets: [{ format, blend: {
+        color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+        alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+      }}],
+    },
+    primitive: { topology: "triangle-list" },
+  });
+  const textBG = device.createBindGroup({ layout: textBGL, entries: [
+    { binding: 0, resource: { buffer: textParamsBuf } },
+    { binding: 1, resource: sdfTexture.createView() },
+    { binding: 2, resource: sdfSampler },
+  ]});
+
+  // ── Render frame ──
+
+  const encoder = device.createCommandEncoder();
+
+  // Pass 1: Compute path rasterization
+  const computePass = encoder.beginComputePass();
+  computePass.setPipeline(pathPipeline);
+  computePass.setBindGroup(0, pathBG);
+  computePass.dispatchWorkgroups(TILES_X, TILES_Y);
+  computePass.end();
+
+  // Pass 2: Render — fullscreen quad (paths) then SDF text on top
+  const renderPass = encoder.beginRenderPass({
+    colorAttachments: [{
+      view: context.getCurrentTexture().createView(),
+      clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1 },
+      loadOp: "clear", storeOp: "store",
+    }],
+  });
+
+  // Draw path output as fullscreen quad
+  renderPass.setPipeline(quadPipeline);
+  renderPass.setBindGroup(0, quadBG);
+  renderPass.draw(6);
+
+  // Draw SDF text on top
+  renderPass.setPipeline(textPipeline);
+  renderPass.setBindGroup(0, textBG);
+  renderPass.setVertexBuffer(0, textVertBuf);
+  renderPass.setIndexBuffer(textIdxBuf, "uint32");
+  renderPass.drawIndexed(textQuads.indices.length);
+
+  renderPass.end();
+  device.queue.submit([encoder.finish()]);
+}
+
+main();
