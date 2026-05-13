@@ -1,7 +1,10 @@
-// Phase 1: Path renderer — winding number fill with cubic bezier paths
+// snaidhm Phase 1 — Tiled path renderer
 //
-// Segments are pre-flattened on CPU and sorted by path_id.
-// GPU computes per-pixel winding number → fill color.
+// CPU: flatten + coarse tile assignment (segments sorted by path_id within each tile)
+// GPU: fine rasterize (per-tile winding number fill)
+
+const TILE_SIZE: u32 = 16u;
+const MAX_SEGS_PER_TILE: u32 = 512u;
 
 struct LineSeg {
   p0: vec2<f32>,
@@ -12,18 +15,24 @@ struct LineSeg {
   _pad1: u32,
   _pad2: u32,
 }
-// sizeof = 48 bytes (12 floats), matches JS packing
 
-struct RasterParams {
+struct Params {
   width: u32,
   height: u32,
   seg_count: u32,
-  _pad: u32,
+  tiles_x: u32,
+  tiles_y: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
 }
 
+// Fine rasterize: per-tile winding fill
 @group(0) @binding(0) var<storage, read>       segments: array<LineSeg>;
-@group(0) @binding(1) var<storage, read_write> pixels: array<u32>;
-@group(0) @binding(2) var<uniform>             params: RasterParams;
+@group(0) @binding(1) var<storage, read>       tile_counts: array<u32>;
+@group(0) @binding(2) var<storage, read>       tile_seg_ids: array<u32>;
+@group(0) @binding(3) var<storage, read_write> pixels: array<u32>;
+@group(0) @binding(4) var<uniform>             params: Params;
 
 fn wind_line(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
   let e = b - a;
@@ -49,26 +58,31 @@ fn pack_color(r: f32, g: f32, b: f32, a: f32) -> u32 {
 }
 
 @compute @workgroup_size(16, 16)
-fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(workgroup_id) wg: vec3<u32>) {
   let px = gid.x;
   let py = gid.y;
   if (px >= params.width || py >= params.height) { return; }
+
+  let tile_id = wg.y * params.tiles_x + wg.x;
+  let count = min(tile_counts[tile_id], MAX_SEGS_PER_TILE);
+  let tile_base = tile_id * MAX_SEGS_PER_TILE;
 
   let p = vec2<f32>(
     f32(px) / f32(params.width) * 2.0 - 1.0,
     1.0 - f32(py) / f32(params.height) * 2.0,
   );
 
-  var color = vec3<f32>(0.95, 0.95, 0.97);  // background
+  var color = vec3<f32>(0.95, 0.95, 0.97);
   var winding = 0.0;
   var current_path = 0xFFFFFFFFu;
   var current_color = vec4<f32>(0.0);
 
-  for (var i = 0u; i < params.seg_count; i++) {
-    let seg = segments[i];
+  for (var i = 0u; i < count; i++) {
+    let seg_idx = tile_seg_ids[tile_base + i];
+    let seg = segments[seg_idx];
 
     if (seg.path_id != current_path) {
-      // Apply previous path's fill
       if (abs(winding) > 0.5) {
         color = mix(color, current_color.rgb, current_color.a);
       }
@@ -80,13 +94,11 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     winding += wind_line(p, seg.p0, seg.p1);
   }
 
-  // Apply last path
   if (abs(winding) > 0.5) {
     color = mix(color, current_color.rgb, current_color.a);
   }
 
-  let idx = py * params.width + px;
-  pixels[idx] = pack_color(color.x, color.y, color.z, 1.0);
+  pixels[py * params.width + px] = pack_color(color.x, color.y, color.z, 1.0);
 }
 
 // ── Fullscreen quad ──
@@ -113,7 +125,7 @@ fn vs_fullscreen(@builtin(vertex_index) idx: u32) -> VSOut {
 }
 
 @group(0) @binding(0) var<storage, read> render_pixels: array<u32>;
-@group(0) @binding(1) var<uniform>       render_params: RasterParams;
+@group(0) @binding(1) var<uniform>       render_params: Params;
 
 @fragment
 fn fs_fullscreen(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
