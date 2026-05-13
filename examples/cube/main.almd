@@ -1,0 +1,27 @@
+// Phase 0.3: Rotating Cube — Almide source that compiles to WGSL
+//
+// Compile: almide main.almd --target wgsl
+// Output should match cube.wgsl (hand-written reference)
+
+type VertexOutput = {
+  @builtin(position) pos: Vec4,
+  @location(0) color: Vec3,
+}
+
+@gpu(vertex)
+fn vs_main(
+  @uniform mvp: Mat4,
+  @location(0) position: Vec3,
+  @location(1) color: Vec3,
+) -> VertexOutput = {
+  VertexOutput {
+    pos: mvp,
+    color: color,
+  }
+}
+
+@gpu(fragment)
+@location(0)
+fn fs_main(@location(0) color: Vec3) -> Vec3 = {
+  color
+}
