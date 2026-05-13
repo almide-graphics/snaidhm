@@ -205,6 +205,71 @@ function buildPaints(pathCount) {
   return data;
 }
 
+// ── Image textures (procedural thumbnails) ──
+
+function generateCardImages() {
+  const S = 64;
+  const atlas = new Uint8Array(S * 3 * S * 4); // 3 images side by side: 192×64
+
+  for (let img = 0; img < 3; img++) {
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const i = (y * S * 3 + img * S + x) * 4;
+        const u = x / S, v = y / S;
+        let r, g, b;
+
+        if (img === 0) {
+          // Sunset: warm gradient with sun glow
+          const dx = u - 0.5, dy = v - 0.35;
+          const sun = Math.max(0, 1 - Math.sqrt(dx*dx + dy*dy) * 4.5);
+          r = 0.92 - v * 0.35 + sun * 0.4;
+          g = 0.35 + sun * 0.55 - v * 0.15;
+          b = 0.25 + v * 0.45;
+        } else if (img === 1) {
+          // Ocean: cool blues and teals
+          const wave = Math.sin(u * 12 + v * 4) * 0.04;
+          r = 0.1 + v * 0.15;
+          g = 0.35 + u * 0.2 + wave;
+          b = 0.55 + v * 0.25 + wave;
+        } else {
+          // Aurora: purple-green bands
+          const band = Math.sin(v * 8 + u * 3) * 0.1;
+          r = 0.25 + v * 0.35 + band;
+          g = 0.15 + (1 - v) * 0.4 + band * 0.5;
+          b = 0.4 + v * 0.25;
+        }
+
+        atlas[i]     = Math.min(255, Math.max(0, r * 255));
+        atlas[i + 1] = Math.min(255, Math.max(0, g * 255));
+        atlas[i + 2] = Math.min(255, Math.max(0, b * 255));
+        atlas[i + 3] = 255;
+      }
+    }
+  }
+
+  return { data: atlas, width: S * 3, height: S };
+}
+
+function buildImageQuads() {
+  // 3 image quads, one per card. Vertex: pos(2) + uv(2) = 4 floats, 16 bytes
+  const cards = [
+    { x: -0.82, y: -0.82, w: 0.42, h: 0.32, uOff: 0 },
+    { x: -0.27, y: -0.82, w: 0.42, h: 0.32, uOff: 1/3 },
+    { x:  0.28, y: -0.82, w: 0.50, h: 0.32, uOff: 2/3 },
+  ];
+
+  const verts = [], idxs = [];
+  for (const c of cards) {
+    const vi = verts.length / 4;
+    const u0 = c.uOff, u1 = c.uOff + 1/3;
+    verts.push(c.x, c.y, u0, 1,           c.x+c.w, c.y, u1, 1,
+               c.x+c.w, c.y+c.h, u1, 0,   c.x, c.y+c.h, u0, 0);
+    idxs.push(vi, vi+1, vi+2, vi, vi+2, vi+3);
+  }
+
+  return { vertices: new Float32Array(verts), indices: new Uint32Array(idxs) };
+}
+
 // ── Flatten + tile ──
 
 function flattenBeziers(beziers) {
@@ -331,6 +396,8 @@ async function main() {
   const textQuads = buildTextQuads(font, atlas);
   const shadowScene = buildShadows();
   const paintData = buildPaints(pathCount);
+  const cardImages = generateCardImages();
+  const imageQuads = buildImageQuads();
 
   console.log(`Shapes: ${segments.length} segments | Text: ${textQuads.indices.length / 6} glyphs`);
 
@@ -344,6 +411,7 @@ async function main() {
 
   const pathShader = device.createShaderModule({ code: await fetch("paths.wgsl").then(r => r.text()) });
   const textShader = device.createShaderModule({ code: await fetch("text.wgsl").then(r => r.text()) });
+  const imageShader = device.createShaderModule({ code: await fetch("image.wgsl").then(r => r.text()) });
 
   // ── Path renderer buffers ──
 
@@ -465,6 +533,56 @@ async function main() {
     { binding: 2, resource: sdfSampler },
   ]});
 
+  // ── Image pipeline ──
+
+  const imgTexture = device.createTexture({
+    size: [cardImages.width, cardImages.height],
+    format: "rgba8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  const imgBytesPerRow = Math.ceil(cardImages.width * 4 / 256) * 256;
+  const imgAligned = new Uint8Array(imgBytesPerRow * cardImages.height);
+  for (let row = 0; row < cardImages.height; row++) {
+    imgAligned.set(
+      cardImages.data.subarray(row * cardImages.width * 4, (row + 1) * cardImages.width * 4),
+      row * imgBytesPerRow,
+    );
+  }
+  device.queue.writeTexture({ texture: imgTexture }, imgAligned, { bytesPerRow: imgBytesPerRow }, [cardImages.width, cardImages.height]);
+
+  const imgSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+  const imgVertBuf = device.createBuffer({ size: imageQuads.vertices.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(imgVertBuf, 0, imageQuads.vertices);
+  const imgIdxBuf = device.createBuffer({ size: imageQuads.indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(imgIdxBuf, 0, imageQuads.indices);
+
+  const imgBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+  ]});
+  const imgPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [imgBGL] }),
+    vertex: {
+      module: imageShader, entryPoint: "vs_main",
+      buffers: [{ arrayStride: 16, attributes: [
+        { shaderLocation: 0, offset: 0, format: "float32x2" },
+        { shaderLocation: 1, offset: 8, format: "float32x2" },
+      ]}],
+    },
+    fragment: {
+      module: imageShader, entryPoint: "fs_main",
+      targets: [{ format, blend: {
+        color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+        alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+      }}],
+    },
+    primitive: { topology: "triangle-list" },
+  });
+  const imgBG = device.createBindGroup({ layout: imgBGL, entries: [
+    { binding: 0, resource: imgTexture.createView() },
+    { binding: 1, resource: imgSampler },
+  ]});
+
   // ── Render frame ──
 
   const encoder = device.createCommandEncoder();
@@ -489,6 +607,13 @@ async function main() {
   renderPass.setPipeline(quadPipeline);
   renderPass.setBindGroup(0, quadBG);
   renderPass.draw(6);
+
+  // Draw image textures on cards
+  renderPass.setPipeline(imgPipeline);
+  renderPass.setBindGroup(0, imgBG);
+  renderPass.setVertexBuffer(0, imgVertBuf);
+  renderPass.setIndexBuffer(imgIdxBuf, "uint32");
+  renderPass.drawIndexed(imageQuads.indices.length);
 
   // Draw SDF text on top
   renderPass.setPipeline(textPipeline);
