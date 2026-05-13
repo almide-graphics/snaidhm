@@ -1,0 +1,44 @@
+// snaidhm — WebGPU triangle in Almide
+//
+// First proof: Almide -> WASM -> WebGPU rendering pipeline.
+// JS handles async device init, passes handle to render().
+
+import self.web.gpu as gpu
+
+// Triangle shader (WGSL) as a static string
+let SHADER = """
+  @vertex
+  fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    var pos = array<vec2<f32>, 3>(
+      vec2<f32>( 0.0,  0.5),
+      vec2<f32>(-0.5, -0.5),
+      vec2<f32>( 0.5, -0.5),
+    );
+    return vec4<f32>(pos[i], 0.0, 1.0);
+  }
+
+  @fragment
+  fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.3, 0.7, 1.0, 1.0);
+  }
+  """
+
+@export(wasm, "render")
+fn render(device: Int) -> Unit = {
+  let format = gpu.get_preferred_format()
+  let ctx = gpu.configure_canvas(device, format)
+
+  // Create shader module — pass string pointer + length through WASM memory
+  // For now, use a simplified approach: the JS runtime handles shader creation
+  // by reading the string from WASM memory
+  let shader = gpu.create_shader(device, 0, 0)
+
+  let pipeline = gpu.create_render_pipeline(device, shader, 0, 2, 0, 2, format)
+
+  let encoder = gpu.begin_encoder(device)
+  let pass = gpu.begin_render_pass(encoder, 0.05, 0.05, 0.1, 1.0)
+  gpu.set_pipeline(pass, pipeline)
+  gpu.draw(pass, 3)
+  gpu.end_pass(pass)
+  gpu.finish_and_submit(device, encoder)
+}

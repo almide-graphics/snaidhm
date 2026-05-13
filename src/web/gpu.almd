@@ -1,0 +1,77 @@
+// snaidhm WebGPU bindings — @extern(wasm) declarations
+//
+// All GPU objects are opaque integer handles.
+// The JS runtime manages the handle table.
+
+// ── Buffer usage flags ──
+let COPY_SRC     = 0x0004
+let COPY_DST     = 0x0008
+let INDEX        = 0x0010
+let VERTEX       = 0x0020
+let UNIFORM      = 0x0040
+let STORAGE      = 0x0080
+let MAP_READ     = 0x0001
+
+// ── Texture usage flags ──
+let TEX_COPY_DST = 0x0002
+let TEX_BINDING  = 0x0004
+let TEX_RENDER   = 0x0010
+
+// ── Shader stage flags ──
+let STAGE_VERTEX   = 0x1
+let STAGE_FRAGMENT = 0x2
+let STAGE_COMPUTE  = 0x4
+
+// ── Device / Context ──
+
+@extern(wasm, "gpu", "configure_canvas")
+fn configure_canvas(device: Int, format: Int) -> Int = _
+
+@extern(wasm, "gpu", "get_preferred_format")
+fn get_preferred_format() -> Int = _
+
+// ── Shader ──
+
+@extern(wasm, "gpu", "create_shader")
+fn create_shader(device: Int, code_ptr: Int, code_len: Int) -> Int = _
+
+// ── Buffer ──
+
+@extern(wasm, "gpu", "create_buffer")
+fn create_buffer(device: Int, size: Int, usage: Int) -> Int = _
+
+@extern(wasm, "gpu", "write_buffer")
+fn write_buffer(device: Int, buffer: Int, data_ptr: Int, data_len: Int) -> Unit = _
+
+// ── Render pipeline ──
+
+@extern(wasm, "gpu", "create_render_pipeline")
+fn create_render_pipeline(device: Int, shader: Int, vs_ptr: Int, vs_len: Int, fs_ptr: Int, fs_len: Int, format: Int) -> Int = _
+
+// ── Commands ──
+
+@extern(wasm, "gpu", "begin_encoder")
+fn begin_encoder(device: Int) -> Int = _
+
+@extern(wasm, "gpu", "begin_render_pass")
+fn begin_render_pass(encoder: Int, r: Float, g: Float, b: Float, a: Float) -> Int = _
+
+@extern(wasm, "gpu", "set_pipeline")
+fn set_pipeline(pass: Int, pipeline: Int) -> Unit = _
+
+@extern(wasm, "gpu", "draw")
+fn draw(pass: Int, vertex_count: Int) -> Unit = _
+
+@extern(wasm, "gpu", "end_pass")
+fn end_pass(pass: Int) -> Unit = _
+
+@extern(wasm, "gpu", "finish_and_submit")
+fn finish_and_submit(device: Int, encoder: Int) -> Unit = _
+
+// ── Debug ──
+
+@extern(wasm, "gpu", "log_int")
+fn log_int(value: Int) -> Unit = _
+
+@extern(wasm, "gpu", "log_str")
+fn log_str(ptr: Int, len: Int) -> Unit = _
