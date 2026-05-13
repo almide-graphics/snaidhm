@@ -70,33 +70,145 @@ function buildScene() {
     closePath();
   }
 
-  circle(0, 0, 0.6, [0.25, 0.35, 0.78, 1.0]);
-  circle(-0.3, 0.3, 0.15, [1.0, 0.3, 0.3, 1.0]);
-  circle(0.3, 0.3, 0.15, [0.3, 1.0, 0.3, 1.0]);
-  circle(0.0, -0.2, 0.15, [1.0, 1.0, 0.3, 1.0]);
+  // ── Filled shapes ──
+  circle(0, 0, 0.55, [0.25, 0.35, 0.78, 1.0]);
+  circle(-0.25, 0.25, 0.12, [1.0, 0.3, 0.3, 1.0]);
+  circle(0.25, 0.25, 0.12, [0.3, 1.0, 0.3, 1.0]);
+  circle(0.0, -0.15, 0.12, [1.0, 1.0, 0.3, 1.0]);
   roundRect(-0.8, -0.85, 0.5, 0.3, 0.06, [0.85, 0.45, 0.2, 1.0]);
   roundRect(0.3, -0.85, 0.5, 0.3, 0.08, [0.35, 0.8, 0.55, 1.0]);
-  heart(0.0, 0.68, 0.12, [1.0, 0.2, 0.35, 1.0]);
+  heart(0.0, 0.62, 0.1, [1.0, 0.2, 0.35, 1.0]);
 
-  for (let i = 0; i < 50; i++) {
-    const a = (i / 50) * Math.PI * 2, h = i / 50;
-    circle(Math.cos(a) * 0.85, Math.sin(a) * 0.85, 0.03, [
+  // ── Stroked shapes (stroke expansion → fill) ──
+
+  // Stroked circle (ring)
+  function strokeCircle(cx, cy, r, width, color) {
+    const k = 0.5522847498 * r;
+    const circleBeziers = [
+      { p0: [cx, cy+r], p1: [cx+k, cy+r], p2: [cx+r, cy+k], p3: [cx+r, cy] },
+      { p0: [cx+r, cy], p1: [cx+r, cy-k], p2: [cx+k, cy-r], p3: [cx, cy-r] },
+      { p0: [cx, cy-r], p1: [cx-k, cy-r], p2: [cx-r, cy-k], p3: [cx-r, cy] },
+      { p0: [cx-r, cy], p1: [cx-r, cy+k], p2: [cx-k, cy+r], p3: [cx, cy+r] },
+    ];
+    const expanded = strokeExpand(circleBeziers, pathId, width, color);
+    beziers.push(...expanded);
+    pathId++;
+  }
+
+  // Stroked line
+  function strokeLine(x0, y0, x1, y1, width, color) {
+    const lineBeziers = [{ p0: [x0, y0], p1: [x0, y0], p2: [x1, y1], p3: [x1, y1] }];
+    const expanded = strokeExpand(lineBeziers, pathId, width, color);
+    beziers.push(...expanded);
+    pathId++;
+  }
+
+  // Stroked rounded rect
+  function strokeRoundRect(x, y, w, h, r, strokeWidth, color) {
+    const k = 0.5522847498 * r;
+    const rrBeziers = [
+      { p0: [x+r, y+h], p1: [x+r, y+h], p2: [x+w-r, y+h], p3: [x+w-r, y+h] },
+      { p0: [x+w-r, y+h], p1: [x+w-r+k, y+h], p2: [x+w, y+h-r+k], p3: [x+w, y+h-r] },
+      { p0: [x+w, y+h-r], p1: [x+w, y+h-r], p2: [x+w, y+r], p3: [x+w, y+r] },
+      { p0: [x+w, y+r], p1: [x+w, y+r-k], p2: [x+w-r+k, y], p3: [x+w-r, y] },
+      { p0: [x+w-r, y], p1: [x+w-r, y], p2: [x+r, y], p3: [x+r, y] },
+      { p0: [x+r, y], p1: [x+r-k, y], p2: [x, y+r-k], p3: [x, y+r] },
+      { p0: [x, y+r], p1: [x, y+r], p2: [x, y+h-r], p3: [x, y+h-r] },
+      { p0: [x, y+h-r], p1: [x, y+h-r+k], p2: [x+r-k, y+h], p3: [x+r, y+h] },
+    ];
+    const expanded = strokeExpand(rrBeziers, pathId, strokeWidth, color);
+    beziers.push(...expanded);
+    pathId++;
+  }
+
+  // White stroked ring around the big circle
+  strokeCircle(0, 0, 0.55, 0.02, [1.0, 1.0, 1.0, 1.0]);
+
+  // Outer decorative ring
+  strokeCircle(0, 0, 0.75, 0.01, [0.4, 0.4, 0.6, 0.8]);
+
+  // Cross lines
+  strokeLine(-0.9, 0, 0.9, 0, 0.008, [0.7, 0.7, 0.7, 0.5]);
+  strokeLine(0, -0.9, 0, 0.9, 0.008, [0.7, 0.7, 0.7, 0.5]);
+
+  // Stroked rectangles
+  strokeRoundRect(-0.4, -0.6, 0.8, 0.3, 0.05, 0.015, [1.0, 0.5, 0.0, 1.0]);
+  strokeRoundRect(-0.3, -0.45, 0.6, 0.15, 0.03, 0.01, [0.0, 0.8, 0.8, 1.0]);
+
+  // Rainbow ring dots (filled)
+  for (let i = 0; i < 40; i++) {
+    const a = (i / 40) * Math.PI * 2, h = i / 40;
+    circle(Math.cos(a) * 0.85, Math.sin(a) * 0.85, 0.02, [
       0.5 + 0.5 * Math.sin(h * 6.28),
       0.5 + 0.5 * Math.sin(h * 6.28 + 2.09),
       0.5 + 0.5 * Math.sin(h * 6.28 + 4.18), 1.0,
     ]);
   }
 
-  for (let i = 0; i < 100; i++) {
+  // Small random circles (filled, fewer)
+  for (let i = 0; i < 30; i++) {
     circle(
       (Math.random() * 2 - 1) * 0.9,
       (Math.random() * 2 - 1) * 0.9,
-      0.01 + Math.random() * 0.04,
+      0.01 + Math.random() * 0.03,
       [Math.random(), Math.random(), Math.random(), 0.7],
     );
   }
 
   return beziers;
+}
+
+// ── Stroke expansion (CPU) ──
+// Convert a list of cubic beziers (open or closed path) into fill beziers
+// that represent the stroked outline. Each segment becomes a quad (4 line cubics).
+
+function strokeExpand(beziers, pathId, width, color) {
+  const tol = 0.5 / WIDTH;
+  const result = [];
+  const half = width / 2;
+
+  // Flatten the stroke path first
+  const points = [];
+  for (const bez of beziers) {
+    const n = wangSegments(bez.p0, bez.p1, bez.p2, bez.p3, tol);
+    for (let i = 0; i <= n; i++) {
+      const p = cubicEval(bez.p0, bez.p1, bez.p2, bez.p3, i / n);
+      if (points.length === 0 || Math.hypot(p[0] - points[points.length-1][0], p[1] - points[points.length-1][1]) > 0.0001) {
+        points.push(p);
+      }
+    }
+  }
+
+  if (points.length < 2) return result;
+
+  // Build offset polylines (left and right)
+  const left = [], right = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i], b = points[i + 1];
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy);
+    if (len < 0.00001) continue;
+    const nx = -dy / len * half, ny = dx / len * half;
+
+    if (left.length === 0) {
+      left.push([a[0] + nx, a[1] + ny]);
+      right.push([a[0] - nx, a[1] - ny]);
+    }
+    left.push([b[0] + nx, b[1] + ny]);
+    right.push([b[0] - nx, b[1] - ny]);
+  }
+
+  // Create closed path: left forward + right backward
+  const outline = [...left, ...right.reverse()];
+
+  // Convert outline to line cubics (degenerate cubics = straight lines)
+  for (let i = 0; i < outline.length; i++) {
+    const a = outline[i];
+    const b = outline[(i + 1) % outline.length];
+    result.push({ p0: a, p1: a, p2: b, p3: b, color, pathId });
+  }
+
+  return result;
 }
 
 // ── Flatten (CPU) ──
