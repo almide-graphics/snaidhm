@@ -49,6 +49,15 @@ fn wind_line(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
   return 0.0;
 }
 
+// Signed distance from point to line segment
+fn dist_to_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+  let ab = b - a;
+  let ap = p - a;
+  let t = clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0);
+  let closest = a + t * ab;
+  return length(p - closest);
+}
+
 fn pack_color(r: f32, g: f32, b: f32, a: f32) -> u32 {
   let ri = u32(clamp(r * 255.0, 0.0, 255.0));
   let gi = u32(clamp(g * 255.0, 0.0, 255.0));
@@ -73,8 +82,12 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
     1.0 - f32(py) / f32(params.height) * 2.0,
   );
 
+  // AA pixel size in NDC
+  let px_size = 2.0 / f32(params.width);
+
   var color = vec3<f32>(0.95, 0.95, 0.97);
   var winding = 0.0;
+  var min_dist = 1000.0;  // closest segment distance for this path
   var current_path = 0xFFFFFFFFu;
   var current_color = vec4<f32>(0.0);
 
@@ -83,19 +96,31 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
     let seg = segments[seg_idx];
 
     if (seg.path_id != current_path) {
-      if (abs(winding) > 0.5) {
-        color = mix(color, current_color.rgb, current_color.a);
+      // Apply previous path with AA
+      if (abs(winding) > 0.01) {
+        // Inside: full coverage. Edge: smooth falloff based on distance.
+        let inside = abs(winding) >= 1.0;
+        let edge_aa = smoothstep(px_size * 1.5, 0.0, min_dist);
+        let coverage = select(edge_aa, 1.0, inside);
+        color = mix(color, current_color.rgb, coverage * current_color.a);
       }
       winding = 0.0;
+      min_dist = 1000.0;
       current_path = seg.path_id;
       current_color = seg.color;
     }
 
     winding += wind_line(p, seg.p0, seg.p1);
+    let d = dist_to_segment(p, seg.p0, seg.p1);
+    min_dist = min(min_dist, d);
   }
 
-  if (abs(winding) > 0.5) {
-    color = mix(color, current_color.rgb, current_color.a);
+  // Apply last path with AA
+  if (abs(winding) > 0.01) {
+    let inside = abs(winding) >= 1.0;
+    let edge_aa = smoothstep(px_size * 1.5, 0.0, min_dist);
+    let coverage = select(edge_aa, 1.0, inside);
+    color = mix(color, current_color.rgb, coverage * current_color.a);
   }
 
   pixels[py * params.width + px] = pack_color(color.x, color.y, color.z, 1.0);
