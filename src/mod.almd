@@ -102,6 +102,9 @@ fn circ_shadow(cx: Float, cy: Float, rad: Float, ox: Float, oy: Float, blur: Flo
 
 fn str(s: String) -> List[Int] = string.to_bytes(s)
 
+fn text_line(chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float]) -> TextLine =
+  { chars: chars, size: size, x: x, y: y, align: align, color: color }
+
 fn measure_text(chars: List[Int], size: Float) -> Float = {
   let upm = int.to_float(gpu.font_units_per_em())
   let scale = size * 2.0 / int.to_float(HEIGHT) / upm
