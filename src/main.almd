@@ -17,6 +17,10 @@ type Cubic = { a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], path_id: 
 type Seg = { p0: Vec2, p1: Vec2, color: List[Float], path_id: Int }
 type Shadow = { cx: Float, cy: Float, hw: Float, hh: Float, cr: Float, ox: Float, oy: Float, blur: Float, color: List[Float] }
 type Paint = { kind: Int, c0: List[Float], c1: List[Float], params: List[Float] }
+type TextLine = { chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float] }
+
+let ALIGN_LEFT = 0
+let ALIGN_CENTER = 1
 
 // ── Bezier math ──
 
@@ -141,10 +145,20 @@ fn upload_paints(device: Int, paints: List[Paint]) -> Int = {
   buf
 }
 
+// ── Text helpers ──
+
+fn measure_text(chars: List[Int], size: Float) -> Float = {
+  let upm = int.to_float(gpu.font_units_per_em())
+  let scale = size * 2.0 / int.to_float(HEIGHT) / upm
+  list.fold(chars, 0.0, (acc, ch) => acc + gpu.font_glyph_advance(ch) * scale)
+}
+
+fn str(s: String) -> List[Int] = string.to_bytes(s)
+
 // ── Main render ──
 
 @export(wasm, "render")
-fn render(device: Int) -> Unit = {
+fn render(device: Int, text_texture: Int, text_sampler: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: Int, img_sampler: Int) -> Unit = {
   let format = gpu.get_preferred_format()
   let _ctx = gpu.configure_canvas(device, format)
   let tiles_x = WIDTH / TILE
@@ -198,6 +212,10 @@ fn render(device: Int) -> Unit = {
 
   for si in 0..seg_count {
     let seg = segments[si]
+    // Skip near-horizontal segments: they contribute ~0 area coverage
+    // but "all columns left" assignment spreads them across many tiles,
+    // causing thin horizontal line artifacts
+    if float.abs(seg.p0.y - seg.p1.y) < 0.0001 then () else {
     let max_x = float.max(seg.p0.x, seg.p1.x)
     let min_y = float.min(seg.p0.y, seg.p1.y)
     let max_y = float.max(seg.p0.y, seg.p1.y)
@@ -213,6 +231,7 @@ fn render(device: Int) -> Unit = {
           tile_counts[tid] = slot + 1
         } else ()
       }
+    }
     }
   }
 
@@ -262,9 +281,99 @@ fn render(device: Int) -> Unit = {
   let shadow_buf = upload_shadows(device, shadows)
   let paint_buf = upload_paints(device, paints)
 
+  // ── Text quad generation ──
+  let text_lines = [
+    { chars: str("snaidhm"),             size: 40.0, x: 0.0,   y: 0.64,  align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
+    { chars: str("Almide > WASM > WebGPU"), size: 13.0, x: 0.0, y: 0.57, align: ALIGN_CENTER, color: [0.8,0.85,1.0,0.9] },
+    { chars: str("Red"),                 size: 13.0, x: -0.5,  y: -0.02, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
+    { chars: str("Green"),               size: 13.0, x: 0.0,   y: -0.02, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
+    { chars: str("Blue"),                size: 13.0, x: 0.5,   y: -0.02, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
+    { chars: str("Card A"),              size: 11.0, x: -0.8,  y: -0.4,  align: ALIGN_LEFT,   color: [0.3,0.3,0.4,1.0] },
+    { chars: str("Card B"),              size: 11.0, x: -0.25, y: -0.4,  align: ALIGN_LEFT,   color: [0.3,0.3,0.4,1.0] },
+    { chars: str("Card C"),              size: 11.0, x: 0.3,   y: -0.4,  align: ALIGN_LEFT,   color: [0.3,0.3,0.4,1.0] },
+    { chars: str("Shapes + Text"),       size: 16.0, x: 0.0,   y: -0.68, align: ALIGN_CENTER, color: [0.5,0.5,0.6,1.0] },
+    { chars: str("all from Almide"),     size: 16.0, x: 0.0,   y: -0.78, align: ALIGN_CENTER, color: [0.5,0.5,0.6,1.0] },
+  ]
+
+  let atlas_w = int.to_float(gpu.font_atlas_width())
+  let atlas_h = int.to_float(gpu.font_atlas_height())
+  let upm = int.to_float(gpu.font_units_per_em())
+
+  // Count glyphs with SDFs
+  var total_glyphs = 0
+  for line in text_lines {
+    for ch in line.chars {
+      if gpu.font_glyph_has_sdf(ch) == 1 then total_glyphs = total_glyphs + 1 else ()
+    }
+  }
+
+  // Build vertex data (8 floats per vertex, 4 vertices per glyph = 32 floats per glyph)
+  let text_vtx_buf = gpu.create_buffer(device, total_glyphs * 128, int.bor(gpu.VERTEX, gpu.COPY_DST))
+  gpu.begin_data()
+  for line in text_lines {
+    let scale = line.size * 2.0 / int.to_float(HEIGHT) / upm
+    let tw = measure_text(line.chars, line.size)
+    var cx = if line.align == ALIGN_CENTER then line.x - tw / 2.0 else line.x
+    for ch in line.chars {
+      if gpu.font_glyph_has_sdf(ch) == 1 then {
+        let pad = int.to_float(gpu.font_glyph_padding(ch)) / gpu.font_glyph_sdf_scale(ch)
+        let x0 = cx + (gpu.font_glyph_xmin(ch) - pad) * scale
+        let y0 = line.y + (gpu.font_glyph_ymin(ch) - pad) * scale
+        let x1 = cx + (gpu.font_glyph_xmax(ch) + pad) * scale
+        let y1 = line.y + (gpu.font_glyph_ymax(ch) + pad) * scale
+        let u0 = int.to_float(gpu.font_glyph_atlas_x(ch)) / atlas_w
+        let v0 = int.to_float(gpu.font_glyph_atlas_y(ch)) / atlas_h
+        let u1 = (int.to_float(gpu.font_glyph_atlas_x(ch)) + int.to_float(gpu.font_glyph_atlas_w(ch))) / atlas_w
+        let v1 = (int.to_float(gpu.font_glyph_atlas_y(ch)) + int.to_float(gpu.font_glyph_atlas_h(ch))) / atlas_h
+        let c = line.color
+        // Vertex 0: bottom-left
+        gpu.push_f32(x0) gpu.push_f32(y0) gpu.push_f32(u0) gpu.push_f32(v1)
+        gpu.push_f32(c[0]) gpu.push_f32(c[1]) gpu.push_f32(c[2]) gpu.push_f32(c[3])
+        // Vertex 1: bottom-right
+        gpu.push_f32(x1) gpu.push_f32(y0) gpu.push_f32(u1) gpu.push_f32(v1)
+        gpu.push_f32(c[0]) gpu.push_f32(c[1]) gpu.push_f32(c[2]) gpu.push_f32(c[3])
+        // Vertex 2: top-right
+        gpu.push_f32(x1) gpu.push_f32(y1) gpu.push_f32(u1) gpu.push_f32(v0)
+        gpu.push_f32(c[0]) gpu.push_f32(c[1]) gpu.push_f32(c[2]) gpu.push_f32(c[3])
+        // Vertex 3: top-left
+        gpu.push_f32(x0) gpu.push_f32(y1) gpu.push_f32(u0) gpu.push_f32(v0)
+        gpu.push_f32(c[0]) gpu.push_f32(c[1]) gpu.push_f32(c[2]) gpu.push_f32(c[3])
+        cx = cx + gpu.font_glyph_advance(ch) * scale
+      } else {
+        cx = cx + gpu.font_glyph_advance(ch) * scale
+      }
+    }
+  }
+  gpu.flush_to_buffer(device, text_vtx_buf)
+
+  // Build index data (6 indices per glyph)
+  let text_idx_buf = gpu.create_buffer(device, total_glyphs * 24, int.bor(gpu.INDEX, gpu.COPY_DST))
+  gpu.begin_data()
+  for gi in 0..total_glyphs {
+    let vi = gi * 4
+    gpu.push_u32(vi)
+    gpu.push_u32(vi + 1)
+    gpu.push_u32(vi + 2)
+    gpu.push_u32(vi)
+    gpu.push_u32(vi + 2)
+    gpu.push_u32(vi + 3)
+  }
+  gpu.flush_to_buffer(device, text_idx_buf)
+  let text_index_count = total_glyphs * 6
+
+  // Text params uniform: atlas_width, atlas_height, screen_width, screen_height
+  let text_params = gpu.create_buffer(device, 16, int.bor(gpu.UNIFORM, gpu.COPY_DST))
+  gpu.begin_data()
+  gpu.push_f32(atlas_w)
+  gpu.push_f32(atlas_h)
+  gpu.push_f32(int.to_float(WIDTH))
+  gpu.push_f32(int.to_float(HEIGHT))
+  gpu.flush_to_buffer(device, text_params)
+
   // ── Pipelines + bind groups ──
   let compute_shader = gpu.create_shader(device, 0, 0)
   let quad_shader = gpu.create_shader(device, 1, 0)
+  let text_shader = gpu.create_shader(device, 2, 0)
 
   let compute_pipeline = gpu.create_compute_pipeline(device, compute_shader, 0)
   gpu.begin_bindings()
@@ -283,6 +392,20 @@ fn render(device: Int) -> Unit = {
   gpu.add_buffer_binding(params_buf)
   let quad_bg = gpu.create_bound_group(device, quad_pipeline, 0)
 
+  let text_pipeline = gpu.create_text_pipeline(device, text_shader, format)
+  gpu.begin_bindings()
+  gpu.add_buffer_binding(text_params)
+  gpu.add_texture_binding(text_texture)
+  gpu.add_sampler_binding(text_sampler)
+  let text_bg = gpu.create_bound_group(device, text_pipeline, 0)
+
+  let img_shader = gpu.create_shader(device, 3, 0)
+  let img_pipeline = gpu.create_image_pipeline(device, img_shader, format)
+  gpu.begin_bindings()
+  gpu.add_texture_binding(img_texture)
+  gpu.add_sampler_binding(img_sampler)
+  let img_bg = gpu.create_bound_group(device, img_pipeline, 0)
+
   // ── Render ──
   let encoder = gpu.begin_encoder(device)
 
@@ -296,8 +419,24 @@ fn render(device: Int) -> Unit = {
   gpu.set_pipeline(rp, quad_pipeline)
   gpu.set_bind_group(rp, 0, quad_bg)
   gpu.draw(rp, 6)
+
+  // Image textures on cards
+  gpu.set_pipeline(rp, img_pipeline)
+  gpu.set_bind_group(rp, 0, img_bg)
+  gpu.set_vertex_buffer(rp, 0, img_vtx)
+  gpu.set_index_buffer(rp, img_idx)
+  gpu.draw_indexed(rp, img_count)
+
+  // SDF text on top
+  gpu.set_pipeline(rp, text_pipeline)
+  gpu.set_bind_group(rp, 0, text_bg)
+  gpu.set_vertex_buffer(rp, 0, text_vtx_buf)
+  gpu.set_index_buffer(rp, text_idx_buf)
+  gpu.draw_indexed(rp, text_index_count)
+
   gpu.end_pass(rp)
 
   gpu.finish_and_submit(device, encoder)
   gpu.log_int(seg_count)
+  gpu.log_int(total_glyphs)
 }
