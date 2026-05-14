@@ -10,6 +10,7 @@ let WIDTH = 512
 let HEIGHT = 512
 let TILE = 16
 let MAX_SEGS = 512
+let MAX_CMDS = 32
 
 // ── Types ──
 
@@ -52,6 +53,65 @@ fn flatten_cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], pid: In
     let t1 = int.to_float(i + 1) / nf
     { p0: cubic_eval(a, b, c, d, t0), p1: cubic_eval(a, b, c, d, t1), color: color, path_id: pid }
   })
+}
+
+// ── DDA tile walk ──
+// Returns list of encoded ints: tile_id * 2 + (1 if top_edge else 0)
+// Segment is normalized to walk downward (sy0 ≤ sy1) internally.
+fn dda_tiles(p0: Vec2, p1: Vec2) -> List[Int] = {
+  let tile_scale = 1.0 / int.to_float(TILE)
+  let w_f = int.to_float(WIDTH)
+  let h_f = int.to_float(HEIGHT)
+  let tiles_x = WIDTH / TILE
+  let tiles_y = HEIGHT / TILE
+  let px0 = (p0.x + 1.0) * 0.5 * w_f
+  let py0 = (1.0 - p0.y) * 0.5 * h_f
+  let px1 = (p1.x + 1.0) * 0.5 * w_f
+  let py1 = (1.0 - p1.y) * 0.5 * h_f
+  let is_down = py1 >= py0
+  let sx0 = (if is_down then px0 else px1) * tile_scale
+  let sy0 = (if is_down then py0 else py1) * tile_scale
+  let sx1 = (if is_down then px1 else px0) * tile_scale
+  let sy1 = (if is_down then py1 else py0) * tile_scale
+  let dx = float.abs(sx1 - sx0)
+  let dy = sy1 - sy0
+  if dx + dy < 0.000001 then [] else {
+  if dy < 0.000001 and float.abs(sy0 - float.floor(sy0)) < 0.000001 then [] else {
+  let idxdy = 1.0 / (dx + dy)
+  let a_raw = dx * idxdy
+  let is_pos = sx1 >= sx0
+  let sign = if is_pos then 1.0 else -1.0
+  let xt0 = float.floor(sx0 * sign)
+  let c = sx0 * sign - xt0
+  let y0 = float.floor(sy0)
+  let ytop = if dy < 0.000001 then float.ceil(sy0) else y0 + 1.0
+  let b = float.min((dy * c + dx * (ytop - sy0)) * idxdy, 0.99999994)
+  let span_x = float.max(1.0, float.ceil(float.max(sx0, sx1)) - float.floor(float.min(sx0, sx1)))
+  let span_y = float.max(1.0, float.ceil(sy1) - float.floor(sy0))
+  let count_x = float.to_int(span_x) - 1
+  let count = count_x + float.to_int(span_y)
+  let robust_err = float.floor(a_raw * int.to_float(count - 1) + b) - int.to_float(count_x)
+  let a = if robust_err > 0.0 then a_raw - 0.0000002
+          else if robust_err < 0.0 then a_raw + 0.0000002
+          else a_raw
+  let x0 = xt0 * sign + (if is_pos then 0.0 else -1.0)
+  var last_z = float.floor(b - a)
+  var result: List[Int] = []
+  for i in 0..count {
+    let zf = a * int.to_float(i) + b
+    let z = float.floor(zf)
+    let ty = float.to_int(y0 + int.to_float(i) - z)
+    let tx = float.to_int(x0 + sign * z)
+    if tx >= 0 and tx < tiles_x and ty >= 0 and ty < tiles_y then {
+      let top_edge = if i == 0 then float.floor(sy0) == sy0 else last_z == z
+      let tid = ty * tiles_x + tx
+      result = result + [tid * 2 + (if top_edge then 1 else 0)]
+    } else ()
+    last_z = z
+  }
+  result
+  }
+  }
 }
 
 // ── Shape builders ──
@@ -166,33 +226,69 @@ fn render_scene(
   let seg_count = list.len(segments)
   let num_paths = list.len(paints)
 
-  // ── Tile assignment (all columns left of max_x) ──
-  var tile_counts: List[Int] = list.repeat(0, num_tiles)
+  // ── DDA tile assignment + backdrop (command list) ──
+  var tile_cmd_counts: List[Int] = list.repeat(0, num_tiles)
+  var tile_cmds_data: List[Int] = list.repeat(0, num_tiles * MAX_CMDS * 4)
   var tile_seg_ids: List[Int] = list.repeat(0, num_tiles * MAX_SEGS)
+  var tile_seg_counts: List[Int] = list.repeat(0, num_tiles)
 
   let w_f = int.to_float(WIDTH)
   let h_f = int.to_float(HEIGHT)
   let tile_f = int.to_float(TILE)
 
+  // Group segments by path_id
+  var path_starts: List[Int] = list.repeat(0, num_paths)
+  var path_seg_counts: List[Int] = list.repeat(0, num_paths)
   for si in 0..seg_count {
-    let seg = segments[si]
-    if float.abs(seg.p0.y - seg.p1.y) < 0.0001 then () else {
-    let max_x = float.max(seg.p0.x, seg.p1.x)
-    let min_y = float.min(seg.p0.y, seg.p1.y)
-    let max_y = float.max(seg.p0.y, seg.p1.y)
-    let t_max_x = int.min(tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * w_f / tile_f)))
-    let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)))
-    let t_max_y = int.min(tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)))
-    for ty in t_min_y..=t_max_y {
-      for tx in 0..=t_max_x {
-        let tid = ty * tiles_x + tx
-        let slot = tile_counts[tid]
-        if slot < MAX_SEGS then {
-          tile_seg_ids[tid * MAX_SEGS + slot] = si
-          tile_counts[tid] = slot + 1
-        } else ()
+    path_seg_counts[segments[si].path_id] = path_seg_counts[segments[si].path_id] + 1
+  }
+  var ps_acc = 0
+  for pid in 0..num_paths {
+    path_starts[pid] = ps_acc
+    ps_acc = ps_acc + path_seg_counts[pid]
+  }
+
+  for pid in 0..num_paths {
+    var seg_offsets: List[Int] = list.repeat(0, num_tiles)
+    for tid in 0..num_tiles { seg_offsets[tid] = tile_seg_counts[tid] }
+
+    for si_off in 0..path_seg_counts[pid] {
+      let si = path_starts[pid] + si_off
+      let seg = segments[si]
+      if float.abs(seg.p0.y - seg.p1.y) < 0.0001 then () else {
+        let max_x = float.max(seg.p0.x, seg.p1.x)
+        let min_y = float.min(seg.p0.y, seg.p1.y)
+        let max_y = float.max(seg.p0.y, seg.p1.y)
+        let t_max_x = int.min(tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * w_f / tile_f)))
+        let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)))
+        let t_max_y = int.min(tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)))
+        for ty in t_min_y..=t_max_y {
+          for tx in 0..=t_max_x {
+            let tid = ty * tiles_x + tx
+            let slot = tile_seg_counts[tid]
+            if slot < MAX_SEGS then {
+              tile_seg_ids[tid * MAX_SEGS + slot] = si
+              tile_seg_counts[tid] = slot + 1
+            } else ()
+          }
+        }
       }
     }
+
+    // Build commands (no backdrop — all-columns-left doesn't need it)
+    for tid in 0..num_tiles {
+      let sc = tile_seg_counts[tid] - seg_offsets[tid]
+      if sc > 0 then {
+        let ci = tile_cmd_counts[tid]
+        if ci < MAX_CMDS then {
+          let base = tid * MAX_CMDS * 4 + ci * 4
+          tile_cmds_data[base] = pid
+          tile_cmds_data[base + 1] = 0
+          tile_cmds_data[base + 2] = seg_offsets[tid]
+          tile_cmds_data[base + 3] = sc
+          tile_cmd_counts[tid] = ci + 1
+        } else ()
+      } else ()
     }
   }
 
@@ -209,13 +305,18 @@ fn render_scene(
 
   let tc_buf = gpu.create_buffer(device, num_tiles * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
-  for c in tile_counts { gpu.push_u32(c) }
+  for c in tile_cmd_counts { gpu.push_u32(c) }
   gpu.flush_to_buffer(device, tc_buf)
 
   let ts_buf = gpu.create_buffer(device, num_tiles * MAX_SEGS * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
   for id in tile_seg_ids { gpu.push_u32(id) }
   gpu.flush_to_buffer(device, ts_buf)
+
+  let tcmd_buf = gpu.create_buffer(device, num_tiles * MAX_CMDS * 4 * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  gpu.begin_data()
+  for v in tile_cmds_data { gpu.push_u32(v) }
+  gpu.flush_to_buffer(device, tcmd_buf)
 
   let pixel_buf = gpu.create_buffer(device, WIDTH * HEIGHT * 4, gpu.STORAGE)
 
@@ -237,7 +338,7 @@ fn render_scene(
   gpu.begin_bindings()
   gpu.add_buffer_binding(seg_buf) gpu.add_buffer_binding(tc_buf) gpu.add_buffer_binding(ts_buf)
   gpu.add_buffer_binding(pixel_buf) gpu.add_buffer_binding(params_buf)
-  gpu.add_buffer_binding(shadow_buf) gpu.add_buffer_binding(paint_buf)
+  gpu.add_buffer_binding(shadow_buf) gpu.add_buffer_binding(paint_buf) gpu.add_buffer_binding(tcmd_buf)
   let compute_bg = gpu.create_bound_group(device, compute_pipeline, 0)
 
   let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
@@ -364,7 +465,6 @@ fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: 
     solid(0.95, 0.95, 0.98, 1.0),
   ]
 
-  // Combine shape + text cubics and paints
   let cubics = shape_cubics + load_text_cubics()
   let paints = shape_paints + load_text_paints()
 

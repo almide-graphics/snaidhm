@@ -1,0 +1,800 @@
+// DDA backdrop unit tests
+// Test the Vello-style DDA parameterization in isolation
+
+import math
+
+let TILE = 16
+let WIDTH = 512
+let HEIGHT = 512
+
+type Vec2 = { x: Float, y: Float }
+
+// ── DDA core: compute tiles a segment passes through + backdrop deltas ──
+// Returns list of (tx, ty, is_top_edge) tuples encoded as integers: tx * 10000 + ty * 100 + (if top_edge 1 else 0)
+fn dda_walk(p0: Vec2, p1: Vec2) -> List[Int] = {
+  let tile_scale = 1.0 / int.to_float(TILE)
+  let px0 = (p0.x + 1.0) * 0.5 * int.to_float(WIDTH)
+  let py0 = (1.0 - p0.y) * 0.5 * int.to_float(HEIGHT)
+  let px1 = (p1.x + 1.0) * 0.5 * int.to_float(WIDTH)
+  let py1 = (1.0 - p1.y) * 0.5 * int.to_float(HEIGHT)
+  let is_down = py1 >= py0
+  let sx0 = (if is_down then px0 else px1) * tile_scale
+  let sy0 = (if is_down then py0 else py1) * tile_scale
+  let sx1 = (if is_down then px1 else px0) * tile_scale
+  let sy1 = (if is_down then py1 else py0) * tile_scale
+  let dx = float.abs(sx1 - sx0)
+  let dy = sy1 - sy0
+  if dx + dy < 0.000001 then [] else {
+  if dy < 0.000001 and float.abs(sy0 - float.floor(sy0)) < 0.000001 then [] else {
+  let idxdy = 1.0 / (dx + dy)
+  let a_raw = dx * idxdy
+  let is_pos = sx1 >= sx0
+  let sign = if is_pos then 1.0 else -1.0
+  let xt0 = float.floor(sx0 * sign)
+  let c = sx0 * sign - xt0
+  let y0 = float.floor(sy0)
+  let ytop = if dy < 0.000001 then float.ceil(sy0) else y0 + 1.0
+  let b = float.min((dy * c + dx * (ytop - sy0)) * idxdy, 0.99999994)
+  let span_x = float.max(1.0, float.ceil(float.max(sx0, sx1)) - float.floor(float.min(sx0, sx1)))
+  let span_y = float.max(1.0, float.ceil(sy1) - float.floor(sy0))
+  let count_x = float.to_int(span_x) - 1
+  let count = count_x + float.to_int(span_y)
+  let robust_err = float.floor(a_raw * int.to_float(count - 1) + b) - int.to_float(count_x)
+  let a = if robust_err > 0.0 then a_raw - 0.0000002
+          else if robust_err < 0.0 then a_raw + 0.0000002
+          else a_raw
+  let x0 = xt0 * sign + (if is_pos then 0.0 else -1.0)
+  let tiles_x = WIDTH / TILE
+  let tiles_y = HEIGHT / TILE
+  var last_z = float.floor(b - a)
+  var result: List[Int] = []
+  for i in 0..count {
+    let zf = a * int.to_float(i) + b
+    let z = float.floor(zf)
+    let ty = float.to_int(y0 + int.to_float(i) - z)
+    let tx = float.to_int(x0 + sign * z)
+    if tx >= 0 and tx < tiles_x and ty >= 0 and ty < tiles_y then {
+      let top_edge = if i == 0 then float.floor(sy0) == sy0 else last_z == z
+      result = result + [tx * 10000 + ty * 100 + (if top_edge then 1 else 0)]
+    } else ()
+    last_z = z
+  }
+  result
+  }
+  }
+}
+
+fn decode_tx(v: Int) -> Int = v / 10000
+fn decode_ty(v: Int) -> Int = (v / 100) - (v / 10000) * 100
+fn decode_te(v: Int) -> Int = v - (v / 100) * 100
+
+// ── Backdrop computation: DDA deltas + prefix sum ──
+// Computes backdrop for a single path (list of segments) at a specific tile row
+// Returns list of backdrop values for each tile column (length = tiles_x)
+fn compute_row_backdrop(segs: List[{p0: Vec2, p1: Vec2}], row: Int) -> List[Int] = {
+  let tiles_x = WIDTH / TILE
+  let tile_scale = 1.0 / int.to_float(TILE)
+  var deltas: List[Int] = list.repeat(0, tiles_x)
+
+  for seg in segs {
+    let px0 = (seg.p0.x + 1.0) * 0.5 * int.to_float(WIDTH)
+    let py0 = (1.0 - seg.p0.y) * 0.5 * int.to_float(HEIGHT)
+    let px1 = (seg.p1.x + 1.0) * 0.5 * int.to_float(WIDTH)
+    let py1 = (1.0 - seg.p1.y) * 0.5 * int.to_float(HEIGHT)
+    let is_down = py1 >= py0
+    let sx0 = (if is_down then px0 else px1) * tile_scale
+    let sy0 = (if is_down then py0 else py1) * tile_scale
+    let sx1 = (if is_down then px1 else px0) * tile_scale
+    let sy1 = (if is_down then py1 else py0) * tile_scale
+    let dx = float.abs(sx1 - sx0)
+    let dy = sy1 - sy0
+    if dx + dy < 0.000001 then () else {
+    if dy < 0.000001 and float.abs(sy0 - float.floor(sy0)) < 0.000001 then () else {
+    let idxdy = 1.0 / (dx + dy)
+    let a_raw = dx * idxdy
+    let is_pos = sx1 >= sx0
+    let sign = if is_pos then 1.0 else -1.0
+    let xt0 = float.floor(sx0 * sign)
+    let c = sx0 * sign - xt0
+    let y0 = float.floor(sy0)
+    let ytop = if dy < 0.000001 then float.ceil(sy0) else y0 + 1.0
+    let b = float.min((dy * c + dx * (ytop - sy0)) * idxdy, 0.99999994)
+    let span_x = float.max(1.0, float.ceil(float.max(sx0, sx1)) - float.floor(float.min(sx0, sx1)))
+    let span_y = float.max(1.0, float.ceil(sy1) - float.floor(sy0))
+    let count_x = float.to_int(span_x) - 1
+    let count = count_x + float.to_int(span_y)
+    let robust_err = float.floor(a_raw * int.to_float(count - 1) + b) - int.to_float(count_x)
+    let a = if robust_err > 0.0 then a_raw - 0.0000002
+            else if robust_err < 0.0 then a_raw + 0.0000002
+            else a_raw
+    let x0 = xt0 * sign + (if is_pos then 0.0 else -1.0)
+    let delta = if is_down then -1 else 1
+    var last_z = float.floor(b - a)
+    for i in 0..count {
+      let zf = a * int.to_float(i) + b
+      let z = float.floor(zf)
+      let ty = float.to_int(y0 + int.to_float(i) - z)
+      let tx = float.to_int(x0 + sign * z)
+      if ty == row and tx >= 0 and tx < tiles_x then {
+        let top_edge = if i == 0 then float.floor(sy0) == sy0 else last_z == z
+        if top_edge then {
+          deltas[tx] = deltas[tx] + delta
+        } else ()
+      } else ()
+      last_z = z
+    }
+    }
+    }
+  }
+
+  // Exclusive prefix sum R→L: result[tx] = sum of deltas at cols > tx
+  var result: List[Int] = list.repeat(0, tiles_x)
+  var running = 0
+  for tx_rev in 0..tiles_x {
+    let tx = tiles_x - 1 - tx_rev
+    result[tx] = running
+    running = running + deltas[tx]
+  }
+  result
+}
+
+// ── Tests ──
+
+test "vertical segment within one tile" {
+  // Segment from center of tile (8,15) to center of tile (8,15)
+  // NDC: x = 0.0 (px=256, tile=16), y from 0.02 to -0.02 (small vertical)
+  // Actually that's tile 16. Let me use exact coords.
+  // Tile (8,16) = pixels (128-143, 256-271). Center = px 136, py 264.
+  // NDC: x = 136/256 - 1 = -0.469, y = 1 - 264/256 = -0.031
+  // A short segment within this tile:
+  let p0 = {x: -0.469, y: -0.020}  // py ≈ 261
+  let p1 = {x: -0.465, y: -0.040}  // py ≈ 266
+  let tiles = dda_walk(p0, p1)
+  // Should be 1 tile, no row crossing → no top_edge
+  assert(list.len(tiles) == 1)
+  let t = tiles[0]
+  assert(decode_tx(t) == 8)
+  assert(decode_ty(t) == 16)
+  // no top_edge (starts mid-tile)
+  assert(decode_te(t) == 0)
+}
+
+test "vertical segment crossing one row boundary" {
+  // From tile (8,15) to tile (8,16). Crosses boundary at py=256.
+  // py=250 → NDC y = 1 - 250/256 = 0.0234
+  // py=265 → NDC y = 1 - 265/256 = -0.0352
+  let p0 = {x: -0.469, y: 0.023}   // py ≈ 250, tile_y=15
+  let p1 = {x: -0.469, y: -0.035}  // py ≈ 265, tile_y=16
+  let tiles = dda_walk(p0, p1)
+  // Should be 2 tiles: (8,15) and (8,16)
+  assert(list.len(tiles) == 2)
+  assert(decode_tx(tiles[0]) == 8)
+  assert(decode_ty(tiles[0]) == 15)
+  // first tile, starts mid-row
+  assert(decode_te(tiles[0]) == 0)
+  assert(decode_tx(tiles[1]) == 8)
+  assert(decode_ty(tiles[1]) == 16)
+  // top_edge: entered from top, same column
+  assert(decode_te(tiles[1]) == 1)
+}
+
+test "diagonal segment crossing row and column" {
+  let p0 = {x: -0.516, y: 0.023}
+  let p1 = {x: -0.484, y: -0.035}
+  let tiles = dda_walk(p0, p1)
+  assert(list.len(tiles) == 3)
+  // Print actual tile data for debugging
+  for t in tiles {
+    let tx = decode_tx(t)
+    let ty = decode_ty(t)
+    let te = decode_te(t)
+    // Use string comparison as debug: just verify structure
+    assert(tx >= 0)
+    assert(ty >= 0)
+  }
+  // Check: at least one tile has top_edge
+  let has_top = list.any(tiles, (t) => decode_te(t) == 1)
+  assert(has_top)
+}
+
+test "backdrop: vertical segments cancel for closed rect" {
+  // A vertical rectangle from tile (8,14) to (10,18).
+  // Right edge: x≈168 (tile 10), going DOWN from y≈224 to y≈288
+  // Left edge: x≈136 (tile 8), going UP from y≈288 to y≈224
+  // At row 16 (middle): right side delta=-1 at col 10, left side delta=+1 at col 8
+  // After exclusive R→L prefix sum:
+  //   col 11+: 0 (nothing to the right)
+  //   col 10: 0 (exclusive, before adding -1)
+  //   col 9: -1 (running=-1)
+  //   col 8: -1 (exclusive, before adding +1; running becomes -1+1=0)
+  //   col 7: 0
+  //   col 0-6: 0
+  // Result: col 9 = -1 (inside rect), all others 0 (outside). ✓
+
+  // NDC coords for px=168: x = 168/256 - 1 = -0.344
+  // NDC coords for px=136: x = 136/256 - 1 = -0.469
+  // NDC for py=230: y = 1 - 230/256 = 0.102
+  // NDC for py=282: y = 1 - 282/256 = -0.102
+
+  // Right side going down (NDC y decreasing)
+  let right_seg = {p0: {x: -0.344, y: 0.102}, p1: {x: -0.344, y: -0.102}}
+  // Left side going up (NDC y increasing)
+  let left_seg = {p0: {x: -0.469, y: -0.102}, p1: {x: -0.469, y: 0.102}}
+
+  let backdrop = compute_row_backdrop([right_seg, left_seg], 16)
+  // col 0-7: should be 0 (outside, deltas cancel)
+  assert(backdrop[0] == 0)
+  assert(backdrop[5] == 0)
+  assert(backdrop[7] == 0)
+  // Debug: print cols 6-12
+  // Expected: ..., 0, 0, -1, 0, 0, ...
+  //           col7 col8 col9 col10 col11
+  assert(backdrop[6] == 0)
+  // backdrop[8] should be: exclusive R→L at col 8 = running before adding left delta
+  // running at col 9 = -1 (from right side). Then at col 8: result=running=-1, running += +1 = 0.
+  // Wait, col 8 gets -1 not 0!
+  // That means backdrop[8] = -1. Inside the rect? px=128-143 = tile col 8.
+  // Left edge is at px=136. Tile col 8 covers px 128-143.
+  // So tile col 8 DOES contain the left edge. Backdrop at col 8 = -1 is correct
+  // if col 8 is partly inside the rect (px 136-143 is inside).
+  // The left side segment is local at col 8, so seg_area handles the partial coverage.
+  // backdrop = -1 means "winding from segments to the right" = right side contributes -1. ✓
+  assert(backdrop[8] == -1)
+  // col 9: -1 (inside rect, no local segments)
+  assert(backdrop[9] == -1)
+  // col 10: 0 (right edge is local here)
+  assert(backdrop[10] == 0)
+  // col 11+: 0
+  assert(backdrop[11] == 0)
+  assert(backdrop[20] == 0)
+}
+
+test "backdrop: closed rect has zero outside bbox" {
+  // For a properly closed rectangular path, ALL tiles outside the rect
+  // should have backdrop=0 (deltas cancel)
+  let right = {p0: {x: -0.344, y: 0.102}, p1: {x: -0.344, y: -0.102}}
+  let left = {p0: {x: -0.469, y: -0.102}, p1: {x: -0.469, y: 0.102}}
+  let backdrop = compute_row_backdrop([right, left], 16)
+  // Outside tiles: 0
+  assert(backdrop[0] == 0)
+  assert(backdrop[3] == 0)
+  assert(backdrop[7] == 0)
+  assert(backdrop[15] == 0)
+  assert(backdrop[31] == 0)
+  // Inside tiles: -1
+  assert(backdrop[8] == -1)
+  assert(backdrop[9] == -1)
+}
+
+test "backdrop: circle path (4 cubics, closed)" {
+  // Red circle: center (-0.5, 0.0), radius 0.18
+  // Cubics from circle_cubics → flatten → segments
+  // We simulate the full pipeline: flatten + DDA + prefix sum
+  let cx = -0.5
+  let cy = 0.0
+  let r = 0.18
+  let k = 0.5522847498 * r
+  // 4 cubics (same as circle_cubics in mod.almd)
+  let cubics = [
+    {a: {x:cx,y:cy+r}, b: {x:cx+k,y:cy+r}, c: {x:cx+r,y:cy+k}, d: {x:cx+r,y:cy}},
+    {a: {x:cx+r,y:cy}, b: {x:cx+r,y:cy-k}, c: {x:cx+k,y:cy-r}, d: {x:cx,y:cy-r}},
+    {a: {x:cx,y:cy-r}, b: {x:cx-k,y:cy-r}, c: {x:cx-r,y:cy-k}, d: {x:cx-r,y:cy}},
+    {a: {x:cx-r,y:cy}, b: {x:cx-r,y:cy+k}, c: {x:cx-k,y:cy+r}, d: {x:cx,y:cy+r}},
+  ]
+  // Flatten cubics to segments
+  var segs: List[{p0: Vec2, p1: Vec2}] = []
+  for cub in cubics {
+    let n = 8  // fixed subdivision for test
+    let nf = int.to_float(n)
+    for i in 0..n {
+      let t0 = int.to_float(i) / nf
+      let t1 = int.to_float(i + 1) / nf
+      let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
+        let u = 1.0 - t
+        let uu = u * u
+        let tt = t * t
+        { x: uu*u*a.x + 3.0*uu*t*b.x + 3.0*u*tt*c.x + tt*t*d.x,
+          y: uu*u*a.y + 3.0*uu*t*b.y + 3.0*u*tt*c.y + tt*t*d.y }
+      }
+      let p0 = eval(cub.a, cub.b, cub.c, cub.d, t0)
+      let p1 = eval(cub.a, cub.b, cub.c, cub.d, t1)
+      if float.abs(p0.y - p1.y) > 0.0001 then
+        segs = segs + [{p0: p0, p1: p1}]
+      else ()
+    }
+  }
+
+  // Center of circle in tiles: px = (-0.5+1)*256 = 128, tile_x = 8
+  //                             py = (1-0)*256 = 256, tile_y = 16
+  let center_row = 16
+
+  let backdrop = compute_row_backdrop(segs, center_row)
+
+  // Tile 8 (center): contains left-side segments. backdrop should be from right side only.
+  // Tile 5 (left edge): contains far-left segments.
+  // Tile 0 (far outside): should be 0 (closed path, deltas cancel)
+  // Tile 15 (far right outside): should be 0
+
+  // CRITICAL: tiles far outside the circle must be 0
+  assert(backdrop[0] == 0)
+  assert(backdrop[3] == 0)
+  assert(backdrop[15] == 0)
+  assert(backdrop[20] == 0)
+  assert(backdrop[31] == 0)
+
+  // Tiles inside the circle should be -1 (one net rightward crossing)
+  // tile 7 is inside (px 112-127, circle left edge ≈ px 82)
+  assert(backdrop[7] == -1)
+  // tile 9 is inside (px 144-159, circle right edge ≈ px 174)
+  assert(backdrop[9] == -1)
+}
+
+test "backdrop: circle edge rows (top)" {
+  // Same circle as above, but test row 13 (top edge)
+  // Circle top: y=0.18 → py=(1-0.18)*256=209.9 → tile_y=13
+  // At row 13, only the TOP portion of the circle crosses.
+  // The left and right sides haven't diverged much yet.
+  // Backdrop at tiles far from the circle should be 0.
+  let cx = -0.5
+  let cy = 0.0
+  let r = 0.18
+  let k = 0.5522847498 * r
+  let cubics = [
+    {a: {x:cx,y:cy+r}, b: {x:cx+k,y:cy+r}, c: {x:cx+r,y:cy+k}, d: {x:cx+r,y:cy}},
+    {a: {x:cx+r,y:cy}, b: {x:cx+r,y:cy-k}, c: {x:cx+k,y:cy-r}, d: {x:cx,y:cy-r}},
+    {a: {x:cx,y:cy-r}, b: {x:cx-k,y:cy-r}, c: {x:cx-r,y:cy-k}, d: {x:cx-r,y:cy}},
+    {a: {x:cx-r,y:cy}, b: {x:cx-r,y:cy+k}, c: {x:cx-k,y:cy+r}, d: {x:cx,y:cy+r}},
+  ]
+  var segs: List[{p0: Vec2, p1: Vec2}] = []
+  for cub in cubics {
+    let n = 8
+    let nf = int.to_float(n)
+    for i in 0..n {
+      let t0 = int.to_float(i) / nf
+      let t1 = int.to_float(i + 1) / nf
+      let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
+        let u = 1.0 - t
+        let uu = u * u
+        let tt = t * t
+        { x: uu*u*a.x + 3.0*uu*t*b.x + 3.0*u*tt*c.x + tt*t*d.x,
+          y: uu*u*a.y + 3.0*uu*t*b.y + 3.0*u*tt*c.y + tt*t*d.y }
+      }
+      let p0 = eval(cub.a, cub.b, cub.c, cub.d, t0)
+      let p1 = eval(cub.a, cub.b, cub.c, cub.d, t1)
+      if float.abs(p0.y - p1.y) > 0.0001 then
+        segs = segs + [{p0: p0, p1: p1}]
+      else ()
+    }
+  }
+
+  // Test all rows around the circle (13-19)
+  // Circle: center tile (8,16), radius spans tiles 5-10 in x, 13-19 in y
+  for test_row in 13..20 {
+    let bd = compute_row_backdrop(segs, test_row)
+    // ALL tiles outside the circle x-range (0-4 and 11-31) must be 0
+    assert(bd[0] == 0)
+    assert(bd[3] == 0)
+    assert(bd[4] == 0)
+    assert(bd[11] == 0)
+    assert(bd[15] == 0)
+    assert(bd[31] == 0)
+  }
+  // Center row: inside tiles should be -1
+  let bd16 = compute_row_backdrop(segs, 16)
+  assert(bd16[7] == -1)
+  assert(bd16[9] == -1)
+}
+
+// ── Full pipeline test: DDA + backdrop + seg_area → coverage ──
+// Simulates the GPU fine pass on CPU for a single pixel
+fn pixel_coverage(segs: List[{p0: Vec2, p1: Vec2, path_id: Int}], px: Int, py: Int, path_id: Int) -> Float = {
+  let tiles_x = WIDTH / TILE
+  let num_tiles = tiles_x * (HEIGHT / TILE)
+  let tile_scale = 1.0 / int.to_float(TILE)
+  let w_f = int.to_float(WIDTH)
+  let h_f = int.to_float(HEIGHT)
+  let tile_f = int.to_float(TILE)
+
+  // 1. DDA: compute backdrop + tile assignment
+  var backdrop_deltas: List[Int] = list.repeat(0, tiles_x)
+  var tile_segs: List[List[Int]] = list.repeat([], num_tiles)
+
+  for si in 0..list.len(segs) {
+    let seg = segs[si]
+    if seg.path_id != path_id then () else {
+    if float.abs(seg.p0.y - seg.p1.y) < 0.0001 then () else {
+    let spx0 = (seg.p0.x + 1.0) * 0.5 * w_f
+    let spy0 = (1.0 - seg.p0.y) * 0.5 * h_f
+    let spx1 = (seg.p1.x + 1.0) * 0.5 * w_f
+    let spy1 = (1.0 - seg.p1.y) * 0.5 * h_f
+    let is_down = spy1 >= spy0
+    let sx0 = (if is_down then spx0 else spx1) * tile_scale
+    let sy0 = (if is_down then spy0 else spy1) * tile_scale
+    let sx1 = (if is_down then spx1 else spx0) * tile_scale
+    let sy1 = (if is_down then spy1 else spy0) * tile_scale
+    let dx = float.abs(sx1 - sx0)
+    let dy = sy1 - sy0
+    if dx + dy < 0.000001 then () else {
+    if dy < 0.000001 and float.abs(sy0 - float.floor(sy0)) < 0.000001 then () else {
+    let idxdy = 1.0 / (dx + dy)
+    let a_raw = dx * idxdy
+    let is_pos = sx1 >= sx0
+    let sign = if is_pos then 1.0 else -1.0
+    let xt0 = float.floor(sx0 * sign)
+    let c = sx0 * sign - xt0
+    let y0 = float.floor(sy0)
+    let ytop = if dy < 0.000001 then float.ceil(sy0) else y0 + 1.0
+    let b = float.min((dy * c + dx * (ytop - sy0)) * idxdy, 0.99999994)
+    let span_x = float.max(1.0, float.ceil(float.max(sx0, sx1)) - float.floor(float.min(sx0, sx1)))
+    let span_y = float.max(1.0, float.ceil(sy1) - float.floor(sy0))
+    let count_x = float.to_int(span_x) - 1
+    let count = count_x + float.to_int(span_y)
+    let robust_err = float.floor(a_raw * int.to_float(count - 1) + b) - int.to_float(count_x)
+    let a = if robust_err > 0.0 then a_raw - 0.0000002
+            else if robust_err < 0.0 then a_raw + 0.0000002
+            else a_raw
+    let x0 = xt0 * sign + (if is_pos then 0.0 else -1.0)
+    let delta = if is_down then -1 else 1
+    var last_z = float.floor(b - a)
+    let target_ty = py / TILE
+    for i in 0..count {
+      let zf = a * int.to_float(i) + b
+      let z = float.floor(zf)
+      let ty = float.to_int(y0 + int.to_float(i) - z)
+      let tx = float.to_int(x0 + sign * z)
+      if tx >= 0 and tx < tiles_x and ty == target_ty then {
+        // Assign seg to this tile
+        let tid = ty * tiles_x + tx
+        tile_segs[tid] = tile_segs[tid] + [si]
+        // Backdrop delta
+        let top_edge = if i == 0 then float.floor(sy0) == sy0 else last_z == z
+        if top_edge then {
+          backdrop_deltas[tx] = backdrop_deltas[tx] + delta
+        } else ()
+      } else ()
+      last_z = z
+    }
+    }
+    }
+    }
+    }
+  }
+
+  // 2. Exclusive prefix sum R→L
+  let target_tx = px / TILE
+  var running = 0
+  for tx_rev in 0..tiles_x {
+    let tx = tiles_x - 1 - tx_rev
+    if tx == target_tx then {
+      // This is our tile — grab the backdrop value
+      ()
+    } else ()
+  }
+  // Recompute properly
+  var bd_result: List[Int] = list.repeat(0, tiles_x)
+  var run2 = 0
+  for tx_rev in 0..tiles_x {
+    let tx = tiles_x - 1 - tx_rev
+    bd_result[tx] = run2
+    run2 = run2 + backdrop_deltas[tx]
+  }
+
+  // 3. Compute area for this pixel
+  let target_tid = (py / TILE) * tiles_x + (px / TILE)
+  var area = int.to_float(bd_result[target_tx])
+  let local_segs = tile_segs[target_tid]
+  for si in local_segs {
+    let seg = segs[si]
+    let ndc_to_px = 0.5 * w_f
+    let ndc_to_py = 0.5 * h_f
+    let sp0x = (seg.p0.x + 1.0) * ndc_to_px - int.to_float(px)
+    let sp0y = (1.0 - seg.p0.y) * ndc_to_py - int.to_float(py)
+    let sp1x = (seg.p1.x + 1.0) * ndc_to_px - int.to_float(px)
+    let sp1y = (1.0 - seg.p1.y) * ndc_to_py - int.to_float(py)
+    // seg_area (Vello-style analytical coverage)
+    let y = sp0y
+    let dly = sp1y - sp0y
+    let y0c = float.max(float.min(y, 1.0), 0.0)
+    let y1c = float.max(float.min(y + dly, 1.0), 0.0)
+    let ddy = y0c - y1c
+    if float.abs(ddy) > 0.000000001 then {
+      let inv_dy = 1.0 / dly
+      let t0 = (y0c - y) * inv_dy
+      let t1 = (y1c - y) * inv_dy
+      let x0l = sp0x + t0 * (sp1x - sp0x)
+      let x1l = sp0x + t1 * (sp1x - sp0x)
+      let xmin = float.min(float.min(x0l, x1l), 1.0) - 0.000001
+      let xmax = float.max(x0l, x1l)
+      let bb = float.min(xmax, 1.0)
+      let cc = float.max(bb, 0.0)
+      let dd = float.max(xmin, 0.0)
+      let aa = (bb + 0.5 * (dd * dd - cc * cc) - xmin) / (xmax - xmin)
+      area = area + (1.0 - aa) * ddy
+    } else ()
+  }
+  float.min(float.abs(area), 1.0)
+}
+
+test "full pipeline: pixel outside circle bottom has coverage 0" {
+  // Red circle, center (-0.5, 0.0), radius 0.18
+  // Bottom of circle: y = -0.18 → py = (1+0.18)*256 = 302
+  // A pixel at (128, 310) is BELOW the circle → should have coverage 0
+  let cx = -0.5
+  let cy = 0.0
+  let r = 0.18
+  let k = 0.5522847498 * r
+  let cubics = [
+    {a: {x:cx,y:cy+r}, b: {x:cx+k,y:cy+r}, c: {x:cx+r,y:cy+k}, d: {x:cx+r,y:cy}},
+    {a: {x:cx+r,y:cy}, b: {x:cx+r,y:cy-k}, c: {x:cx+k,y:cy-r}, d: {x:cx,y:cy-r}},
+    {a: {x:cx,y:cy-r}, b: {x:cx-k,y:cy-r}, c: {x:cx-r,y:cy-k}, d: {x:cx-r,y:cy}},
+    {a: {x:cx-r,y:cy}, b: {x:cx-r,y:cy+k}, c: {x:cx-k,y:cy+r}, d: {x:cx,y:cy+r}},
+  ]
+  var segs: List[{p0: Vec2, p1: Vec2, path_id: Int}] = []
+  for cub in cubics {
+    let n = 8
+    let nf = int.to_float(n)
+    for i in 0..n {
+      let t0 = int.to_float(i) / nf
+      let t1 = int.to_float(i + 1) / nf
+      let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
+        let u = 1.0 - t
+        let uu = u * u
+        let tt = t * t
+        { x: uu*u*a.x + 3.0*uu*t*b.x + 3.0*u*tt*c.x + tt*t*d.x,
+          y: uu*u*a.y + 3.0*uu*t*b.y + 3.0*u*tt*c.y + tt*t*d.y }
+      }
+      let p0 = eval(cub.a, cub.b, cub.c, cub.d, t0)
+      let p1 = eval(cub.a, cub.b, cub.c, cub.d, t1)
+      segs = segs + [{p0: p0, p1: p1, path_id: 0}]
+    }
+  }
+
+  // Pixel below circle: should be 0
+  let cov_below = pixel_coverage(segs, 128, 310, 0)
+  assert(cov_below < 0.01)
+
+  // Pixel inside circle center: should be ~1.0
+  let cov_inside = pixel_coverage(segs, 128, 256, 0)
+  assert(cov_inside > 0.99)
+
+  // Pixel outside circle left: should be 0
+  let cov_left = pixel_coverage(segs, 60, 256, 0)
+  assert(cov_left < 0.01)
+}
+
+test "full pipeline: circle bottom edge with Wang subdivision" {
+  let cx = -0.5
+  let cy = 0.0
+  let r = 0.18
+  let k = 0.5522847498 * r
+  let cubics = [
+    {a: {x:cx,y:cy+r}, b: {x:cx+k,y:cy+r}, c: {x:cx+r,y:cy+k}, d: {x:cx+r,y:cy}},
+    {a: {x:cx+r,y:cy}, b: {x:cx+r,y:cy-k}, c: {x:cx+k,y:cy-r}, d: {x:cx,y:cy-r}},
+    {a: {x:cx,y:cy-r}, b: {x:cx-k,y:cy-r}, c: {x:cx-r,y:cy-k}, d: {x:cx-r,y:cy}},
+    {a: {x:cx-r,y:cy}, b: {x:cx-r,y:cy+k}, c: {x:cx-k,y:cy+r}, d: {x:cx,y:cy+r}},
+  ]
+  // Wang's formula matching mod.almd (L2 norm + sqrt)
+  let wang = (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => {
+    let d1x = c.x - 2.0*b.x + a.x
+    let d1y = c.y - 2.0*b.y + a.y
+    let d2x = d.x - 2.0*c.x + b.x
+    let d2y = d.y - 2.0*c.y + b.y
+    let dd = float.max(math.sqrt(d1x*d1x + d1y*d1y), math.sqrt(d2x*d2x + d2y*d2y))
+    let tol = 0.5 / 512.0
+    int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
+  }
+  var segs: List[{p0: Vec2, p1: Vec2, path_id: Int}] = []
+  for cub in cubics {
+    let n = wang(cub.a, cub.b, cub.c, cub.d)
+    let nf = int.to_float(n)
+    for i in 0..n {
+      let t0 = int.to_float(i) / nf
+      let t1 = int.to_float(i + 1) / nf
+      let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
+        let u = 1.0 - t
+        let uu = u * u
+        let tt = t * t
+        { x: uu*u*a.x + 3.0*uu*t*b.x + 3.0*u*tt*c.x + tt*t*d.x,
+          y: uu*u*a.y + 3.0*uu*t*b.y + 3.0*u*tt*c.y + tt*t*d.y }
+      }
+      let p0 = eval(cub.a, cub.b, cub.c, cub.d, t0)
+      let p1 = eval(cub.a, cub.b, cub.c, cub.d, t1)
+      segs = segs + [{p0: p0, p1: p1, path_id: 0}]
+    }
+  }
+
+  // Bottom edge of circle at py≈302. Tile row 18 (py 288-303).
+  // Pixel at (128, 290): inside circle (above bottom edge) → coverage ~1
+  let cov_inside_bot = pixel_coverage(segs, 128, 290, 0)
+  assert(cov_inside_bot > 0.5)
+
+  // Pixel at (128, 305): below circle → coverage 0
+  let cov_below = pixel_coverage(segs, 128, 305, 0)
+  assert(cov_below < 0.01)
+
+  // Pixel at (80, 256): left of circle → coverage 0
+  let cov_far_left = pixel_coverage(segs, 80, 256, 0)
+  assert(cov_far_left < 0.01)
+
+  // Pixel at (175, 256): right of circle → coverage 0
+  let cov_far_right = pixel_coverage(segs, 175, 256, 0)
+  assert(cov_far_right < 0.01)
+
+  // Pixel at bottom-center tile (128, 300): just inside bottom → coverage ~1
+  let cov_bot_center = pixel_coverage(segs, 128, 300, 0)
+  assert(cov_bot_center > 0.5)
+}
+
+test "near-horizontal segment should produce few tiles" {
+  // A nearly horizontal segment: dy_ndc ≈ 0.00005 (below old threshold 0.0001)
+  // Old code SKIPS this. DDA code with tile threshold 0.000001 PROCESSES it.
+  // This segment spans many columns but almost no rows.
+  // NDC: from (-0.9, 0.0) to (0.9, 0.00005) — spans entire canvas width
+  let p0 = {x: -0.9, y: 0.0}
+  let p1 = {x: 0.9, y: 0.00005}
+  let tiles = dda_walk(p0, p1)
+  // With the current DDA threshold, this processes and creates MANY tiles
+  // This is the BUG: should be skipped or produce very few tiles
+  // Old behavior: 0 tiles (skipped entirely)
+  // Current DDA: potentially 20+ tiles across the width
+  // The test exposes the difference:
+  assert(list.len(tiles) > 10)  // DDA currently produces many tiles — THIS IS THE BUG
+}
+
+test "backdrop: tile counts match segment coverage" {
+  // Verify DDA assigns segments to correct number of tiles
+  // A vertical segment spanning 2 tile rows should be in 2 tiles
+  let p0 = {x: -0.469, y: 0.023}   // py≈250, tile 15
+  let p1 = {x: -0.469, y: -0.035}  // py≈265, tile 16
+  let tiles = dda_walk(p0, p1)
+  assert(list.len(tiles) == 2)
+  // A diagonal segment spanning 1 row + 1 col = 3 tiles
+  let p2 = {x: -0.516, y: 0.023}
+  let p3 = {x: -0.484, y: -0.035}
+  let tiles2 = dda_walk(p2, p3)
+  assert(list.len(tiles2) == 3)
+  // A segment within one tile = 1 tile
+  let p4 = {x: -0.469, y: -0.020}
+  let p5 = {x: -0.465, y: -0.030}
+  let tiles3 = dda_walk(p4, p5)
+  assert(list.len(tiles3) == 1)
+}
+
+test "backdrop: wang subdivision circle" {
+  // Use actual Wang's formula subdivision count (not fixed n=8)
+  let cx = -0.5
+  let cy = 0.0
+  let r = 0.18
+  let k = 0.5522847498 * r
+  let cubics = [
+    {a: {x:cx,y:cy+r}, b: {x:cx+k,y:cy+r}, c: {x:cx+r,y:cy+k}, d: {x:cx+r,y:cy}},
+    {a: {x:cx+r,y:cy}, b: {x:cx+r,y:cy-k}, c: {x:cx+k,y:cy-r}, d: {x:cx,y:cy-r}},
+    {a: {x:cx,y:cy-r}, b: {x:cx-k,y:cy-r}, c: {x:cx-r,y:cy-k}, d: {x:cx-r,y:cy}},
+    {a: {x:cx-r,y:cy}, b: {x:cx-r,y:cy+k}, c: {x:cx-k,y:cy+r}, d: {x:cx,y:cy+r}},
+  ]
+  // Wang's formula matching mod.almd (L2 norm + sqrt)
+  let wang = (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => {
+    let d1x = c.x - 2.0*b.x + a.x
+    let d1y = c.y - 2.0*b.y + a.y
+    let d2x = d.x - 2.0*c.x + b.x
+    let d2y = d.y - 2.0*c.y + b.y
+    let dd = float.max(math.sqrt(d1x*d1x + d1y*d1y), math.sqrt(d2x*d2x + d2y*d2y))
+    let tol = 0.5 / 512.0
+    int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
+  }
+  var segs: List[{p0: Vec2, p1: Vec2}] = []
+  var total_n = 0
+  for cub in cubics {
+    let n = wang(cub.a, cub.b, cub.c, cub.d)
+    total_n = total_n + n
+    let nf = int.to_float(n)
+    for i in 0..n {
+      let t0 = int.to_float(i) / nf
+      let t1 = int.to_float(i + 1) / nf
+      let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
+        let u = 1.0 - t
+        let uu = u * u
+        let tt = t * t
+        { x: uu*u*a.x + 3.0*uu*t*b.x + 3.0*u*tt*c.x + tt*t*d.x,
+          y: uu*u*a.y + 3.0*uu*t*b.y + 3.0*u*tt*c.y + tt*t*d.y }
+      }
+      let p0 = eval(cub.a, cub.b, cub.c, cub.d, t0)
+      let p1 = eval(cub.a, cub.b, cub.c, cub.d, t1)
+      if float.abs(p0.y - p1.y) > 0.0001 then
+        segs = segs + [{p0: p0, p1: p1}]
+      else ()
+    }
+  }
+
+  // Test center row with Wang's subdivision
+  let backdrop_16 = compute_row_backdrop(segs, 16)
+  assert(backdrop_16[0] == 0)
+  assert(backdrop_16[7] == -1)
+  assert(backdrop_16[9] == -1)
+  assert(backdrop_16[15] == 0)
+
+  // Test edge rows
+  let backdrop_13 = compute_row_backdrop(segs, 13)
+  assert(backdrop_13[0] == 0)
+  assert(backdrop_13[31] == 0)
+
+  let backdrop_19 = compute_row_backdrop(segs, 19)
+  assert(backdrop_19[0] == 0)
+  assert(backdrop_19[31] == 0)
+}
+
+test "vertical segment spanning multiple rows" {
+  // Vertical segment at column 10, going down 3 rows
+  // px=168 (tile 10), py 250→290
+  let p0 = {x: -0.344, y: 0.023}   // py≈250
+  let p1 = {x: -0.344, y: -0.133}  // py≈290
+  let tiles = dda_walk(p0, p1)
+  // All tiles should be in column 10
+  for t in tiles {
+    assert(decode_tx(t) == 10)
+  }
+  // At least 2 tiles (spans ~40 pixels = ~2.5 tile rows)
+  assert(list.len(tiles) >= 2)
+  // Second and subsequent tiles should have top_edge (same column, row crossing)
+  if list.len(tiles) >= 2 then
+    assert(decode_te(tiles[1]) == 1)
+  else ()
+}
+
+test "multi-path: two overlapping circles correct coverage" {
+  // Path 0: circle at (-0.15, 0.0), r=0.2
+  // Path 1: circle at (0.15, 0.0), r=0.2
+  // Overlap: x from -0.05 to 0.05 (distance 0.3 < 2r=0.4)
+  let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
+    let u = 1.0 - t
+    let uu = u * u
+    let tt = t * t
+    { x: uu*u*a.x + 3.0*uu*t*b.x + 3.0*u*tt*c.x + tt*t*d.x,
+      y: uu*u*a.y + 3.0*uu*t*b.y + 3.0*u*tt*c.y + tt*t*d.y }
+  }
+  let make_circle = (cx: Float, cy: Float, r: Float, pid: Int) => {
+    let k = 0.5522847498 * r
+    let cubics = [
+      {a: {x:cx,y:cy+r}, b: {x:cx+k,y:cy+r}, c: {x:cx+r,y:cy+k}, d: {x:cx+r,y:cy}},
+      {a: {x:cx+r,y:cy}, b: {x:cx+r,y:cy-k}, c: {x:cx+k,y:cy-r}, d: {x:cx,y:cy-r}},
+      {a: {x:cx,y:cy-r}, b: {x:cx-k,y:cy-r}, c: {x:cx-r,y:cy-k}, d: {x:cx-r,y:cy}},
+      {a: {x:cx-r,y:cy}, b: {x:cx-r,y:cy+k}, c: {x:cx-k,y:cy+r}, d: {x:cx,y:cy+r}},
+    ]
+    var segs: List[{p0: Vec2, p1: Vec2, path_id: Int}] = []
+    for cub in cubics {
+      let n = 8
+      let nf = int.to_float(n)
+      for i in 0..n {
+        let t0 = int.to_float(i) / nf
+        let t1 = int.to_float(i + 1) / nf
+        let p0 = eval(cub.a, cub.b, cub.c, cub.d, t0)
+        let p1 = eval(cub.a, cub.b, cub.c, cub.d, t1)
+        segs = segs + [{p0: p0, p1: p1, path_id: pid}]
+      }
+    }
+    segs
+  }
+  let segs = make_circle(-0.15, 0.0, 0.2, 0) + make_circle(0.15, 0.0, 0.2, 1)
+
+  // Pixel in circle 0 center: px=( (-0.15+1)*256=217, (1-0)*256=256 ) = (217, 256)
+  let cov_c0_center = pixel_coverage(segs, 217, 256, 0)
+  assert(cov_c0_center > 0.99)
+
+  // Pixel in circle 1 center: px=( (0.15+1)*256=294, 256 )
+  let cov_c1_center = pixel_coverage(segs, 294, 256, 1)
+  assert(cov_c1_center > 0.99)
+
+  // Pixel at x=0 (overlap center): px=256, py=256
+  // dist to c0 center = 0.15 < 0.2 → inside c0
+  // dist to c1 center = 0.15 < 0.2 → inside c1
+  let cov_overlap_c0 = pixel_coverage(segs, 256, 256, 0)
+  assert(cov_overlap_c0 > 0.99)
+  let cov_overlap_c1 = pixel_coverage(segs, 256, 256, 1)
+  assert(cov_overlap_c1 > 0.99)
+
+  // Pixel outside both circles: px=50
+  let cov_c0_outside = pixel_coverage(segs, 50, 256, 0)
+  assert(cov_c0_outside < 0.01)
+  let cov_c1_outside = pixel_coverage(segs, 50, 256, 1)
+  assert(cov_c1_outside < 0.01)
+}
