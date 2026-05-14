@@ -303,12 +303,14 @@ export function contoursToCubicBeziers(contours, scale, offsetX, offsetY) {
       const next = expanded[(i + 1) % expanded.length];
 
       if (curr.onCurve && next.onCurve) {
-        // Line segment → degenerate cubic
+        // Line segment → cubic with evenly spaced control points (Wang N=1)
+        const x0 = curr.x * scale + offsetX, y0 = curr.y * scale + offsetY;
+        const x1 = next.x * scale + offsetX, y1 = next.y * scale + offsetY;
         beziers.push({
-          p0: [curr.x * scale + offsetX, curr.y * scale + offsetY],
-          p1: [curr.x * scale + offsetX, curr.y * scale + offsetY],
-          p2: [next.x * scale + offsetX, next.y * scale + offsetY],
-          p3: [next.x * scale + offsetX, next.y * scale + offsetY],
+          p0: [x0, y0],
+          p1: [x0 + (x1 - x0) / 3, y0 + (y1 - y0) / 3],
+          p2: [x0 + 2 * (x1 - x0) / 3, y0 + 2 * (y1 - y0) / 3],
+          p3: [x1, y1],
         });
         i++;
       } else if (curr.onCurve && !next.onCurve) {

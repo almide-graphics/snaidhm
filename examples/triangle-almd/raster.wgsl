@@ -4,7 +4,7 @@
 // GPU: fine rasterize (per-tile winding number fill)
 
 const TILE_SIZE: u32 = 16u;
-const MAX_SEGS_PER_TILE: u32 = 64u;
+const MAX_SEGS_PER_TILE: u32 = 512u;
 
 struct LineSeg {
   p0: vec2<f32>,
@@ -73,7 +73,6 @@ fn evaluate_paint(paint: Paint, p: vec2<f32>) -> vec4<f32> {
 @group(0) @binding(4) var<uniform>             params: Params;
 @group(0) @binding(5) var<storage, read>       shadows: array<Shadow>;
 @group(0) @binding(6) var<storage, read>       paints: array<Paint>;
-@group(0) @binding(7) var<storage, read>       backdrops: array<i32>;
 
 // Analytical area coverage (Vello-style)
 // p0, p1 in pixel-local coordinates where pixel occupies [0,1] x [0,1]
@@ -145,41 +144,44 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
     color = mix(color, shadow.color.rgb, shadow_alpha);
   }
 
-  // ── Path fills (analytical area coverage + backdrop) ──
+  // ── Path fills (analytical area coverage) ──
   let ndc_to_px = 0.5 * f32(params.width);
   let ndc_to_py = 0.5 * f32(params.height);
   let px_f = f32(px);
   let py_f = f32(py);
-  let num_tiles = params.tiles_x * params.tiles_y;
 
-  var seg_i = 0u;
+  var area = 0.0;
+  var current_path = 0xFFFFFFFFu;
 
-  for (var pid = 0u; pid < params.num_paths; pid++) {
-    var area = f32(backdrops[pid * num_tiles + tile_id]);
+  for (var i = 0u; i < count; i++) {
+    let seg_idx = tile_seg_ids[tile_base + i];
+    let seg = segments[seg_idx];
 
-    loop {
-      if (seg_i >= count) { break; }
-      let seg_idx = tile_seg_ids[tile_base + seg_i];
-      let seg = segments[seg_idx];
-      if (seg.path_id != pid) { break; }
-
-      let sp0 = vec2<f32>(
-        (seg.p0.x + 1.0) * ndc_to_px - px_f,
-        (1.0 - seg.p0.y) * ndc_to_py - py_f,
-      );
-      let sp1 = vec2<f32>(
-        (seg.p1.x + 1.0) * ndc_to_px - px_f,
-        (1.0 - seg.p1.y) * ndc_to_py - py_f,
-      );
-      area += seg_area(sp0, sp1);
-      seg_i++;
+    if (seg.path_id != current_path) {
+      let coverage = min(abs(area), 1.0);
+      if coverage > 1e-4 {
+        let paint_color = evaluate_paint(paints[current_path], p);
+        color = mix(color, paint_color.rgb, coverage * paint_color.a);
+      }
+      area = 0.0;
+      current_path = seg.path_id;
     }
 
-    let coverage = min(abs(area), 1.0);
-    if coverage > 1e-4 {
-      let paint_color = evaluate_paint(paints[pid], p);
-      color = mix(color, paint_color.rgb, coverage * paint_color.a);
-    }
+    let sp0 = vec2<f32>(
+      (seg.p0.x + 1.0) * ndc_to_px - px_f,
+      (1.0 - seg.p0.y) * ndc_to_py - py_f,
+    );
+    let sp1 = vec2<f32>(
+      (seg.p1.x + 1.0) * ndc_to_px - px_f,
+      (1.0 - seg.p1.y) * ndc_to_py - py_f,
+    );
+    area += seg_area(sp0, sp1);
+  }
+
+  let last_coverage = min(abs(area), 1.0);
+  if last_coverage > 1e-4 {
+    let last_paint = evaluate_paint(paints[current_path], p);
+    color = mix(color, last_paint.rgb, last_coverage * last_paint.a);
   }
 
   pixels[py * params.width + px] = pack_color(color.x, color.y, color.z, 1.0);

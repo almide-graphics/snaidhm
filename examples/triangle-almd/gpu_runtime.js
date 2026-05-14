@@ -2,8 +2,7 @@
 //
 // Almide Int = i64 = BigInt in JS. B() wraps returns, N() unwraps args.
 
-import { TTFFont } from "./ttf.js";
-import { generateSDFAtlas } from "./sdf.js";
+import { TTFFont, contoursToCubicBeziers } from "./ttf.js";
 
 const handles = [null];
 function h(obj) { handles.push(obj); return handles.length - 1; }
@@ -299,45 +298,68 @@ function initImageResources(device) {
   };
 }
 
-// Font/atlas state for glyph metric queries
-let _font = null, _atlas = null;
+// Font state for path-based text rendering
+let _font = null;
+let _textCubics = [];
+let _textPaints = [];
 
-async function initTextResources(device) {
-  const fontBuffer = await fetch("font.ttf").then(r => r.arrayBuffer());
-  _font = new TTFFont(fontBuffer);
+// ── Build text path cubics from glyph outlines ──
 
-  const chars = [];
-  for (let i = 32; i < 127; i++) chars.push(String.fromCharCode(i));
-  _atlas = generateSDFAtlas(_font, chars, 48, 6);
+function buildTextPathCubics(font, textLines) {
+  const HEIGHT = 512;
+  const upm = font.unitsPerEm;
+  _textCubics = [];
+  _textPaints = [];
+  let pathId = 8; // shape paths use 0-7
 
-  console.log(`SDF atlas: ${_atlas.atlasWidth}x${_atlas.atlasHeight}`);
+  for (const line of textLines) {
+    const scale = line.size * 2.0 / HEIGHT / upm;
+    // Measure text width for alignment
+    let tw = 0;
+    for (const ch of line.text) {
+      const gid = font.charToGlyphId(ch.charCodeAt(0));
+      tw += font.getAdvanceWidth(gid) * scale;
+    }
+    let cx = line.align === "center" ? line.x - tw / 2 : line.x;
 
-  // SDF texture (r8unorm)
-  const sdfTexture = device.createTexture({
-    size: [_atlas.atlasWidth, _atlas.atlasHeight],
-    format: "r8unorm",
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-  });
-  const bytesPerRow = Math.ceil(_atlas.atlasWidth / 256) * 256;
-  const alignedData = new Uint8Array(bytesPerRow * _atlas.atlasHeight);
-  for (let row = 0; row < _atlas.atlasHeight; row++) {
-    alignedData.set(
-      _atlas.atlasData.subarray(row * _atlas.atlasWidth, row * _atlas.atlasWidth + _atlas.atlasWidth),
-      row * bytesPerRow,
-    );
+    for (const ch of line.text) {
+      const charCode = ch.charCodeAt(0);
+      if (charCode === 32) { // space
+        const gid = font.charToGlyphId(charCode);
+        cx += font.getAdvanceWidth(gid) * scale;
+        continue;
+      }
+      const gid = font.charToGlyphId(charCode);
+      const contours = font.getGlyphOutline(gid);
+      const advance = font.getAdvanceWidth(gid);
+
+      if (contours && contours.length > 0) {
+        const cubics = contoursToCubicBeziers(contours, scale, cx, line.y);
+        for (const c of cubics) {
+          _textCubics.push({
+            ax: c.p0[0], ay: c.p0[1],
+            bx: c.p1[0], by: c.p1[1],
+            cx: c.p2[0], cy: c.p2[1],
+            dx: c.p3[0], dy: c.p3[1],
+            pathId,
+          });
+        }
+        _textPaints.push(line.color || [1, 1, 1, 1]);
+        pathId++;
+      }
+
+      cx += advance * scale;
+    }
   }
-  device.queue.writeTexture({ texture: sdfTexture }, alignedData, { bytesPerRow }, [_atlas.atlasWidth, _atlas.atlasHeight]);
 
-  const sdfSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-
-  return {
-    texture: h(sdfTexture),
-    sampler: h(sdfSampler),
-  };
-}
-
-function _glyph(ch) {
-  return _atlas.glyphs.get(String.fromCharCode(N(ch)));
+  console.log(`Text paths: ${_textCubics.length} cubics, ${_textPaints.length} glyphs`);
+  // Debug: log first glyph's cubics
+  const firstPathId = _textCubics.length > 0 ? _textCubics[0].pathId : -1;
+  const firstGlyphCubics = _textCubics.filter(c => c.pathId === firstPathId);
+  console.log(`First glyph (pathId=${firstPathId}): ${firstGlyphCubics.length} cubics`);
+  for (const c of firstGlyphCubics) {
+    console.log(`  (${c.ax.toFixed(4)},${c.ay.toFixed(4)}) → (${c.bx.toFixed(4)},${c.by.toFixed(4)}) → (${c.cx.toFixed(4)},${c.cy.toFixed(4)}) → (${c.dx.toFixed(4)},${c.dy.toFixed(4)})`);
+  }
 }
 
 export async function init(wasmUrl, canvas) {
@@ -346,16 +368,22 @@ export async function init(wasmUrl, canvas) {
   _device = await adapter.requestDevice();
   _format = navigator.gpu.getPreferredCanvasFormat();
 
-  // Load shaders
-  const [rasterCode, textCode, imageCode] = await Promise.all([
+  // Load shaders (no more text.wgsl needed for SDF)
+  const [rasterCode, imageCode] = await Promise.all([
     fetch("./raster.wgsl").then(r => r.text()),
-    fetch("./text.wgsl").then(r => r.text()),
     fetch("./image.wgsl").then(r => r.text()),
   ]);
-  SHADERS = [rasterCode, rasterCode, textCode, imageCode];
+  SHADERS = [rasterCode, rasterCode, rasterCode, imageCode];
 
-  // Load font and build SDF atlas + image resources
-  _textResources = await initTextResources(_device);
+  // Load font and build text path cubics
+  const fontBuffer = await fetch("font.ttf").then(r => r.arrayBuffer());
+  _font = new TTFFont(fontBuffer);
+  try {
+    buildTextPathCubics(_font, TEXT_LINES);
+  } catch (e) {
+    console.error("buildTextPathCubics failed:", e);
+  }
+
   const _imageResources = initImageResources(_device);
 
   const wasi = new Proxy({}, { get(_, n) {
@@ -364,28 +392,39 @@ export async function init(wasmUrl, canvas) {
     return () => 0;
   }});
 
-  const fontImports = {
-    units_per_em: () => B(_font.unitsPerEm),
-    atlas_width: () => B(_atlas.atlasWidth),
-    atlas_height: () => B(_atlas.atlasHeight),
-    glyph_advance(ch) {
-      const g = _glyph(ch);
-      return g ? g.advance : _font.unitsPerEm * 0.3;
-    },
-    glyph_has_sdf(ch) { const g = _glyph(ch); return B(g && g.atlasW > 0 ? 1 : 0); },
-    glyph_atlas_x(ch) { const g = _glyph(ch); return B(g ? g.atlasX : 0); },
-    glyph_atlas_y(ch) { const g = _glyph(ch); return B(g ? g.atlasY : 0); },
-    glyph_atlas_w(ch) { const g = _glyph(ch); return B(g ? g.atlasW : 0); },
-    glyph_atlas_h(ch) { const g = _glyph(ch); return B(g ? g.atlasH : 0); },
-    glyph_sdf_scale(ch) { const g = _glyph(ch); return g ? g.sdfScale : 1.0; },
-    glyph_padding(ch) { const g = _glyph(ch); return B(g ? g.padding : 0); },
-    glyph_xmin(ch) { const g = _glyph(ch); return g ? g.bounds.xMin : 0.0; },
-    glyph_ymin(ch) { const g = _glyph(ch); return g ? g.bounds.yMin : 0.0; },
-    glyph_xmax(ch) { const g = _glyph(ch); return g ? g.bounds.xMax : 0.0; },
-    glyph_ymax(ch) { const g = _glyph(ch); return g ? g.bounds.yMax : 0.0; },
+  // Text cubic query imports (Almide calls these to load glyph path data)
+  const textImports = {
+    cubic_count: () => B(_textCubics.length),
+    cubic_ax: (i) => _textCubics[N(i)].ax,
+    cubic_ay: (i) => _textCubics[N(i)].ay,
+    cubic_bx: (i) => _textCubics[N(i)].bx,
+    cubic_by: (i) => _textCubics[N(i)].by,
+    cubic_cx: (i) => _textCubics[N(i)].cx,
+    cubic_cy: (i) => _textCubics[N(i)].cy,
+    cubic_dx: (i) => _textCubics[N(i)].dx,
+    cubic_dy: (i) => _textCubics[N(i)].dy,
+    cubic_path_id: (i) => B(_textCubics[N(i)].pathId),
+    paint_count: () => B(_textPaints.length),
+    paint_r: (i) => _textPaints[N(i)][0],
+    paint_g: (i) => _textPaints[N(i)][1],
+    paint_b: (i) => _textPaints[N(i)][2],
+    paint_a: (i) => _textPaints[N(i)][3],
   };
 
-  const imports = { wasi_snapshot_preview1: wasi, font: fontImports, ...createImports(canvas) };
+  // Font metric stubs (measure_text still references these for ceangal compat)
+  const fontImports = {
+    units_per_em: () => B(_font.unitsPerEm),
+    atlas_width: () => B(1), atlas_height: () => B(1),
+    glyph_advance: (ch) => _font.getAdvanceWidth(_font.charToGlyphId(N(ch))) * 1.0,
+    glyph_has_sdf: () => B(0),
+    glyph_atlas_x: () => B(0), glyph_atlas_y: () => B(0),
+    glyph_atlas_w: () => B(0), glyph_atlas_h: () => B(0),
+    glyph_sdf_scale: () => 1.0, glyph_padding: () => B(0),
+    glyph_xmin: () => 0.0, glyph_ymin: () => 0.0,
+    glyph_xmax: () => 0.0, glyph_ymax: () => 0.0,
+  };
+
+  const imports = { wasi_snapshot_preview1: wasi, font: fontImports, text: textImports, ...createImports(canvas) };
   const { instance } = await WebAssembly.instantiate(
     await fetch(wasmUrl).then(r => r.arrayBuffer()), imports);
   _wasmMemory = instance.exports.memory;
@@ -393,19 +432,16 @@ export async function init(wasmUrl, canvas) {
   if (instance.exports._start) try { instance.exports._start(); } catch (_) {}
   if (instance.exports.render) {
     try {
-      const t = _textResources;
       const im = _imageResources;
       instance.exports.render(
         B(h(_device)),
-        B(t.texture),
-        B(t.sampler),
         B(im.vertexBuffer),
         B(im.indexBuffer),
         B(im.indexCount),
         B(im.texture),
         B(im.sampler),
       );
-      console.log("snaidhm: Almide path rasterizer + SDF text + images complete");
+      console.log("snaidhm: paths-are-paths text rendering complete");
     } catch (e) {
       console.error("render error:", e);
     }
@@ -415,16 +451,16 @@ export async function init(wasmUrl, canvas) {
 // Text lines — must match main.almd text_lines (same positions, sizes, alignment)
 // Semantic roles for accessibility: heading, label, text (default)
 const TEXT_LINES = [
-  { text: "snaidhm",                size: 40, x: 0.0,   y: 0.64,  align: "center", role: "heading", level: 1 },
-  { text: "Almide > WASM > WebGPU", size: 13, x: 0.0,   y: 0.57,  align: "center", role: "heading", level: 2 },
-  { text: "Red",                    size: 13, x: -0.5,  y: -0.02, align: "center", role: "label", labelFor: "red-circle" },
-  { text: "Green",                  size: 13, x: 0.0,   y: -0.02, align: "center", role: "label", labelFor: "green-circle" },
-  { text: "Blue",                   size: 13, x: 0.5,   y: -0.02, align: "center", role: "label", labelFor: "blue-circle" },
-  { text: "Card A",                 size: 11, x: -0.8,  y: -0.4,  align: "left",   role: "heading", level: 3 },
-  { text: "Card B",                 size: 11, x: -0.25, y: -0.4,  align: "left",   role: "heading", level: 3 },
-  { text: "Card C",                 size: 11, x: 0.3,   y: -0.4,  align: "left",   role: "heading", level: 3 },
-  { text: "Shapes + Text",          size: 16, x: 0.0,   y: -0.68, align: "center" },
-  { text: "all from Almide",        size: 16, x: 0.0,   y: -0.78, align: "center" },
+  { text: "snaidhm",                size: 40, x: 0.0,   y: 0.64,  align: "center", color: [1,1,1,1], role: "heading", level: 1 },
+  { text: "Almide > WASM > WebGPU", size: 13, x: 0.0,   y: 0.57,  align: "center", color: [0.8,0.85,1.0,0.9], role: "heading", level: 2 },
+  { text: "Red",                    size: 13, x: -0.5,  y: -0.02, align: "center", color: [1,1,1,1], role: "label", labelFor: "red-circle" },
+  { text: "Green",                  size: 13, x: 0.0,   y: -0.02, align: "center", color: [1,1,1,1], role: "label", labelFor: "green-circle" },
+  { text: "Blue",                   size: 13, x: 0.5,   y: -0.02, align: "center", color: [1,1,1,1], role: "label", labelFor: "blue-circle" },
+  { text: "Card A",                 size: 11, x: -0.8,  y: -0.4,  align: "left",   color: [0.3,0.3,0.4,1], role: "heading", level: 3 },
+  { text: "Card B",                 size: 11, x: -0.25, y: -0.4,  align: "left",   color: [0.3,0.3,0.4,1], role: "heading", level: 3 },
+  { text: "Card C",                 size: 11, x: 0.3,   y: -0.4,  align: "left",   color: [0.3,0.3,0.4,1], role: "heading", level: 3 },
+  { text: "Shapes + Text",          size: 16, x: 0.0,   y: -0.68, align: "center", color: [0.5,0.5,0.6,1] },
+  { text: "all from Almide",        size: 16, x: 0.0,   y: -0.78, align: "center", color: [0.5,0.5,0.6,1] },
 ];
 
 export function createTextOverlay(overlay, canvas) {
@@ -458,6 +494,7 @@ export function createTextOverlay(overlay, canvas) {
     el.textContent = line.text;
     el.style.fontSize = line.size + "px";
     el.style.fontFamily = "sans-serif";
+    el.style.color = "transparent";
 
     if (line.role === "label") {
       el.setAttribute("role", "note");

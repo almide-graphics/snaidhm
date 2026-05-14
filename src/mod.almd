@@ -9,7 +9,7 @@ import math
 let WIDTH = 512
 let HEIGHT = 512
 let TILE = 16
-let MAX_SEGS = 64
+let MAX_SEGS = 512
 
 // ── Types ──
 
@@ -18,6 +18,7 @@ type Cubic = { a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], path_id: 
 type Seg = { p0: Vec2, p1: Vec2, color: List[Float], path_id: Int }
 type Shadow = { cx: Float, cy: Float, hw: Float, hh: Float, cr: Float, ox: Float, oy: Float, blur: Float, color: List[Float] }
 type Paint = { kind: Int, c0: List[Float], c1: List[Float], params: List[Float] }
+// TextLine type retained for ceangal compatibility (DOM overlay positioning)
 type TextLine = { chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float] }
 
 let ALIGN_LEFT = 0
@@ -145,9 +146,6 @@ fn render_scene(
   cubics: List[Cubic],
   shadows: List[Shadow],
   paints: List[Paint],
-  text_lines: List[TextLine],
-  text_texture: Int,
-  text_sampler: Int,
   img_vtx: Int,
   img_idx: Int,
   img_count: Int,
@@ -168,10 +166,9 @@ fn render_scene(
   let seg_count = list.len(segments)
   let num_paths = list.len(paints)
 
-  // ── Tile assignment (AABB overlap) + backdrop ──
+  // ── Tile assignment (all columns left of max_x) ──
   var tile_counts: List[Int] = list.repeat(0, num_tiles)
   var tile_seg_ids: List[Int] = list.repeat(0, num_tiles * MAX_SEGS)
-  var backdrop: List[Int] = list.repeat(0, int.max(1, num_paths * num_tiles))
 
   let w_f = int.to_float(WIDTH)
   let h_f = int.to_float(HEIGHT)
@@ -180,22 +177,14 @@ fn render_scene(
   for si in 0..seg_count {
     let seg = segments[si]
     if float.abs(seg.p0.y - seg.p1.y) < 0.0001 then () else {
-    let min_x = float.min(seg.p0.x, seg.p1.x)
     let max_x = float.max(seg.p0.x, seg.p1.x)
     let min_y = float.min(seg.p0.y, seg.p1.y)
     let max_y = float.max(seg.p0.y, seg.p1.y)
-    let t_min_x = int.max(0, float.to_int(float.floor((min_x + 1.0) * 0.5 * w_f / tile_f)))
     let t_max_x = int.min(tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * w_f / tile_f)))
     let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)))
     let t_max_y = int.min(tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)))
-    // Hybrid tile assignment:
-    // Edge rows (top/bottom of segment): all columns left (exact Y-clipping needed)
-    // Interior rows: AABB only + backdrop delta
-    let delta = if seg.p0.y > seg.p1.y then -1 else 1
     for ty in t_min_y..=t_max_y {
-      let is_interior = ty > t_min_y and ty < t_max_y
-      let start_tx = if is_interior then t_min_x else 0
-      for tx in start_tx..=t_max_x {
+      for tx in 0..=t_max_x {
         let tid = ty * tiles_x + tx
         let slot = tile_counts[tid]
         if slot < MAX_SEGS then {
@@ -203,35 +192,19 @@ fn render_scene(
           tile_counts[tid] = slot + 1
         } else ()
       }
-      if is_interior and t_min_x > 0 then {
-        let bid = seg.path_id * num_tiles + ty * tiles_x + t_min_x - 1
-        backdrop[bid] = backdrop[bid] + delta
-      } else ()
     }
-    }
-  }
-
-  // Prefix sum backdrop from right to left per path per row
-  for pid in 0..num_paths {
-    for ty in 0..tiles_y {
-      var running = 0
-      for tx_rev in 0..tiles_x {
-        let tx = tiles_x - 1 - tx_rev
-        let bid = pid * num_tiles + ty * tiles_x + tx
-        running = running + backdrop[bid]
-        backdrop[bid] = running
-      }
     }
   }
 
   // ── Upload buffers ──
-  let seg_buf = gpu.create_buffer(device, seg_count * 48, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  let seg_buf = gpu.create_buffer(device, int.max(1, seg_count) * 48, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
   for seg in segments {
     gpu.push_f32(seg.p0.x) gpu.push_f32(seg.p0.y) gpu.push_f32(seg.p1.x) gpu.push_f32(seg.p1.y)
     gpu.push_f32(seg.color[0]) gpu.push_f32(seg.color[1]) gpu.push_f32(seg.color[2]) gpu.push_f32(seg.color[3])
     gpu.push_u32(seg.path_id) gpu.push_u32(0) gpu.push_u32(0) gpu.push_u32(0)
   }
+  if seg_count == 0 then { for _ in 0..12 { gpu.push_u32(0) } } else ()
   gpu.flush_to_buffer(device, seg_buf)
 
   let tc_buf = gpu.create_buffer(device, num_tiles * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
@@ -256,97 +229,21 @@ fn render_scene(
   let shadow_buf = upload_shadows(device, shadows)
   let paint_buf = upload_paints(device, paints)
 
-  let backdrop_buf = gpu.create_buffer(device, int.max(1, num_paths * num_tiles) * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
-  gpu.begin_data()
-  for v in backdrop { gpu.push_u32(v) }
-  if num_paths == 0 then gpu.push_u32(0) else ()
-  gpu.flush_to_buffer(device, backdrop_buf)
-
-  // ── Text quad generation ──
-  let atlas_w = int.to_float(gpu.font_atlas_width())
-  let atlas_h = int.to_float(gpu.font_atlas_height())
-  let upm = int.to_float(gpu.font_units_per_em())
-
-  var total_glyphs = 0
-  for line in text_lines {
-    for ch in line.chars {
-      if gpu.font_glyph_has_sdf(ch) == 1 then total_glyphs = total_glyphs + 1 else ()
-    }
-  }
-
-  let text_vtx_buf = gpu.create_buffer(device, int.max(1, total_glyphs) * 128, int.bor(gpu.VERTEX, gpu.COPY_DST))
-  gpu.begin_data()
-  for line in text_lines {
-    let scale = line.size * 2.0 / int.to_float(HEIGHT) / upm
-    let tw = measure_text(line.chars, line.size)
-    var cx = if line.align == ALIGN_CENTER then line.x - tw / 2.0 else line.x
-    for ch in line.chars {
-      if gpu.font_glyph_has_sdf(ch) == 1 then {
-        let pad = int.to_float(gpu.font_glyph_padding(ch)) / gpu.font_glyph_sdf_scale(ch)
-        let x0 = cx + (gpu.font_glyph_xmin(ch) - pad) * scale
-        let y0 = line.y + (gpu.font_glyph_ymin(ch) - pad) * scale
-        let x1 = cx + (gpu.font_glyph_xmax(ch) + pad) * scale
-        let y1 = line.y + (gpu.font_glyph_ymax(ch) + pad) * scale
-        let u0 = int.to_float(gpu.font_glyph_atlas_x(ch)) / atlas_w
-        let v0 = int.to_float(gpu.font_glyph_atlas_y(ch)) / atlas_h
-        let u1 = (int.to_float(gpu.font_glyph_atlas_x(ch)) + int.to_float(gpu.font_glyph_atlas_w(ch))) / atlas_w
-        let v1 = (int.to_float(gpu.font_glyph_atlas_y(ch)) + int.to_float(gpu.font_glyph_atlas_h(ch))) / atlas_h
-        let c = line.color
-        gpu.push_f32(x0) gpu.push_f32(y0) gpu.push_f32(u0) gpu.push_f32(v1)
-        gpu.push_f32(c[0]) gpu.push_f32(c[1]) gpu.push_f32(c[2]) gpu.push_f32(c[3])
-        gpu.push_f32(x1) gpu.push_f32(y0) gpu.push_f32(u1) gpu.push_f32(v1)
-        gpu.push_f32(c[0]) gpu.push_f32(c[1]) gpu.push_f32(c[2]) gpu.push_f32(c[3])
-        gpu.push_f32(x1) gpu.push_f32(y1) gpu.push_f32(u1) gpu.push_f32(v0)
-        gpu.push_f32(c[0]) gpu.push_f32(c[1]) gpu.push_f32(c[2]) gpu.push_f32(c[3])
-        gpu.push_f32(x0) gpu.push_f32(y1) gpu.push_f32(u0) gpu.push_f32(v0)
-        gpu.push_f32(c[0]) gpu.push_f32(c[1]) gpu.push_f32(c[2]) gpu.push_f32(c[3])
-        cx = cx + gpu.font_glyph_advance(ch) * scale
-      } else {
-        cx = cx + gpu.font_glyph_advance(ch) * scale
-      }
-    }
-  }
-  gpu.flush_to_buffer(device, text_vtx_buf)
-
-  let text_idx_buf = gpu.create_buffer(device, int.max(1, total_glyphs) * 24, int.bor(gpu.INDEX, gpu.COPY_DST))
-  gpu.begin_data()
-  for gi in 0..total_glyphs {
-    let vi = gi * 4
-    gpu.push_u32(vi) gpu.push_u32(vi + 1) gpu.push_u32(vi + 2)
-    gpu.push_u32(vi) gpu.push_u32(vi + 2) gpu.push_u32(vi + 3)
-  }
-  gpu.flush_to_buffer(device, text_idx_buf)
-  let text_index_count = total_glyphs * 6
-
-  let text_params = gpu.create_buffer(device, 16, int.bor(gpu.UNIFORM, gpu.COPY_DST))
-  gpu.begin_data()
-  gpu.push_f32(atlas_w) gpu.push_f32(atlas_h)
-  gpu.push_f32(int.to_float(WIDTH)) gpu.push_f32(int.to_float(HEIGHT))
-  gpu.flush_to_buffer(device, text_params)
-
   // ── Pipelines + bind groups ──
   let compute_shader = gpu.create_shader(device, 0, 0)
   let quad_shader = gpu.create_shader(device, 1, 0)
-  let text_shader = gpu.create_shader(device, 2, 0)
 
   let compute_pipeline = gpu.create_compute_pipeline(device, compute_shader, 0)
   gpu.begin_bindings()
   gpu.add_buffer_binding(seg_buf) gpu.add_buffer_binding(tc_buf) gpu.add_buffer_binding(ts_buf)
   gpu.add_buffer_binding(pixel_buf) gpu.add_buffer_binding(params_buf)
   gpu.add_buffer_binding(shadow_buf) gpu.add_buffer_binding(paint_buf)
-  gpu.add_buffer_binding(backdrop_buf)
   let compute_bg = gpu.create_bound_group(device, compute_pipeline, 0)
 
   let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
   gpu.begin_bindings()
   gpu.add_buffer_binding(pixel_buf) gpu.add_buffer_binding(params_buf)
   let quad_bg = gpu.create_bound_group(device, quad_pipeline, 0)
-
-  let text_pipeline = gpu.create_text_pipeline(device, text_shader, format)
-  gpu.begin_bindings()
-  gpu.add_buffer_binding(text_params)
-  gpu.add_texture_binding(text_texture) gpu.add_sampler_binding(text_sampler)
-  let text_bg = gpu.create_bound_group(device, text_pipeline, 0)
 
   let img_shader = gpu.create_shader(device, 3, 0)
   let img_pipeline = gpu.create_image_pipeline(device, img_shader, format)
@@ -374,23 +271,69 @@ fn render_scene(
   gpu.set_index_buffer(rp, img_idx)
   gpu.draw_indexed(rp, img_count)
 
-  gpu.set_pipeline(rp, text_pipeline)
-  gpu.set_bind_group(rp, 0, text_bg)
-  gpu.set_vertex_buffer(rp, 0, text_vtx_buf)
-  gpu.set_index_buffer(rp, text_idx_buf)
-  gpu.draw_indexed(rp, text_index_count)
-
   gpu.end_pass(rp)
   gpu.finish_and_submit(device, encoder)
+}
+
+// ── Text path query externs (JS builds cubics, Almide queries them) ──
+
+@extern(wasm, "text", "cubic_count")
+fn text_cubic_count() -> Int
+
+@extern(wasm, "text", "cubic_ax")
+fn text_cubic_ax(i: Int) -> Float
+@extern(wasm, "text", "cubic_ay")
+fn text_cubic_ay(i: Int) -> Float
+@extern(wasm, "text", "cubic_bx")
+fn text_cubic_bx(i: Int) -> Float
+@extern(wasm, "text", "cubic_by")
+fn text_cubic_by(i: Int) -> Float
+@extern(wasm, "text", "cubic_cx")
+fn text_cubic_cx(i: Int) -> Float
+@extern(wasm, "text", "cubic_cy")
+fn text_cubic_cy(i: Int) -> Float
+@extern(wasm, "text", "cubic_dx")
+fn text_cubic_dx(i: Int) -> Float
+@extern(wasm, "text", "cubic_dy")
+fn text_cubic_dy(i: Int) -> Float
+@extern(wasm, "text", "cubic_path_id")
+fn text_cubic_path_id(i: Int) -> Int
+
+@extern(wasm, "text", "paint_count")
+fn text_paint_count() -> Int
+@extern(wasm, "text", "paint_r")
+fn text_paint_r(i: Int) -> Float
+@extern(wasm, "text", "paint_g")
+fn text_paint_g(i: Int) -> Float
+@extern(wasm, "text", "paint_b")
+fn text_paint_b(i: Int) -> Float
+@extern(wasm, "text", "paint_a")
+fn text_paint_a(i: Int) -> Float
+
+fn load_text_cubics() -> List[Cubic] = {
+  let dc = [0.5, 0.5, 0.5, 1.0]
+  let n = text_cubic_count()
+  0..n |> list.map((i) => {
+    { a: {x: text_cubic_ax(i), y: text_cubic_ay(i)},
+      b: {x: text_cubic_bx(i), y: text_cubic_by(i)},
+      c: {x: text_cubic_cx(i), y: text_cubic_cy(i)},
+      d: {x: text_cubic_dx(i), y: text_cubic_dy(i)},
+      color: dc, path_id: text_cubic_path_id(i) }
+  })
+}
+
+fn load_text_paints() -> List[Paint] = {
+  let n = text_paint_count()
+  0..n |> list.map((i) => solid(text_paint_r(i), text_paint_g(i), text_paint_b(i), text_paint_a(i)))
 }
 
 // ── Standalone demo entry point ──
 
 @export(wasm, "render")
-fn render(device: Int, text_texture: Int, text_sampler: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: Int, img_sampler: Int) -> Unit = {
+fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: Int, img_sampler: Int) -> Unit = {
   let dc = [0.5, 0.5, 0.5, 1.0]
 
-  let cubics =
+  let shape_cubics =
     round_rect_cubics(-0.9, -0.9, 1.8, 1.8, 0.08, dc, 0)
     + round_rect_cubics(-0.85, 0.55, 1.7, 0.3, 0.04, dc, 1)
     + circle_cubics(-0.5, 0.0, 0.18, dc, 2)
@@ -410,7 +353,7 @@ fn render(device: Int, text_texture: Int, text_sampler: Int, img_vtx: Int, img_i
     rect_shadow(0.25, -0.85, 0.6, 0.55, 0.04, 0.005, -0.01, 0.03, [0.0,0.0,0.0,0.15]),
   ]
 
-  let paints = [
+  let shape_paints = [
     solid(1.0, 1.0, 1.0, 1.0),
     linear_grad([0.12,0.22,0.58,1.0], [0.28,0.48,0.88,1.0], -0.85, 0.85, -0.85, 0.55),
     radial_grad([1.0,0.55,0.5,0.9], [0.82,0.18,0.12,0.9], -0.5, 0.0, 0.18),
@@ -421,19 +364,10 @@ fn render(device: Int, text_texture: Int, text_sampler: Int, img_vtx: Int, img_i
     solid(0.95, 0.95, 0.98, 1.0),
   ]
 
-  let text_lines = [
-    { chars: str("snaidhm"),             size: 40.0, x: 0.0,   y: 0.64,  align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
-    { chars: str("Almide > WASM > WebGPU"), size: 13.0, x: 0.0, y: 0.57, align: ALIGN_CENTER, color: [0.8,0.85,1.0,0.9] },
-    { chars: str("Red"),                 size: 13.0, x: -0.5,  y: -0.02, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
-    { chars: str("Green"),               size: 13.0, x: 0.0,   y: -0.02, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
-    { chars: str("Blue"),                size: 13.0, x: 0.5,   y: -0.02, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
-    { chars: str("Card A"),              size: 11.0, x: -0.8,  y: -0.4,  align: ALIGN_LEFT,   color: [0.3,0.3,0.4,1.0] },
-    { chars: str("Card B"),              size: 11.0, x: -0.25, y: -0.4,  align: ALIGN_LEFT,   color: [0.3,0.3,0.4,1.0] },
-    { chars: str("Card C"),              size: 11.0, x: 0.3,   y: -0.4,  align: ALIGN_LEFT,   color: [0.3,0.3,0.4,1.0] },
-    { chars: str("Shapes + Text"),       size: 16.0, x: 0.0,   y: -0.68, align: ALIGN_CENTER, color: [0.5,0.5,0.6,1.0] },
-    { chars: str("all from Almide"),     size: 16.0, x: 0.0,   y: -0.78, align: ALIGN_CENTER, color: [0.5,0.5,0.6,1.0] },
-  ]
+  // Combine shape + text cubics and paints
+  let cubics = shape_cubics + load_text_cubics()
+  let paints = shape_paints + load_text_paints()
 
-  render_scene(device, cubics, shadows, paints, text_lines,
-    text_texture, text_sampler, img_vtx, img_idx, img_count, img_texture, img_sampler)
+  render_scene(device, cubics, shadows, paints,
+    img_vtx, img_idx, img_count, img_texture, img_sampler)
 }
