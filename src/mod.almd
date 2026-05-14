@@ -7,8 +7,6 @@ import self.web.gpu as gpu
 import self.ttf as ttf
 import math
 
-let WIDTH = 512
-let HEIGHT = 512
 let TILE = 16
 let MAX_SEGS = 512
 let MAX_CMDS = 32
@@ -41,7 +39,7 @@ fn wang_n(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Int = {
   let d2x = d.x - 2.0*c.x + b.x
   let d2y = d.y - 2.0*c.y + b.y
   let dd = float.max(math.sqrt(d1x*d1x + d1y*d1y), math.sqrt(d2x*d2x + d2y*d2y))
-  let tol = 0.5 / int.to_float(WIDTH)
+  let tol = 0.5 / 1024.0  // tolerance for up to 1024px viewport
   int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
 }
 
@@ -58,12 +56,13 @@ fn flatten_cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], pid: In
 // ── DDA tile walk ──
 // Returns list of encoded ints: tile_id * 2 + (1 if top_edge else 0)
 // Segment is normalized to walk downward (sy0 ≤ sy1) internally.
+// DDA tile walk (unused in current all-columns-left pipeline, kept for future DDA)
 fn dda_tiles(p0: Vec2, p1: Vec2) -> List[Int] = {
   let tile_scale = 1.0 / int.to_float(TILE)
-  let w_f = int.to_float(WIDTH)
-  let h_f = int.to_float(HEIGHT)
-  let tiles_x = WIDTH / TILE
-  let tiles_y = HEIGHT / TILE
+  let w_f = 512.0  // DDA uses fixed reference (not used in render path)
+  let h_f = 512.0
+  let tiles_x = 512 / TILE
+  let tiles_y = 512 / TILE
   let px0 = (p0.x + 1.0) * 0.5 * w_f
   let py0 = (1.0 - p0.y) * 0.5 * h_f
   let px1 = (p1.x + 1.0) * 0.5 * w_f
@@ -166,9 +165,9 @@ fn str(s: String) -> List[Int] = string.to_bytes(s)
 fn text_spec(chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float]) -> TextSpec =
   { chars: chars, size: size, x: x, y: y, align: align, color: color }
 
-fn measure_text(font: ttf.Font, chars: List[Int], size: Float) -> Float = {
+fn measure_text(font: ttf.Font, chars: List[Int], size: Float, viewport_h: Float) -> Float = {
   let upm = int.to_float(font.units_per_em)
-  let scale = size * 2.0 / int.to_float(HEIGHT) / upm
+  let scale = size * 2.0 / viewport_h / upm
   list.fold(chars, 0.0, (acc, ch) =>
     acc + int.to_float(ttf.get_advance_width(font, ttf.char_to_glyph_id(font, ch))) * scale
   )
@@ -205,6 +204,8 @@ fn upload_paints(device: Int, paints: List[Paint]) -> Int = {
 
 fn render_scene(
   device: Int,
+  width: Int,
+  height: Int,
   cubics: List[Cubic],
   shadows: List[Shadow],
   paints: List[Paint],
@@ -216,8 +217,8 @@ fn render_scene(
 ) -> Unit = {
   let format = gpu.get_preferred_format()
   let _ctx = gpu.configure_canvas(device, format)
-  let tiles_x = WIDTH / TILE
-  let tiles_y = HEIGHT / TILE
+  let tiles_x = width / TILE
+  let tiles_y = height / TILE
   let num_tiles = tiles_x * tiles_y
 
   // ── Flatten ──
@@ -234,8 +235,8 @@ fn render_scene(
   var tile_seg_ids: List[Int] = list.repeat(0, num_tiles * MAX_SEGS)
   var tile_seg_counts: List[Int] = list.repeat(0, num_tiles)
 
-  let w_f = int.to_float(WIDTH)
-  let h_f = int.to_float(HEIGHT)
+  let w_f = int.to_float(width)
+  let h_f = int.to_float(height)
   let tile_f = int.to_float(TILE)
 
   // Group segments by path_id
@@ -320,11 +321,11 @@ fn render_scene(
   for v in tile_cmds_data { gpu.push_u32(v) }
   gpu.flush_to_buffer(device, tcmd_buf)
 
-  let pixel_buf = gpu.create_buffer(device, WIDTH * HEIGHT * 4, gpu.STORAGE)
+  let pixel_buf = gpu.create_buffer(device, width * height * 4, gpu.STORAGE)
 
   let params_buf = gpu.create_buffer(device, 32, int.bor(gpu.UNIFORM, gpu.COPY_DST))
   gpu.begin_data()
-  gpu.push_u32(WIDTH) gpu.push_u32(HEIGHT) gpu.push_u32(seg_count)
+  gpu.push_u32(width) gpu.push_u32(height) gpu.push_u32(seg_count)
   gpu.push_u32(tiles_x) gpu.push_u32(tiles_y) gpu.push_u32(list.len(shadows))
   gpu.push_u32(num_paths) gpu.push_u32(0)
   gpu.flush_to_buffer(device, params_buf)
@@ -380,9 +381,9 @@ fn render_scene(
 
 // ── Text rendering (pure Almide TTF parser) ──
 
-fn build_text_cubics(specs: List[TextSpec]) -> { cubics: List[Cubic], paints: List[Paint] } = {
+fn build_text_cubics(specs: List[TextSpec], viewport_h: Float) -> { cubics: List[Cubic], paints: List[Paint] } = {
   let font = ttf.parse_font()
-  let h_f = int.to_float(HEIGHT)
+  let h_f = viewport_h
   var cubics: List[Cubic] = []
   var paints: List[Paint] = []
   var path_id_offset = 0
@@ -456,7 +457,7 @@ fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: 
     { chars: str("all from Almide"), size: 16.0, x: 0.0, y: -0.78, align: ALIGN_CENTER, color: [0.5,0.5,0.6,1.0] },
   ]
 
-  let text = build_text_cubics(text_specs)
+  let text = build_text_cubics(text_specs, 512.0)
 
   // Remap text path_ids to continue after shape paints
   let num_shape_paints = list.len(shape_paints)
@@ -468,6 +469,6 @@ fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: 
   let cubics = shape_cubics + text_cubics
   let paints = shape_paints + text.paints
 
-  render_scene(device, cubics, shadows, paints,
+  render_scene(device, 512, 512, cubics, shadows, paints,
     img_vtx, img_idx, img_count, img_texture, img_sampler)
 }
