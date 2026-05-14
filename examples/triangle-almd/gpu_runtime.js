@@ -2,7 +2,7 @@
 //
 // Almide Int = i64 = BigInt in JS. B() wraps returns, N() unwraps args.
 
-import { TTFFont, contoursToCubicBeziers } from "./ttf.js";
+// TTF parsing moved to Almide (src/ttf.almd) — JS only provides raw byte access
 
 const handles = [null];
 function h(obj) { handles.push(obj); return handles.length - 1; }
@@ -298,69 +298,8 @@ function initImageResources(device) {
   };
 }
 
-// Font state for path-based text rendering
-let _font = null;
-let _textCubics = [];
-let _textPaints = [];
-
-// ── Build text path cubics from glyph outlines ──
-
-function buildTextPathCubics(font, textLines) {
-  const HEIGHT = 512;
-  const upm = font.unitsPerEm;
-  _textCubics = [];
-  _textPaints = [];
-  let pathId = 8; // shape paths use 0-7
-
-  for (const line of textLines) {
-    const scale = line.size * 2.0 / HEIGHT / upm;
-    // Measure text width for alignment
-    let tw = 0;
-    for (const ch of line.text) {
-      const gid = font.charToGlyphId(ch.charCodeAt(0));
-      tw += font.getAdvanceWidth(gid) * scale;
-    }
-    let cx = line.align === "center" ? line.x - tw / 2 : line.x;
-
-    for (const ch of line.text) {
-      const charCode = ch.charCodeAt(0);
-      if (charCode === 32) { // space
-        const gid = font.charToGlyphId(charCode);
-        cx += font.getAdvanceWidth(gid) * scale;
-        continue;
-      }
-      const gid = font.charToGlyphId(charCode);
-      const contours = font.getGlyphOutline(gid);
-      const advance = font.getAdvanceWidth(gid);
-
-      if (contours && contours.length > 0) {
-        const cubics = contoursToCubicBeziers(contours, scale, cx, line.y);
-        for (const c of cubics) {
-          _textCubics.push({
-            ax: c.p0[0], ay: c.p0[1],
-            bx: c.p1[0], by: c.p1[1],
-            cx: c.p2[0], cy: c.p2[1],
-            dx: c.p3[0], dy: c.p3[1],
-            pathId,
-          });
-        }
-        _textPaints.push(line.color || [1, 1, 1, 1]);
-        pathId++;
-      }
-
-      cx += advance * scale;
-    }
-  }
-
-  console.log(`Text paths: ${_textCubics.length} cubics, ${_textPaints.length} glyphs`);
-  // Debug: log first glyph's cubics
-  const firstPathId = _textCubics.length > 0 ? _textCubics[0].pathId : -1;
-  const firstGlyphCubics = _textCubics.filter(c => c.pathId === firstPathId);
-  console.log(`First glyph (pathId=${firstPathId}): ${firstGlyphCubics.length} cubics`);
-  for (const c of firstGlyphCubics) {
-    console.log(`  (${c.ax.toFixed(4)},${c.ay.toFixed(4)}) → (${c.bx.toFixed(4)},${c.by.toFixed(4)}) → (${c.cx.toFixed(4)},${c.cy.toFixed(4)}) → (${c.dx.toFixed(4)},${c.dy.toFixed(4)})`);
-  }
-}
+// Font data buffer (raw bytes for Almide TTF parser)
+let _fontBuffer = null;
 
 export async function init(wasmUrl, canvas) {
   if (!navigator.gpu) throw new Error("WebGPU not supported");
@@ -375,14 +314,8 @@ export async function init(wasmUrl, canvas) {
   ]);
   SHADERS = [rasterCode, rasterCode, rasterCode, imageCode];
 
-  // Load font and build text path cubics
-  const fontBuffer = await fetch("font.ttf").then(r => r.arrayBuffer());
-  _font = new TTFFont(fontBuffer);
-  try {
-    buildTextPathCubics(_font, TEXT_LINES);
-  } catch (e) {
-    console.error("buildTextPathCubics failed:", e);
-  }
+  // Load font data (raw bytes for Almide TTF parser)
+  _fontBuffer = await fetch("font.ttf").then(r => r.arrayBuffer());
 
   const _imageResources = initImageResources(_device);
 
@@ -392,39 +325,18 @@ export async function init(wasmUrl, canvas) {
     return () => 0;
   }});
 
-  // Text cubic query imports (Almide calls these to load glyph path data)
-  const textImports = {
-    cubic_count: () => B(_textCubics.length),
-    cubic_ax: (i) => _textCubics[N(i)].ax,
-    cubic_ay: (i) => _textCubics[N(i)].ay,
-    cubic_bx: (i) => _textCubics[N(i)].bx,
-    cubic_by: (i) => _textCubics[N(i)].by,
-    cubic_cx: (i) => _textCubics[N(i)].cx,
-    cubic_cy: (i) => _textCubics[N(i)].cy,
-    cubic_dx: (i) => _textCubics[N(i)].dx,
-    cubic_dy: (i) => _textCubics[N(i)].dy,
-    cubic_path_id: (i) => B(_textCubics[N(i)].pathId),
-    paint_count: () => B(_textPaints.length),
-    paint_r: (i) => _textPaints[N(i)][0],
-    paint_g: (i) => _textPaints[N(i)][1],
-    paint_b: (i) => _textPaints[N(i)][2],
-    paint_a: (i) => _textPaints[N(i)][3],
+  // Font data byte-level access (Almide TTF parser reads raw bytes)
+  const fontDataView = new DataView(_fontBuffer);
+  const fontDataImports = {
+    len: () => B(_fontBuffer.byteLength),
+    u8: (offset) => B(fontDataView.getUint8(N(offset))),
+    u16be: (offset) => B(fontDataView.getUint16(N(offset))),
+    i16be: (offset) => B(fontDataView.getInt16(N(offset))),
+    u32be: (offset) => B(fontDataView.getUint32(N(offset))),
+    i8: (offset) => B(fontDataView.getInt8(N(offset))),
   };
 
-  // Font metric stubs (measure_text still references these for ceangal compat)
-  const fontImports = {
-    units_per_em: () => B(_font.unitsPerEm),
-    atlas_width: () => B(1), atlas_height: () => B(1),
-    glyph_advance: (ch) => _font.getAdvanceWidth(_font.charToGlyphId(N(ch))) * 1.0,
-    glyph_has_sdf: () => B(0),
-    glyph_atlas_x: () => B(0), glyph_atlas_y: () => B(0),
-    glyph_atlas_w: () => B(0), glyph_atlas_h: () => B(0),
-    glyph_sdf_scale: () => 1.0, glyph_padding: () => B(0),
-    glyph_xmin: () => 0.0, glyph_ymin: () => 0.0,
-    glyph_xmax: () => 0.0, glyph_ymax: () => 0.0,
-  };
-
-  const imports = { wasi_snapshot_preview1: wasi, font: fontImports, text: textImports, ...createImports(canvas) };
+  const imports = { wasi_snapshot_preview1: wasi, font_data: fontDataImports, ...createImports(canvas) };
   const { instance } = await WebAssembly.instantiate(
     await fetch(wasmUrl).then(r => r.arrayBuffer()), imports);
   _wasmMemory = instance.exports.memory;

@@ -4,6 +4,7 @@
 // Consumers (ceangal, standalone demo) import this module.
 
 import self.web.gpu as gpu
+import self.ttf as ttf
 import math
 
 let WIDTH = 512
@@ -166,10 +167,12 @@ fn str(s: String) -> List[Int] = string.to_bytes(s)
 fn text_line(chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float]) -> TextLine =
   { chars: chars, size: size, x: x, y: y, align: align, color: color }
 
-fn measure_text(chars: List[Int], size: Float) -> Float = {
-  let upm = int.to_float(gpu.font_units_per_em())
+fn measure_text(font: ttf.Font, chars: List[Int], size: Float) -> Float = {
+  let upm = int.to_float(font.units_per_em)
   let scale = size * 2.0 / int.to_float(HEIGHT) / upm
-  list.fold(chars, 0.0, (acc, ch) => acc + gpu.font_glyph_advance(ch) * scale)
+  list.fold(chars, 0.0, (acc, ch) =>
+    acc + int.to_float(ttf.get_advance_width(font, ttf.char_to_glyph_id(font, ch))) * scale
+  )
 }
 
 // ── Upload helpers (internal) ──
@@ -376,56 +379,34 @@ fn render_scene(
   gpu.finish_and_submit(device, encoder)
 }
 
-// ── Text path query externs (JS builds cubics, Almide queries them) ──
+// ── Text rendering (pure Almide TTF parser) ──
 
-@extern(wasm, "text", "cubic_count")
-fn text_cubic_count() -> Int
+type TextSpec = { chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float] }
 
-@extern(wasm, "text", "cubic_ax")
-fn text_cubic_ax(i: Int) -> Float
-@extern(wasm, "text", "cubic_ay")
-fn text_cubic_ay(i: Int) -> Float
-@extern(wasm, "text", "cubic_bx")
-fn text_cubic_bx(i: Int) -> Float
-@extern(wasm, "text", "cubic_by")
-fn text_cubic_by(i: Int) -> Float
-@extern(wasm, "text", "cubic_cx")
-fn text_cubic_cx(i: Int) -> Float
-@extern(wasm, "text", "cubic_cy")
-fn text_cubic_cy(i: Int) -> Float
-@extern(wasm, "text", "cubic_dx")
-fn text_cubic_dx(i: Int) -> Float
-@extern(wasm, "text", "cubic_dy")
-fn text_cubic_dy(i: Int) -> Float
-@extern(wasm, "text", "cubic_path_id")
-fn text_cubic_path_id(i: Int) -> Int
+fn build_text_cubics(specs: List[TextSpec]) -> { cubics: List[Cubic], paints: List[Paint] } = {
+  let font = ttf.parse_font()
+  let h_f = int.to_float(HEIGHT)
+  var cubics: List[Cubic] = []
+  var paints: List[Paint] = []
+  var path_id_offset = 0
 
-@extern(wasm, "text", "paint_count")
-fn text_paint_count() -> Int
-@extern(wasm, "text", "paint_r")
-fn text_paint_r(i: Int) -> Float
-@extern(wasm, "text", "paint_g")
-fn text_paint_g(i: Int) -> Float
-@extern(wasm, "text", "paint_b")
-fn text_paint_b(i: Int) -> Float
-@extern(wasm, "text", "paint_a")
-fn text_paint_a(i: Int) -> Float
-
-fn load_text_cubics() -> List[Cubic] = {
-  let dc = [0.5, 0.5, 0.5, 1.0]
-  let n = text_cubic_count()
-  0..n |> list.map((i) => {
-    { a: {x: text_cubic_ax(i), y: text_cubic_ay(i)},
-      b: {x: text_cubic_bx(i), y: text_cubic_by(i)},
-      c: {x: text_cubic_cx(i), y: text_cubic_cy(i)},
-      d: {x: text_cubic_dx(i), y: text_cubic_dy(i)},
-      color: dc, path_id: text_cubic_path_id(i) }
-  })
-}
-
-fn load_text_paints() -> List[Paint] = {
-  let n = text_paint_count()
-  0..n |> list.map((i) => solid(text_paint_r(i), text_paint_g(i), text_paint_b(i), text_paint_a(i)))
+  for spec in specs {
+    let glyphs = ttf.layout_text(font, spec.chars, spec.size, spec.x, spec.y, spec.align, h_f)
+    // Each glyph gets its own path_id (winding rule requires separate paths)
+    for glyph in glyphs {
+      let pid = path_id_offset
+      for gc in glyph.cubics {
+        cubics = cubics + [{
+          a: {x: gc.ax, y: gc.ay}, b: {x: gc.bx, y: gc.by},
+          c: {x: gc.cx, y: gc.cy}, d: {x: gc.dx, y: gc.dy},
+          color: spec.color, path_id: pid
+        }]
+      }
+      paints = paints + [solid(spec.color[0], spec.color[1], spec.color[2], spec.color[3])]
+      path_id_offset = path_id_offset + 1
+    }
+  }
+  { cubics: cubics, paints: paints }
 }
 
 // ── Standalone demo entry point ──
@@ -465,8 +446,30 @@ fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: 
     solid(0.95, 0.95, 0.98, 1.0),
   ]
 
-  let cubics = shape_cubics + load_text_cubics()
-  let paints = shape_paints + load_text_paints()
+  let text_specs: List[TextSpec] = [
+    { chars: str("snaidhm"), size: 40.0, x: 0.0, y: 0.64, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
+    { chars: str("Almide > WASM > WebGPU"), size: 13.0, x: 0.0, y: 0.57, align: ALIGN_CENTER, color: [0.8,0.85,1.0,0.9] },
+    { chars: str("Red"), size: 13.0, x: -0.5, y: -0.02, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
+    { chars: str("Green"), size: 13.0, x: 0.0, y: -0.02, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
+    { chars: str("Blue"), size: 13.0, x: 0.5, y: -0.02, align: ALIGN_CENTER, color: [1.0,1.0,1.0,1.0] },
+    { chars: str("Card A"), size: 11.0, x: -0.8, y: -0.4, align: ALIGN_LEFT, color: [0.3,0.3,0.4,1.0] },
+    { chars: str("Card B"), size: 11.0, x: -0.25, y: -0.4, align: ALIGN_LEFT, color: [0.3,0.3,0.4,1.0] },
+    { chars: str("Card C"), size: 11.0, x: 0.3, y: -0.4, align: ALIGN_LEFT, color: [0.3,0.3,0.4,1.0] },
+    { chars: str("Shapes + Text"), size: 16.0, x: 0.0, y: -0.68, align: ALIGN_CENTER, color: [0.5,0.5,0.6,1.0] },
+    { chars: str("all from Almide"), size: 16.0, x: 0.0, y: -0.78, align: ALIGN_CENTER, color: [0.5,0.5,0.6,1.0] },
+  ]
+
+  let text = build_text_cubics(text_specs)
+
+  // Remap text path_ids to continue after shape paints
+  let num_shape_paints = list.len(shape_paints)
+  let text_cubics = text.cubics |> list.map((cub) => {
+    { a: cub.a, b: cub.b, c: cub.c, d: cub.d,
+      color: cub.color, path_id: cub.path_id + num_shape_paints }
+  })
+
+  let cubics = shape_cubics + text_cubics
+  let paints = shape_paints + text.paints
 
   render_scene(device, cubics, shadows, paints,
     img_vtx, img_idx, img_count, img_texture, img_sampler)

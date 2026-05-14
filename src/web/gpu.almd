@@ -136,52 +136,6 @@ fn set_index_buffer(pass: Int, buffer: Int) -> Unit = _
 @extern(wasm, "gpu", "draw_indexed")
 fn draw_indexed(pass: Int, index_count: Int) -> Unit = _
 
-// ── Font atlas queries (JS-side SDF atlas, Almide queries metrics) ──
-
-@extern(wasm, "font", "units_per_em")
-fn font_units_per_em() -> Int = _
-
-@extern(wasm, "font", "atlas_width")
-fn font_atlas_width() -> Int = _
-
-@extern(wasm, "font", "atlas_height")
-fn font_atlas_height() -> Int = _
-
-@extern(wasm, "font", "glyph_advance")
-fn font_glyph_advance(ch: Int) -> Float = _
-
-@extern(wasm, "font", "glyph_has_sdf")
-fn font_glyph_has_sdf(ch: Int) -> Int = _
-
-@extern(wasm, "font", "glyph_atlas_x")
-fn font_glyph_atlas_x(ch: Int) -> Int = _
-
-@extern(wasm, "font", "glyph_atlas_y")
-fn font_glyph_atlas_y(ch: Int) -> Int = _
-
-@extern(wasm, "font", "glyph_atlas_w")
-fn font_glyph_atlas_w(ch: Int) -> Int = _
-
-@extern(wasm, "font", "glyph_atlas_h")
-fn font_glyph_atlas_h(ch: Int) -> Int = _
-
-@extern(wasm, "font", "glyph_sdf_scale")
-fn font_glyph_sdf_scale(ch: Int) -> Float = _
-
-@extern(wasm, "font", "glyph_padding")
-fn font_glyph_padding(ch: Int) -> Int = _
-
-@extern(wasm, "font", "glyph_xmin")
-fn font_glyph_xmin(ch: Int) -> Float = _
-
-@extern(wasm, "font", "glyph_ymin")
-fn font_glyph_ymin(ch: Int) -> Float = _
-
-@extern(wasm, "font", "glyph_xmax")
-fn font_glyph_xmax(ch: Int) -> Float = _
-
-@extern(wasm, "font", "glyph_ymax")
-fn font_glyph_ymax(ch: Int) -> Float = _
 
 // ── Debug ──
 

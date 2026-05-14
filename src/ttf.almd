@@ -1,0 +1,440 @@
+// snaidhm TTF parser — pure Almide TrueType outline extraction
+//
+// Parses: offset table, head, maxp, hhea, hmtx, loca, cmap (format 4), glyf
+// Converts: quadratic beziers → cubic beziers for path renderer
+// NOT supported: CFF/CFF2, variable fonts, hinting, kern table
+
+import math
+
+// ── Byte-level access to font data (JS holds the buffer) ──
+
+@extern(wasm, "font_data", "len")
+fn data_len() -> Int
+
+@extern(wasm, "font_data", "u8")
+fn data_u8(offset: Int) -> Int
+
+@extern(wasm, "font_data", "u16be")
+fn data_u16be(offset: Int) -> Int
+
+@extern(wasm, "font_data", "i16be")
+fn data_i16be(offset: Int) -> Int
+
+@extern(wasm, "font_data", "u32be")
+fn data_u32be(offset: Int) -> Int
+
+@extern(wasm, "font_data", "i8")
+fn data_i8(offset: Int) -> Int
+
+// ── Types ──
+
+type Vec2 = { x: Float, y: Float }
+
+type CmapFormat4 = {
+  seg_count: Int,
+  end_codes: List[Int],
+  start_codes: List[Int],
+  id_deltas: List[Int],
+  id_range_offsets: List[Int],
+  range_offset_base: Int,
+}
+
+type Font = {
+  units_per_em: Int,
+  num_glyphs: Int,
+  index_to_loc_format: Int,
+  loca_offset: Int,
+  glyf_offset: Int,
+  hmtx_offset: Int,
+  num_h_metrics: Int,
+  cmap: CmapFormat4,
+}
+
+type GlyphPoint = { x: Int, y: Int, on_curve: Bool }
+
+type CubicBez = { ax: Float, ay: Float, bx: Float, by: Float,
+                   cx: Float, cy: Float, dx: Float, dy: Float }
+
+// ── Table directory ──
+
+fn find_table(tag0: Int, tag1: Int, tag2: Int, tag3: Int) -> { offset: Int, length: Int } = {
+  let num_tables = data_u16be(4)
+  var result = { offset: 0, length: 0 }
+  for i in 0..num_tables {
+    let entry = 12 + i * 16
+    if data_u8(entry) == tag0 and data_u8(entry + 1) == tag1
+       and data_u8(entry + 2) == tag2 and data_u8(entry + 3) == tag3 then {
+      result = { offset: data_u32be(entry + 8), length: data_u32be(entry + 12) }
+    } else ()
+  }
+  result
+}
+
+// ── Parse font ──
+
+fn parse_font() -> Font = {
+  // head table
+  let head = find_table(0x68, 0x65, 0x61, 0x64)  // "head"
+  let units_per_em = data_u16be(head.offset + 18)
+  let index_to_loc_format = data_i16be(head.offset + 50)
+
+  // maxp table
+  let maxp = find_table(0x6D, 0x61, 0x78, 0x70)  // "maxp"
+  let num_glyphs = data_u16be(maxp.offset + 4)
+
+  // hhea table
+  let hhea = find_table(0x68, 0x68, 0x65, 0x61)  // "hhea"
+  let num_h_metrics = data_u16be(hhea.offset + 34)
+
+  // loca table
+  let loca = find_table(0x6C, 0x6F, 0x63, 0x61)  // "loca"
+
+  // glyf table
+  let glyf = find_table(0x67, 0x6C, 0x79, 0x66)  // "glyf"
+
+  // hmtx table
+  let hmtx = find_table(0x68, 0x6D, 0x74, 0x78)  // "hmtx"
+
+  // cmap table
+  let cmap_table = find_table(0x63, 0x6D, 0x61, 0x70)  // "cmap"
+  let cmap = parse_cmap(cmap_table.offset)
+
+  {
+    units_per_em: units_per_em,
+    num_glyphs: num_glyphs,
+    index_to_loc_format: index_to_loc_format,
+    loca_offset: loca.offset,
+    glyf_offset: glyf.offset,
+    hmtx_offset: hmtx.offset,
+    num_h_metrics: num_h_metrics,
+    cmap: cmap,
+  }
+}
+
+// ── cmap (format 4 — BMP Unicode) ──
+
+fn parse_cmap(table_offset: Int) -> CmapFormat4 = {
+  let num_subtables = data_u16be(table_offset + 2)
+  var format4_offset = -1
+  for i in 0..num_subtables {
+    let entry = table_offset + 4 + i * 8
+    let platform_id = data_u16be(entry)
+    let encoding_id = data_u16be(entry + 2)
+    let offset = data_u32be(entry + 4)
+    if (platform_id == 0 or platform_id == 3) and encoding_id == 1 then {
+      format4_offset = table_offset + offset
+    } else if platform_id == 0 and format4_offset == -1 then {
+      format4_offset = table_offset + offset
+    } else ()
+  }
+  if format4_offset == -1 then {
+    { seg_count: 0, end_codes: [], start_codes: [], id_deltas: [],
+      id_range_offsets: [], range_offset_base: 0 }
+  } else {
+    parse_cmap_format4(format4_offset)
+  }
+}
+
+fn parse_cmap_format4(offset: Int) -> CmapFormat4 = {
+  let seg_count = data_u16be(offset + 6) / 2
+  let array_start = offset + 14
+
+  let end_codes = 0..seg_count |> list.map((i) => data_u16be(array_start + i * 2))
+  let start_offset = array_start + seg_count * 2 + 2
+  let start_codes = 0..seg_count |> list.map((i) => data_u16be(start_offset + i * 2))
+  let delta_offset = start_offset + seg_count * 2
+  let id_deltas = 0..seg_count |> list.map((i) => data_i16be(delta_offset + i * 2))
+  let range_offset = delta_offset + seg_count * 2
+  let id_range_offsets = 0..seg_count |> list.map((i) => data_u16be(range_offset + i * 2))
+
+  { seg_count: seg_count, end_codes: end_codes, start_codes: start_codes,
+    id_deltas: id_deltas, id_range_offsets: id_range_offsets,
+    range_offset_base: range_offset }
+}
+
+// ── Character → Glyph ID ──
+
+fn char_to_glyph_id(font: Font, char_code: Int) -> Int = {
+  let cmap = font.cmap
+  var result = 0
+  var found = false
+  for i in 0..cmap.seg_count {
+    if not found and cmap.end_codes[i] >= char_code and cmap.start_codes[i] <= char_code then {
+      if cmap.id_range_offsets[i] == 0 then {
+        result = int.band(char_code + cmap.id_deltas[i], 0xFFFF)
+      } else {
+        let glyph_offset = cmap.range_offset_base + i * 2 + cmap.id_range_offsets[i]
+                           + (char_code - cmap.start_codes[i]) * 2
+        let gid = data_u16be(glyph_offset)
+        result = if gid == 0 then 0 else int.band(gid + cmap.id_deltas[i], 0xFFFF)
+      }
+      found = true
+    } else ()
+  }
+  result
+}
+
+// ── Advance width ──
+
+fn get_advance_width(font: Font, glyph_id: Int) -> Int = {
+  if font.hmtx_offset == 0 then font.units_per_em
+  else if glyph_id < font.num_h_metrics then
+    data_u16be(font.hmtx_offset + glyph_id * 4)
+  else
+    data_u16be(font.hmtx_offset + (font.num_h_metrics - 1) * 4)
+}
+
+// ── Glyph offset from loca table ──
+
+fn glyph_offset(font: Font, glyph_id: Int) -> Int = {
+  if font.index_to_loc_format == 0 then
+    data_u16be(font.loca_offset + glyph_id * 2) * 2
+  else
+    data_u32be(font.loca_offset + glyph_id * 4)
+}
+
+// ── Simple glyph parsing ──
+
+fn parse_simple_glyph(offset: Int, num_contours: Int) -> List[List[GlyphPoint]] = {
+  var pos = offset + 10
+
+  // End points of each contour
+  let end_points = 0..num_contours |> list.map((i) => {
+    let ep = data_u16be(pos + i * 2)
+    ep
+  })
+  pos = pos + num_contours * 2
+
+  let num_points = end_points[num_contours - 1] + 1
+
+  // Skip instructions
+  let instruction_length = data_u16be(pos)
+  pos = pos + 2 + instruction_length
+
+  // Parse flags
+  var flags: List[Int] = []
+  var fpos = pos
+  while list.len(flags) < num_points {
+    let flag = data_u8(fpos)
+    fpos = fpos + 1
+    flags = flags + [flag]
+    if int.band(flag, 0x08) != 0 then {
+      let repeat = data_u8(fpos)
+      fpos = fpos + 1
+      for _ in 0..repeat { flags = flags + [flag] }
+    } else ()
+  }
+  pos = fpos
+
+  // Parse X coordinates
+  var xs: List[Int] = []
+  var x = 0
+  for i in 0..num_points {
+    let flag = flags[i]
+    if int.band(flag, 0x02) != 0 then {
+      let dx = data_u8(pos)
+      pos = pos + 1
+      x = x + (if int.band(flag, 0x10) != 0 then dx else -dx)
+    } else if int.band(flag, 0x10) == 0 then {
+      x = x + data_i16be(pos)
+      pos = pos + 2
+    } else ()
+    xs = xs + [x]
+  }
+
+  // Parse Y coordinates
+  var ys: List[Int] = []
+  var y = 0
+  for i in 0..num_points {
+    let flag = flags[i]
+    if int.band(flag, 0x04) != 0 then {
+      let dy = data_u8(pos)
+      pos = pos + 1
+      y = y + (if int.band(flag, 0x20) != 0 then dy else -dy)
+    } else if int.band(flag, 0x20) == 0 then {
+      y = y + data_i16be(pos)
+      pos = pos + 2
+    } else ()
+    ys = ys + [y]
+  }
+
+  // Build contours
+  var contours: List[List[GlyphPoint]] = []
+  var start_idx = 0
+  for c in 0..num_contours {
+    let end_idx = end_points[c]
+    let points = start_idx..=end_idx |> list.map((i) => {
+      { x: xs[i], y: ys[i], on_curve: int.band(flags[i], 0x01) != 0 }
+    })
+    contours = contours + [points]
+    start_idx = end_idx + 1
+  }
+  contours
+}
+
+// ── Composite glyph (first component only) ──
+
+fn parse_composite_glyph(font: Font, offset: Int) -> List[List[GlyphPoint]] = {
+  let pos = offset + 10
+  let component_flags = data_u16be(pos)
+  let glyph_index = data_u16be(pos + 2)
+  var dx = 0
+  var dy = 0
+  if int.band(component_flags, 0x01) != 0 then {
+    dx = data_i16be(pos + 4)
+    dy = data_i16be(pos + 6)
+  } else {
+    dx = data_i8(pos + 4)
+    dy = data_i8(pos + 5)
+  }
+  let contours = get_glyph_contours(font, glyph_index)
+  var result: List[List[GlyphPoint]] = []
+  for contour in contours {
+    var shifted: List[GlyphPoint] = []
+    for p in contour {
+      shifted = shifted + [{ x: p.x + dx, y: p.y + dy, on_curve: p.on_curve }]
+    }
+    result = result + [shifted]
+  }
+  result
+}
+
+// ── Get glyph contours ──
+
+fn get_glyph_contours(font: Font, glyph_id: Int) -> List[List[GlyphPoint]] = {
+  let g_off = glyph_offset(font, glyph_id)
+  let g_end = glyph_offset(font, glyph_id + 1)
+  if g_off == g_end then []  // empty glyph (space)
+  else {
+    let abs_offset = font.glyf_offset + g_off
+    let num_contours = data_i16be(abs_offset)
+    if num_contours < 0 then
+      parse_composite_glyph(font, abs_offset)
+    else
+      parse_simple_glyph(abs_offset, num_contours)
+  }
+}
+
+// ── Expand implied on-curve points (TrueType quadratic convention) ──
+
+fn expand_implied(contour: List[GlyphPoint]) -> List[GlyphPoint] = {
+  var result: List[GlyphPoint] = []
+  let n = list.len(contour)
+  for i in 0..n {
+    let curr = contour[i]
+    let next = contour[(i + 1) % n]
+    result = result + [curr]
+    if not curr.on_curve and not next.on_curve then {
+      result = result + [{ x: (curr.x + next.x) / 2, y: (curr.y + next.y) / 2, on_curve: true }]
+    } else ()
+  }
+  // Find first on-curve point and rotate
+  let n_res = list.len(result)
+  var start = 0
+  var found_start = false
+  for i in 0..n_res {
+    if not found_start and result[i].on_curve then {
+      start = i
+      found_start = true
+    } else ()
+  }
+  if not found_start then result
+  else {
+    // Rotate: take [start..end] + [0..start]
+    var rotated: List[GlyphPoint] = []
+    for i in 0..n_res {
+      rotated = rotated + [result[(i + start) % n_res]]
+    }
+    rotated
+  }
+}
+
+// ── Quadratic → Cubic bezier conversion ──
+// Given on-curve P0, off-curve Q1, on-curve P2:
+//   CP1 = P0 + 2/3 * (Q1 - P0)
+//   CP2 = P2 + 2/3 * (Q1 - P2)
+
+fn contours_to_cubics(contours: List[List[GlyphPoint]], scale: Float, ox: Float, oy: Float) -> List[CubicBez] = {
+  var cubics: List[CubicBez] = []
+  for contour in contours {
+    if list.len(contour) < 2 then () else {
+      let expanded = expand_implied(contour)
+      let n = list.len(expanded)
+      var i = 0
+      while i < n {
+        let curr = expanded[i]
+        let next = expanded[(i + 1) % n]
+        if curr.on_curve and next.on_curve then {
+          // Line segment → degenerate cubic
+          let x0 = int.to_float(curr.x) * scale + ox
+          let y0 = int.to_float(curr.y) * scale + oy
+          let x1 = int.to_float(next.x) * scale + ox
+          let y1 = int.to_float(next.y) * scale + oy
+          cubics = cubics + [{
+            ax: x0, ay: y0,
+            bx: x0 + (x1 - x0) / 3.0, by: y0 + (y1 - y0) / 3.0,
+            cx: x0 + 2.0 * (x1 - x0) / 3.0, cy: y0 + 2.0 * (y1 - y0) / 3.0,
+            dx: x1, dy: y1,
+          }]
+          i = i + 1
+        } else if curr.on_curve and not next.on_curve then {
+          // Quadratic: curr → next (ctrl) → end
+          let end = expanded[(i + 2) % n]
+          let p0x = int.to_float(curr.x) * scale + ox
+          let p0y = int.to_float(curr.y) * scale + oy
+          let qx = int.to_float(next.x) * scale + ox
+          let qy = int.to_float(next.y) * scale + oy
+          let p3x = int.to_float(end.x) * scale + ox
+          let p3y = int.to_float(end.y) * scale + oy
+          cubics = cubics + [{
+            ax: p0x, ay: p0y,
+            bx: p0x + 2.0 / 3.0 * (qx - p0x), by: p0y + 2.0 / 3.0 * (qy - p0y),
+            cx: p3x + 2.0 / 3.0 * (qx - p3x), cy: p3y + 2.0 / 3.0 * (qy - p3y),
+            dx: p3x, dy: p3y,
+          }]
+          i = i + 2
+        } else {
+          i = i + 1
+        }
+      }
+    }
+  }
+  cubics
+}
+
+// ── Public API: get cubics for a glyph ──
+
+fn glyph_cubics(font: Font, glyph_id: Int, scale: Float, ox: Float, oy: Float) -> List[CubicBez] = {
+  let contours = get_glyph_contours(font, glyph_id)
+  contours_to_cubics(contours, scale, ox, oy)
+}
+
+// ── Text layout: chars → per-glyph positioned cubics ──
+
+type GlyphResult = { cubics: List[CubicBez] }
+
+fn layout_text(font: Font, chars: List[Int], size: Float, x: Float, y: Float,
+               align: Int, canvas_h: Float) -> List[GlyphResult] = {
+  let upm = int.to_float(font.units_per_em)
+  let scale = size * 2.0 / canvas_h / upm
+
+  let total_width = list.fold(chars, 0.0, (acc, ch) =>
+    acc + int.to_float(get_advance_width(font, char_to_glyph_id(font, ch))) * scale
+  )
+
+  let start_x = if align == 1 then x - total_width / 2.0
+                else x
+
+  var cx = start_x
+  var results: List[GlyphResult] = []
+  for ch in chars {
+    let gid = char_to_glyph_id(font, ch)
+    let advance = int.to_float(get_advance_width(font, gid)) * scale
+    let gc = glyph_cubics(font, gid, scale, cx, y)
+    if list.len(gc) > 0 then {
+      results = results + [{ cubics: gc }]
+    } else ()
+    cx = cx + advance
+  }
+  results
+}
