@@ -215,7 +215,7 @@ fn render_scene(
   img_texture: Int,
   img_sampler: Int,
   scroll_y: Float,
-) -> Unit = {
+) -> SceneHandle = {
   let format = gpu.get_preferred_format()
   let _ctx = gpu.configure_canvas(device, format)
   let tiles_x = width / TILE
@@ -378,6 +378,14 @@ fn render_scene(
 
   gpu.end_pass(rp)
   gpu.finish_and_submit(device, encoder)
+
+  // Return handle for paint_frame reuse
+  { device: device, params_buf: params_buf,
+    compute_pipeline: compute_pipeline, compute_bg: compute_bg,
+    quad_pipeline: quad_pipeline, quad_bg: quad_bg,
+    img_pipeline: img_pipeline, img_bg: img_bg,
+    img_vtx: img_vtx, img_idx: img_idx, img_count: img_count,
+    tiles_x: tiles_x, tiles_y: tiles_y }
 }
 
 // ── Scene handle for init/paint separation ──
@@ -665,6 +673,6 @@ fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: 
   let cubics = shape_cubics + text_cubics
   let paints = shape_paints + text.paints
 
-  render_scene(device, 512, 512, cubics, shadows, paints,
+  let _handle = render_scene(device, 512, 512, cubics, shadows, paints,
     img_vtx, img_idx, img_count, img_texture, img_sampler, 0.0)
 }
