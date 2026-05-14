@@ -8,8 +8,8 @@ import self.ttf as ttf
 import math
 
 let TILE = 16
-let MAX_SEGS = 64
-let MAX_CMDS = 16
+let MAX_SEGS = 512
+let MAX_CMDS = 32
 
 // ── Types ──
 
@@ -206,7 +206,7 @@ type SceneHandle = {
   device: Int,
   width: Int,
   height: Int,
-  tiles_x: Int,
+  viewport_tiles_x: Int,
   viewport_tiles_y: Int,
   params_buf: Int,
   pixel_buf: Int,
@@ -228,6 +228,7 @@ fn prepare_scene(
   device: Int,
   width: Int,
   height: Int,
+  content_width: Int,
   content_height: Int,
   cubics: List[Cubic],
   shadows: List[Shadow],
@@ -240,10 +241,11 @@ fn prepare_scene(
 ) -> SceneHandle = {
   let format = gpu.get_preferred_format()
   let _ctx = gpu.configure_canvas(device, format)
-  let tiles_x = width / TILE
+  let content_tiles_x = content_width / TILE
   let content_tiles_y = content_height / TILE
+  let viewport_tiles_x = width / TILE
   let viewport_tiles_y = height / TILE
-  let num_tiles = tiles_x * content_tiles_y
+  let num_tiles = content_tiles_x * content_tiles_y
 
   // ── Flatten ──
   var segments: List[Seg] = []
@@ -286,13 +288,13 @@ fn prepare_scene(
         let max_x = float.max(seg.p0.x, seg.p1.x)
         let min_y = float.min(seg.p0.y, seg.p1.y)
         let max_y = float.max(seg.p0.y, seg.p1.y)
-        let t_max_x = int.min(tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * w_f / tile_f)))
+        let t_max_x = int.min(content_tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * w_f / tile_f)) + 1)
         // 1-tile margin for scroll: segments available in adjacent tiles
         let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)) - 1)
         let t_max_y = int.min(content_tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)) + 1)
         for ty in t_min_y..=t_max_y {
           for tx in 0..=t_max_x {
-            let tid = ty * tiles_x + tx
+            let tid = ty * content_tiles_x + tx
             let slot = tile_seg_counts[tid]
             if slot < MAX_SEGS then {
               tile_seg_ids[tid * MAX_SEGS + slot] = si
@@ -348,11 +350,12 @@ fn prepare_scene(
 
   let pixel_buf = gpu.create_buffer(device, width * height * 4, gpu.STORAGE)
 
-  let params_buf = gpu.create_buffer(device, 32, int.bor(gpu.UNIFORM, gpu.COPY_DST))
+  let params_buf = gpu.create_buffer(device, 48, int.bor(gpu.UNIFORM, gpu.COPY_DST))
   gpu.begin_data()
   gpu.push_u32(width) gpu.push_u32(height) gpu.push_u32(seg_count)
-  gpu.push_u32(tiles_x) gpu.push_u32(content_tiles_y) gpu.push_u32(list.len(shadows))
+  gpu.push_u32(content_tiles_x) gpu.push_u32(content_tiles_y) gpu.push_u32(list.len(shadows))
   gpu.push_u32(num_paths) gpu.push_f32(0.0)
+  gpu.push_f32(0.0) gpu.push_u32(0) gpu.push_u32(0) gpu.push_u32(0)
   gpu.flush_to_buffer(device, params_buf)
 
   let shadow_buf = upload_shadows(device, shadows)
@@ -382,7 +385,7 @@ fn prepare_scene(
 
   {
     device: device, width: width, height: height,
-    tiles_x: tiles_x, viewport_tiles_y: viewport_tiles_y,
+    viewport_tiles_x: viewport_tiles_x, viewport_tiles_y: viewport_tiles_y,
     params_buf: params_buf, pixel_buf: pixel_buf,
     compute_pipeline: compute_pipeline, compute_bg: compute_bg,
     quad_pipeline: quad_pipeline, quad_bg: quad_bg,
@@ -394,16 +397,16 @@ fn prepare_scene(
 
 // ── Draw frame: update scroll_y + dispatch + present (called every frame, < 2ms) ──
 
-fn draw_frame(scene: SceneHandle, scroll_y: Float) -> Unit = {
-  // Update only scroll_y in params buffer (byte offset 28 = 7th f32 slot)
+fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float) -> Unit = {
   gpu.write_f32_at(scene.device, scene.params_buf, 28, scroll_y)
+  gpu.write_f32_at(scene.device, scene.params_buf, 32, scroll_x)
 
   let encoder = gpu.begin_encoder(scene.device)
 
   let cp = gpu.begin_compute_pass(encoder)
   gpu.set_pipeline(cp, scene.compute_pipeline)
   gpu.set_bind_group(cp, 0, scene.compute_bg)
-  gpu.dispatch_workgroups(cp, scene.tiles_x, scene.viewport_tiles_y, 1)
+  gpu.dispatch_workgroups(cp, scene.viewport_tiles_x, scene.viewport_tiles_y, 1)
   gpu.end_pass(cp)
 
   let rp = gpu.begin_render_pass(encoder, 0.1, 0.1, 0.15, 1.0)
@@ -421,6 +424,9 @@ fn draw_frame(scene: SceneHandle, scroll_y: Float) -> Unit = {
   gpu.finish_and_submit(scene.device, encoder)
 }
 
+fn draw_frame(scene: SceneHandle, scroll_y: Float) -> Unit =
+  draw_frame_2d(scene, 0.0, scroll_y)
+
 // ── Legacy API: one-shot render (prepare + draw in one call) ──
 
 fn render_scene(
@@ -437,7 +443,7 @@ fn render_scene(
   img_sampler: Int,
   scroll_y: Float,
 ) -> Unit = {
-  let scene = prepare_scene(device, width, height, height, cubics, shadows, paints,
+  let scene = prepare_scene(device, width, height, width, height, cubics, shadows, paints,
     img_vtx, img_idx, img_count, img_texture, img_sampler)
   draw_frame(scene, scroll_y)
 }
