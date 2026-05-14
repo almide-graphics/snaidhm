@@ -214,6 +214,7 @@ fn render_scene(
   img_count: Int,
   img_texture: Int,
   img_sampler: Int,
+  scroll_y: Float,
 ) -> Unit = {
   let format = gpu.get_preferred_format()
   let _ctx = gpu.configure_canvas(device, format)
@@ -327,7 +328,7 @@ fn render_scene(
   gpu.begin_data()
   gpu.push_u32(width) gpu.push_u32(height) gpu.push_u32(seg_count)
   gpu.push_u32(tiles_x) gpu.push_u32(tiles_y) gpu.push_u32(list.len(shadows))
-  gpu.push_u32(num_paths) gpu.push_u32(0)
+  gpu.push_u32(num_paths) gpu.push_f32(scroll_y)
   gpu.flush_to_buffer(device, params_buf)
 
   let shadow_buf = upload_shadows(device, shadows)
@@ -665,5 +666,5 @@ fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: 
   let paints = shape_paints + text.paints
 
   render_scene(device, 512, 512, cubics, shadows, paints,
-    img_vtx, img_idx, img_count, img_texture, img_sampler)
+    img_vtx, img_idx, img_count, img_texture, img_sampler, 0.0)
 }
