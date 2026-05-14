@@ -166,11 +166,12 @@ fn render_scene(
     segments = segments + flatten_cubic(cub.a, cub.b, cub.c, cub.d, cub.color, cub.path_id)
   }
   let seg_count = list.len(segments)
+  let num_paths = list.len(paints)
 
-  // ── Tile assignment (all columns left of max_x) ──
-  // Correct for non-zero winding fill. Backdrop optimization deferred to DDA pass.
+  // ── Tile assignment (AABB overlap) + backdrop ──
   var tile_counts: List[Int] = list.repeat(0, num_tiles)
   var tile_seg_ids: List[Int] = list.repeat(0, num_tiles * MAX_SEGS)
+  var backdrop: List[Int] = list.repeat(0, int.max(1, num_paths * num_tiles))
 
   let w_f = int.to_float(WIDTH)
   let h_f = int.to_float(HEIGHT)
@@ -179,14 +180,22 @@ fn render_scene(
   for si in 0..seg_count {
     let seg = segments[si]
     if float.abs(seg.p0.y - seg.p1.y) < 0.0001 then () else {
+    let min_x = float.min(seg.p0.x, seg.p1.x)
     let max_x = float.max(seg.p0.x, seg.p1.x)
     let min_y = float.min(seg.p0.y, seg.p1.y)
     let max_y = float.max(seg.p0.y, seg.p1.y)
+    let t_min_x = int.max(0, float.to_int(float.floor((min_x + 1.0) * 0.5 * w_f / tile_f)))
     let t_max_x = int.min(tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * w_f / tile_f)))
     let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)))
     let t_max_y = int.min(tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)))
+    // Hybrid tile assignment:
+    // Edge rows (top/bottom of segment): all columns left (exact Y-clipping needed)
+    // Interior rows: AABB only + backdrop delta
+    let delta = if seg.p0.y > seg.p1.y then -1 else 1
     for ty in t_min_y..=t_max_y {
-      for tx in 0..=t_max_x {
+      let is_interior = ty > t_min_y and ty < t_max_y
+      let start_tx = if is_interior then t_min_x else 0
+      for tx in start_tx..=t_max_x {
         let tid = ty * tiles_x + tx
         let slot = tile_counts[tid]
         if slot < MAX_SEGS then {
@@ -194,7 +203,24 @@ fn render_scene(
           tile_counts[tid] = slot + 1
         } else ()
       }
+      if is_interior and t_min_x > 0 then {
+        let bid = seg.path_id * num_tiles + ty * tiles_x + t_min_x - 1
+        backdrop[bid] = backdrop[bid] + delta
+      } else ()
     }
+    }
+  }
+
+  // Prefix sum backdrop from right to left per path per row
+  for pid in 0..num_paths {
+    for ty in 0..tiles_y {
+      var running = 0
+      for tx_rev in 0..tiles_x {
+        let tx = tiles_x - 1 - tx_rev
+        let bid = pid * num_tiles + ty * tiles_x + tx
+        running = running + backdrop[bid]
+        backdrop[bid] = running
+      }
     }
   }
 
@@ -224,11 +250,17 @@ fn render_scene(
   gpu.begin_data()
   gpu.push_u32(WIDTH) gpu.push_u32(HEIGHT) gpu.push_u32(seg_count)
   gpu.push_u32(tiles_x) gpu.push_u32(tiles_y) gpu.push_u32(list.len(shadows))
-  gpu.push_u32(0) gpu.push_u32(0)
+  gpu.push_u32(num_paths) gpu.push_u32(0)
   gpu.flush_to_buffer(device, params_buf)
 
   let shadow_buf = upload_shadows(device, shadows)
   let paint_buf = upload_paints(device, paints)
+
+  let backdrop_buf = gpu.create_buffer(device, int.max(1, num_paths * num_tiles) * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  gpu.begin_data()
+  for v in backdrop { gpu.push_u32(v) }
+  if num_paths == 0 then gpu.push_u32(0) else ()
+  gpu.flush_to_buffer(device, backdrop_buf)
 
   // ── Text quad generation ──
   let atlas_w = int.to_float(gpu.font_atlas_width())
@@ -302,6 +334,7 @@ fn render_scene(
   gpu.add_buffer_binding(seg_buf) gpu.add_buffer_binding(tc_buf) gpu.add_buffer_binding(ts_buf)
   gpu.add_buffer_binding(pixel_buf) gpu.add_buffer_binding(params_buf)
   gpu.add_buffer_binding(shadow_buf) gpu.add_buffer_binding(paint_buf)
+  gpu.add_buffer_binding(backdrop_buf)
   let compute_bg = gpu.create_bound_group(device, compute_pipeline, 0)
 
   let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
