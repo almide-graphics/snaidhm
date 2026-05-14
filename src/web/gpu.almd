@@ -137,6 +137,11 @@ fn set_index_buffer(pass: Int, buffer: Int) -> Unit = _
 fn draw_indexed(pass: Int, index_count: Int) -> Unit = _
 
 
+// ── Partial buffer write (for scroll_y updates without full rebuild) ──
+
+@extern(wasm, "gpu", "write_f32_at")
+fn write_f32_at(device: Int, buffer: Int, byte_offset: Int, value: Float) -> Unit = _
+
 // ── Debug ──
 
 @extern(wasm, "gpu", "log_int")

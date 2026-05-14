@@ -8,8 +8,8 @@ import self.ttf as ttf
 import math
 
 let TILE = 16
-let MAX_SEGS = 512
-let MAX_CMDS = 32
+let MAX_SEGS = 64
+let MAX_CMDS = 16
 
 // ── Types ──
 
@@ -200,12 +200,35 @@ fn upload_paints(device: Int, paints: List[Paint]) -> Int = {
   buf
 }
 
-// ── Core render ──
+// ── Scene handle (GPU resources cached across frames) ──
 
-fn render_scene(
+type SceneHandle = {
   device: Int,
   width: Int,
   height: Int,
+  tiles_x: Int,
+  viewport_tiles_y: Int,
+  params_buf: Int,
+  pixel_buf: Int,
+  compute_pipeline: Int,
+  compute_bg: Int,
+  quad_pipeline: Int,
+  quad_bg: Int,
+  img_pipeline: Int,
+  img_bg: Int,
+  img_vtx: Int,
+  img_idx: Int,
+  img_count: Int,
+  format: Int,
+}
+
+// ── Prepare: flatten + tile + upload + create pipelines (called once, or on resize) ──
+
+fn prepare_scene(
+  device: Int,
+  width: Int,
+  height: Int,
+  content_height: Int,
   cubics: List[Cubic],
   shadows: List[Shadow],
   paints: List[Paint],
@@ -214,13 +237,13 @@ fn render_scene(
   img_count: Int,
   img_texture: Int,
   img_sampler: Int,
-  scroll_y: Float,
-) -> Unit = {
+) -> SceneHandle = {
   let format = gpu.get_preferred_format()
   let _ctx = gpu.configure_canvas(device, format)
   let tiles_x = width / TILE
-  let tiles_y = height / TILE
-  let num_tiles = tiles_x * tiles_y
+  let content_tiles_y = content_height / TILE
+  let viewport_tiles_y = height / TILE
+  let num_tiles = tiles_x * content_tiles_y
 
   // ── Flatten ──
   var segments: List[Seg] = []
@@ -264,8 +287,9 @@ fn render_scene(
         let min_y = float.min(seg.p0.y, seg.p1.y)
         let max_y = float.max(seg.p0.y, seg.p1.y)
         let t_max_x = int.min(tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * w_f / tile_f)))
-        let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)))
-        let t_max_y = int.min(tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)))
+        // 1-tile margin for scroll: segments available in adjacent tiles
+        let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)) - 1)
+        let t_max_y = int.min(content_tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)) + 1)
         for ty in t_min_y..=t_max_y {
           for tx in 0..=t_max_x {
             let tid = ty * tiles_x + tx
@@ -327,8 +351,8 @@ fn render_scene(
   let params_buf = gpu.create_buffer(device, 32, int.bor(gpu.UNIFORM, gpu.COPY_DST))
   gpu.begin_data()
   gpu.push_u32(width) gpu.push_u32(height) gpu.push_u32(seg_count)
-  gpu.push_u32(tiles_x) gpu.push_u32(tiles_y) gpu.push_u32(list.len(shadows))
-  gpu.push_u32(num_paths) gpu.push_f32(scroll_y)
+  gpu.push_u32(tiles_x) gpu.push_u32(content_tiles_y) gpu.push_u32(list.len(shadows))
+  gpu.push_u32(num_paths) gpu.push_f32(0.0)
   gpu.flush_to_buffer(device, params_buf)
 
   let shadow_buf = upload_shadows(device, shadows)
@@ -356,28 +380,66 @@ fn render_scene(
   gpu.add_texture_binding(img_texture) gpu.add_sampler_binding(img_sampler)
   let img_bg = gpu.create_bound_group(device, img_pipeline, 0)
 
-  // ── Render ──
-  let encoder = gpu.begin_encoder(device)
+  {
+    device: device, width: width, height: height,
+    tiles_x: tiles_x, viewport_tiles_y: viewport_tiles_y,
+    params_buf: params_buf, pixel_buf: pixel_buf,
+    compute_pipeline: compute_pipeline, compute_bg: compute_bg,
+    quad_pipeline: quad_pipeline, quad_bg: quad_bg,
+    img_pipeline: img_pipeline, img_bg: img_bg,
+    img_vtx: img_vtx, img_idx: img_idx, img_count: img_count,
+    format: format,
+  }
+}
+
+// ── Draw frame: update scroll_y + dispatch + present (called every frame, < 2ms) ──
+
+fn draw_frame(scene: SceneHandle, scroll_y: Float) -> Unit = {
+  // Update only scroll_y in params buffer (byte offset 28 = 7th f32 slot)
+  gpu.write_f32_at(scene.device, scene.params_buf, 28, scroll_y)
+
+  let encoder = gpu.begin_encoder(scene.device)
 
   let cp = gpu.begin_compute_pass(encoder)
-  gpu.set_pipeline(cp, compute_pipeline)
-  gpu.set_bind_group(cp, 0, compute_bg)
-  gpu.dispatch_workgroups(cp, tiles_x, tiles_y, 1)
+  gpu.set_pipeline(cp, scene.compute_pipeline)
+  gpu.set_bind_group(cp, 0, scene.compute_bg)
+  gpu.dispatch_workgroups(cp, scene.tiles_x, scene.viewport_tiles_y, 1)
   gpu.end_pass(cp)
 
   let rp = gpu.begin_render_pass(encoder, 0.1, 0.1, 0.15, 1.0)
-  gpu.set_pipeline(rp, quad_pipeline)
-  gpu.set_bind_group(rp, 0, quad_bg)
+  gpu.set_pipeline(rp, scene.quad_pipeline)
+  gpu.set_bind_group(rp, 0, scene.quad_bg)
   gpu.draw(rp, 6)
 
-  gpu.set_pipeline(rp, img_pipeline)
-  gpu.set_bind_group(rp, 0, img_bg)
-  gpu.set_vertex_buffer(rp, 0, img_vtx)
-  gpu.set_index_buffer(rp, img_idx)
-  gpu.draw_indexed(rp, img_count)
+  gpu.set_pipeline(rp, scene.img_pipeline)
+  gpu.set_bind_group(rp, 0, scene.img_bg)
+  gpu.set_vertex_buffer(rp, 0, scene.img_vtx)
+  gpu.set_index_buffer(rp, scene.img_idx)
+  gpu.draw_indexed(rp, scene.img_count)
 
   gpu.end_pass(rp)
-  gpu.finish_and_submit(device, encoder)
+  gpu.finish_and_submit(scene.device, encoder)
+}
+
+// ── Legacy API: one-shot render (prepare + draw in one call) ──
+
+fn render_scene(
+  device: Int,
+  width: Int,
+  height: Int,
+  cubics: List[Cubic],
+  shadows: List[Shadow],
+  paints: List[Paint],
+  img_vtx: Int,
+  img_idx: Int,
+  img_count: Int,
+  img_texture: Int,
+  img_sampler: Int,
+  scroll_y: Float,
+) -> Unit = {
+  let scene = prepare_scene(device, width, height, height, cubics, shadows, paints,
+    img_vtx, img_idx, img_count, img_texture, img_sampler)
+  draw_frame(scene, scroll_y)
 }
 
 // ── Text rendering (pure Almide TTF parser) ──
