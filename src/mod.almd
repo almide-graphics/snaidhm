@@ -258,7 +258,8 @@ fn render_scene(
     for si_off in 0..path_seg_counts[pid] {
       let si = path_starts[pid] + si_off
       let seg = segments[si]
-      if float.abs(seg.p0.y - seg.p1.y) < 0.0001 then () else {
+      // Skip near-horizontal segments (< 0.5px in NDC) to avoid thin-line artifacts
+      if float.abs(seg.p0.y - seg.p1.y) < 1.0 / h_f then () else {
         let max_x = float.max(seg.p0.x, seg.p1.x)
         let min_y = float.min(seg.p0.y, seg.p1.y)
         let max_y = float.max(seg.p0.y, seg.p1.y)
