@@ -20,8 +20,7 @@ type Cubic = { a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], path_id: 
 type Seg = { p0: Vec2, p1: Vec2, color: List[Float], path_id: Int }
 type Shadow = { cx: Float, cy: Float, hw: Float, hh: Float, cr: Float, ox: Float, oy: Float, blur: Float, color: List[Float] }
 type Paint = { kind: Int, c0: List[Float], c1: List[Float], params: List[Float] }
-// TextLine type retained for ceangal compatibility (DOM overlay positioning)
-type TextLine = { chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float] }
+type TextSpec = { chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float] }
 
 let ALIGN_LEFT = 0
 let ALIGN_CENTER = 1
@@ -164,7 +163,7 @@ fn circ_shadow(cx: Float, cy: Float, rad: Float, ox: Float, oy: Float, blur: Flo
 
 fn str(s: String) -> List[Int] = string.to_bytes(s)
 
-fn text_line(chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float]) -> TextLine =
+fn text_spec(chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float]) -> TextSpec =
   { chars: chars, size: size, x: x, y: y, align: align, color: color }
 
 fn measure_text(font: ttf.Font, chars: List[Int], size: Float) -> Float = {
@@ -380,8 +379,6 @@ fn render_scene(
 }
 
 // ── Text rendering (pure Almide TTF parser) ──
-
-type TextSpec = { chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float] }
 
 fn build_text_cubics(specs: List[TextSpec]) -> { cubics: List[Cubic], paints: List[Paint] } = {
   let font = ttf.parse_font()
