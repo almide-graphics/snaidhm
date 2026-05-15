@@ -209,6 +209,7 @@ type SceneHandle = {
   viewport_tiles_x: Int,
   viewport_tiles_y: Int,
   params_buf: Int,
+  regions_buf: Int,
   pixel_buf: Int,
   compute_pipeline: Int,
   compute_bg: Int,
@@ -359,6 +360,9 @@ fn prepare_scene(
   gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_u32(0) gpu.push_u32(0)
   gpu.flush_to_buffer(device, params_buf)
 
+  // Scroll regions buffer: 8 regions × 48 bytes = 384 bytes
+  let regions_buf = gpu.create_buffer(device, 384, int.bor(gpu.STORAGE, gpu.COPY_DST))
+
   let shadow_buf = upload_shadows(device, shadows)
   let paint_buf = upload_paints(device, paints)
 
@@ -371,6 +375,7 @@ fn prepare_scene(
   gpu.add_buffer_binding(seg_buf) gpu.add_buffer_binding(tc_buf) gpu.add_buffer_binding(ts_buf)
   gpu.add_buffer_binding(pixel_buf) gpu.add_buffer_binding(params_buf)
   gpu.add_buffer_binding(shadow_buf) gpu.add_buffer_binding(paint_buf) gpu.add_buffer_binding(tcmd_buf)
+  gpu.add_buffer_binding(regions_buf)
   let compute_bg = gpu.create_bound_group(device, compute_pipeline, 0)
 
   let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
@@ -387,7 +392,7 @@ fn prepare_scene(
   {
     device: device, width: width, height: height,
     viewport_tiles_x: viewport_tiles_x, viewport_tiles_y: viewport_tiles_y,
-    params_buf: params_buf, pixel_buf: pixel_buf,
+    params_buf: params_buf, regions_buf: regions_buf, pixel_buf: pixel_buf,
     compute_pipeline: compute_pipeline, compute_bg: compute_bg,
     quad_pipeline: quad_pipeline, quad_bg: quad_bg,
     img_pipeline: img_pipeline, img_bg: img_bg,
@@ -429,6 +434,26 @@ fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float,
 
   gpu.end_pass(rp)
   gpu.finish_and_submit(scene.device, encoder)
+}
+
+// Upload region data: 12 floats per region (48 bytes), up to 8 regions
+fn upload_regions(scene: SceneHandle, count: Int,
+                  bounds_x: List[Float], bounds_y: List[Float], bounds_w: List[Float], bounds_h: List[Float],
+                  scroll_x: List[Float], scroll_y: List[Float],
+                  content_w: List[Float], content_h: List[Float],
+                  parent: List[Int]) -> Unit = {
+  gpu.begin_data()
+  for i in 0..8 {
+    if i < count then {
+      gpu.push_f32(bounds_x[i]) gpu.push_f32(bounds_y[i]) gpu.push_f32(bounds_w[i]) gpu.push_f32(bounds_h[i])
+      gpu.push_f32(scroll_x[i]) gpu.push_f32(scroll_y[i])
+      gpu.push_f32(content_w[i]) gpu.push_f32(content_h[i])
+      gpu.push_f32(int.to_float(parent[i])) gpu.push_f32(int.to_float(count)) gpu.push_f32(0.0) gpu.push_f32(0.0)
+    } else {
+      for _ in 0..12 { gpu.push_f32(0.0) }
+    }
+  }
+  gpu.flush_to_buffer(scene.device, scene.regions_buf)
 }
 
 fn draw_frame(scene: SceneHandle, scroll_y: Float) -> Unit =
