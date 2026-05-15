@@ -8,8 +8,8 @@ import self.ttf as ttf
 import math
 
 let TILE = 16
-let MAX_SEGS = 64
-let MAX_CMDS = 16
+let MAX_SEGS = 16
+let MAX_CMDS = 8
 
 // ── Types ──
 
@@ -359,7 +359,7 @@ fn prepare_scene(
   gpu.push_u32(content_tiles_x) gpu.push_u32(content_tiles_y) gpu.push_u32(list.len(shadows))
   gpu.push_u32(num_paths) gpu.push_f32(0.0)
   gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_u32(0)
-  gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_u32(0) gpu.push_u32(0)
+  gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_u32(0)
   gpu.flush_to_buffer(device, params_buf)
 
   // Scroll regions buffer: 8 regions × 48 bytes = 384 bytes
@@ -422,6 +422,7 @@ fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float,
   gpu.write_f32_at(scene.device, scene.params_buf, 40, bar_opacity_x)
   gpu.write_f32_at(scene.device, scene.params_buf, 48, bar_hover_y)
   gpu.write_f32_at(scene.device, scene.params_buf, 52, bar_hover_x)
+  // vlist_item_h at offset 56, vlist_item_count at offset 60 — written by ceangal
 
   let encoder = gpu.begin_encoder(scene.device)
 
