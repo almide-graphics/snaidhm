@@ -8,8 +8,8 @@ import self.ttf as ttf
 import math
 
 let TILE = 16
-let MAX_SEGS = 512
-let MAX_CMDS = 32
+let MAX_SEGS = 64
+let MAX_CMDS = 16
 
 // ── Types ──
 
@@ -397,9 +397,11 @@ fn prepare_scene(
 
 // ── Draw frame: update scroll_y + dispatch + present (called every frame, < 2ms) ──
 
-fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float) -> Unit = {
+fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float, bar_opacity_y: Float, bar_opacity_x: Float) -> Unit = {
   gpu.write_f32_at(scene.device, scene.params_buf, 28, scroll_y)
   gpu.write_f32_at(scene.device, scene.params_buf, 32, scroll_x)
+  gpu.write_f32_at(scene.device, scene.params_buf, 36, bar_opacity_y)
+  gpu.write_f32_at(scene.device, scene.params_buf, 40, bar_opacity_x)
 
   let encoder = gpu.begin_encoder(scene.device)
 
@@ -425,7 +427,7 @@ fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float) -> Unit =
 }
 
 fn draw_frame(scene: SceneHandle, scroll_y: Float) -> Unit =
-  draw_frame_2d(scene, 0.0, scroll_y)
+  draw_frame_2d(scene, 0.0, scroll_y, 0.0, 0.0)
 
 // ── Legacy API: one-shot render (prepare + draw in one call) ──
 
