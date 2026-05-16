@@ -497,6 +497,23 @@ fn upload_items(scene: SceneHandle, count: Int,
   gpu.flush_to_buffer(scene.device, scene.items_buf)
 }
 
+// Render pass only (no compute) — for fragment-only effects like mouse light
+fn draw_render_only(scene: SceneHandle) -> Unit = {
+  let encoder = gpu.begin_encoder(scene.device)
+  let rp = gpu.begin_render_pass(encoder, 0.1, 0.1, 0.15, 1.0)
+  gpu.set_pipeline(rp, scene.quad_pipeline)
+  gpu.set_bind_group(rp, 0, scene.quad_bg)
+  gpu.set_bind_group(rp, 1, scene.quad_regions_bg)
+  gpu.draw(rp, 6)
+  gpu.set_pipeline(rp, scene.img_pipeline)
+  gpu.set_bind_group(rp, 0, scene.img_bg)
+  gpu.set_vertex_buffer(rp, 0, scene.img_vtx)
+  gpu.set_index_buffer(rp, scene.img_idx)
+  gpu.draw_indexed(rp, scene.img_count)
+  gpu.end_pass(rp)
+  gpu.finish_and_submit(scene.device, encoder)
+}
+
 fn draw_frame(scene: SceneHandle, scroll_y: Float) -> Unit =
   draw_frame_2d(scene, 0.0, scroll_y, 0.0, 0.0, 0.0, 0.0)
 
