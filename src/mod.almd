@@ -211,6 +211,7 @@ type SceneHandle = {
   params_buf: Int,
   regions_buf: Int,
   pixel_buf: Int,
+  items_buf: Int,
   compute_pipeline: Int,
   compute_bg: Int,
   compute_regions_bg: Int,
@@ -365,6 +366,9 @@ fn prepare_scene(
   // Scroll regions buffer: 8 regions × 48 bytes = 384 bytes
   let regions_buf = gpu.create_buffer(device, 384, int.bor(gpu.STORAGE, gpu.COPY_DST))
 
+  // Render items buffer: up to 256 items × 48 bytes = 12288 bytes
+  let items_buf = gpu.create_buffer(device, 12288, int.bor(gpu.STORAGE, gpu.COPY_DST))
+
   let shadow_buf = upload_shadows(device, shadows)
   let paint_buf = upload_paints(device, paints)
 
@@ -379,9 +383,10 @@ fn prepare_scene(
   gpu.add_buffer_binding(shadow_buf) gpu.add_buffer_binding(paint_buf) gpu.add_buffer_binding(tcmd_buf)
   let compute_bg = gpu.create_bound_group(device, compute_pipeline, 0)
 
-  // Regions bind group (group 1, shared by compute + render)
+  // Group 1: regions + items (shared by compute + render)
   gpu.begin_bindings()
   gpu.add_buffer_binding(regions_buf)
+  gpu.add_buffer_binding(items_buf)
   let compute_regions_bg = gpu.create_bound_group(device, compute_pipeline, 1)
 
   let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
@@ -403,6 +408,7 @@ fn prepare_scene(
     device: device, width: width, height: height,
     viewport_tiles_x: viewport_tiles_x, viewport_tiles_y: viewport_tiles_y,
     params_buf: params_buf, regions_buf: regions_buf, pixel_buf: pixel_buf,
+    items_buf: items_buf,
     compute_pipeline: compute_pipeline, compute_bg: compute_bg, compute_regions_bg: compute_regions_bg,
     quad_pipeline: quad_pipeline, quad_bg: quad_bg, quad_regions_bg: quad_regions_bg,
     img_pipeline: img_pipeline, img_bg: img_bg,
@@ -469,6 +475,25 @@ fn upload_regions(scene: SceneHandle, count: Int,
     }
   }
   gpu.flush_to_buffer(scene.device, scene.regions_buf)
+}
+
+// Upload render items: 12 floats per item (48 bytes)
+// [x, y, w, h, bg_r, bg_g, bg_b, bg_a, rounded, opacity, kind_f, item_count_f]
+fn upload_items(scene: SceneHandle, count: Int,
+                xs: List[Float], ys: List[Float], ws: List[Float], hs: List[Float],
+                bg_rs: List[Float], bg_gs: List[Float], bg_bs: List[Float], bg_as: List[Float],
+                roundeds: List[Float], opacities: List[Float]) -> Unit = {
+  gpu.begin_data()
+  for i in 0..int.min(count, 256) {
+    gpu.push_f32(xs[i]) gpu.push_f32(ys[i]) gpu.push_f32(ws[i]) gpu.push_f32(hs[i])
+    gpu.push_f32(bg_rs[i]) gpu.push_f32(bg_gs[i]) gpu.push_f32(bg_bs[i]) gpu.push_f32(bg_as[i])
+    gpu.push_f32(roundeds[i]) gpu.push_f32(opacities[i]) gpu.push_f32(0.0) gpu.push_f32(int.to_float(count))
+  }
+  // Pad remaining slots with zeros
+  for _ in count..256 {
+    for _ in 0..12 { gpu.push_f32(0.0) }
+  }
+  gpu.flush_to_buffer(scene.device, scene.items_buf)
 }
 
 fn draw_frame(scene: SceneHandle, scroll_y: Float) -> Unit =
