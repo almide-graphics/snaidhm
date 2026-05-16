@@ -396,6 +396,7 @@ fn prepare_scene(
 
   gpu.begin_bindings()
   gpu.add_buffer_binding(regions_buf)
+  gpu.add_buffer_binding(items_buf)
   let quad_regions_bg = gpu.create_bound_group(device, quad_pipeline, 1)
 
   let img_shader = gpu.create_shader(device, 3, 0)
