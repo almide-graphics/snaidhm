@@ -29,7 +29,7 @@ snaidhm
 
 ## Dependencies
 
-- [lumen](https://github.com/dubhlux/lumen) — vec/mat/color/quaternion math
+- [lumen](https://github.com/almide-graphics/lumen) — vec/mat/color/quaternion math
 - Almide compiler with `@gpu` → WGSL codegen (`almide/almide`)
 
 ## Roadmap

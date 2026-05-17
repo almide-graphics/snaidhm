@@ -208,6 +208,8 @@ type SceneHandle = {
   height: Int,
   viewport_tiles_x: Int,
   viewport_tiles_y: Int,
+  content_tiles_x: Int,
+  content_tiles_y: Int,
   params_buf: Int,
   regions_buf: Int,
   pixel_buf: Int,
@@ -218,6 +220,7 @@ type SceneHandle = {
   quad_pipeline: Int,
   quad_bg: Int,
   quad_regions_bg: Int,
+  quad_bg_tex: Int,
   img_pipeline: Int,
   img_bg: Int,
   img_vtx: Int,
@@ -242,6 +245,8 @@ fn prepare_scene(
   img_count: Int,
   img_texture: Int,
   img_sampler: Int,
+  bg_texture: Int,
+  bg_sampler: Int,
 ) -> SceneHandle = {
   let format = gpu.get_preferred_format()
   let _ctx = gpu.configure_canvas(device, format)
@@ -352,6 +357,7 @@ fn prepare_scene(
   for v in tile_cmds_data { gpu.push_u32(v) }
   gpu.flush_to_buffer(device, tcmd_buf)
 
+  // Pixel buffer = viewport size (vlist: only visible items rendered at viewport coords)
   let pixel_buf = gpu.create_buffer(device, width * height * 4, gpu.STORAGE)
 
   let params_buf = gpu.create_buffer(device, 64, int.bor(gpu.UNIFORM, gpu.COPY_DST))
@@ -359,8 +365,8 @@ fn prepare_scene(
   gpu.push_u32(width) gpu.push_u32(height) gpu.push_u32(seg_count)
   gpu.push_u32(content_tiles_x) gpu.push_u32(content_tiles_y) gpu.push_u32(list.len(shadows))
   gpu.push_u32(num_paths) gpu.push_f32(0.0)
-  gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_u32(0)
-  gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_u32(0)
+  gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_f32(0.0 - 1.0) gpu.push_f32(0.0)
+  gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_f32(0.0) gpu.push_f32(0.0)
   gpu.flush_to_buffer(device, params_buf)
 
   // Scroll regions buffer: 8 regions × 48 bytes = 384 bytes
@@ -383,10 +389,10 @@ fn prepare_scene(
   gpu.add_buffer_binding(shadow_buf) gpu.add_buffer_binding(paint_buf) gpu.add_buffer_binding(tcmd_buf)
   let compute_bg = gpu.create_bound_group(device, compute_pipeline, 0)
 
-  // Group 1: regions + items (shared by compute + render)
+  // Group 1 for compute: render_items + scroll_regions (both declared in shader)
   gpu.begin_bindings()
-  gpu.add_buffer_binding(regions_buf)
   gpu.add_buffer_binding(items_buf)
+  gpu.add_buffer_binding(regions_buf)
   let compute_regions_bg = gpu.create_bound_group(device, compute_pipeline, 1)
 
   let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
@@ -394,10 +400,17 @@ fn prepare_scene(
   gpu.add_buffer_binding(pixel_buf) gpu.add_buffer_binding(params_buf)
   let quad_bg = gpu.create_bound_group(device, quad_pipeline, 0)
 
+  // Group 1 for render: render_items (binding 0) + scroll_regions (binding 1)
   gpu.begin_bindings()
-  gpu.add_buffer_binding(regions_buf)
   gpu.add_buffer_binding(items_buf)
+  gpu.add_buffer_binding(regions_buf)
   let quad_regions_bg = gpu.create_bound_group(device, quad_pipeline, 1)
+
+  // Group 2 for render: background texture + sampler
+  gpu.begin_bindings()
+  gpu.add_texture_binding(bg_texture)
+  gpu.add_sampler_binding(bg_sampler)
+  let quad_bg_tex = gpu.create_bound_group(device, quad_pipeline, 2)
 
   let img_shader = gpu.create_shader(device, 3, 0)
   let img_pipeline = gpu.create_image_pipeline(device, img_shader, format)
@@ -408,10 +421,11 @@ fn prepare_scene(
   {
     device: device, width: width, height: height,
     viewport_tiles_x: viewport_tiles_x, viewport_tiles_y: viewport_tiles_y,
+    content_tiles_x: content_tiles_x, content_tiles_y: content_tiles_y,
     params_buf: params_buf, regions_buf: regions_buf, pixel_buf: pixel_buf,
     items_buf: items_buf,
     compute_pipeline: compute_pipeline, compute_bg: compute_bg, compute_regions_bg: compute_regions_bg,
-    quad_pipeline: quad_pipeline, quad_bg: quad_bg, quad_regions_bg: quad_regions_bg,
+    quad_pipeline: quad_pipeline, quad_bg: quad_bg, quad_regions_bg: quad_regions_bg, quad_bg_tex: quad_bg_tex,
     img_pipeline: img_pipeline, img_bg: img_bg,
     img_vtx: img_vtx, img_idx: img_idx, img_count: img_count,
     format: format,
@@ -444,6 +458,7 @@ fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float,
   gpu.set_pipeline(rp, scene.quad_pipeline)
   gpu.set_bind_group(rp, 0, scene.quad_bg)
   gpu.set_bind_group(rp, 1, scene.quad_regions_bg)
+  gpu.set_bind_group(rp, 2, scene.quad_bg_tex)
   gpu.draw(rp, 6)
 
   gpu.set_pipeline(rp, scene.img_pipeline)
@@ -483,18 +498,31 @@ fn upload_regions(scene: SceneHandle, count: Int,
 fn upload_items(scene: SceneHandle, count: Int,
                 xs: List[Float], ys: List[Float], ws: List[Float], hs: List[Float],
                 bg_rs: List[Float], bg_gs: List[Float], bg_bs: List[Float], bg_as: List[Float],
-                roundeds: List[Float], opacities: List[Float]) -> Unit = {
+                roundeds: List[Float], opacities: List[Float],
+                scrollables: List[Float]) -> Unit = {
   gpu.begin_data()
   for i in 0..int.min(count, 256) {
     gpu.push_f32(xs[i]) gpu.push_f32(ys[i]) gpu.push_f32(ws[i]) gpu.push_f32(hs[i])
     gpu.push_f32(bg_rs[i]) gpu.push_f32(bg_gs[i]) gpu.push_f32(bg_bs[i]) gpu.push_f32(bg_as[i])
-    gpu.push_f32(roundeds[i]) gpu.push_f32(opacities[i]) gpu.push_f32(0.0) gpu.push_f32(int.to_float(count))
+    gpu.push_f32(roundeds[i]) gpu.push_f32(opacities[i]) gpu.push_f32(scrollables[i]) gpu.push_f32(int.to_float(count))
   }
   // Pad remaining slots with zeros
   for _ in count..256 {
     for _ in 0..12 { gpu.push_f32(0.0) }
   }
   gpu.flush_to_buffer(scene.device, scene.items_buf)
+}
+
+// Compute pass only — bake content into pixel buffer (no render)
+fn draw_compute_only(scene: SceneHandle) -> Unit = {
+  let encoder = gpu.begin_encoder(scene.device)
+  let cp = gpu.begin_compute_pass(encoder)
+  gpu.set_pipeline(cp, scene.compute_pipeline)
+  gpu.set_bind_group(cp, 0, scene.compute_bg)
+  gpu.set_bind_group(cp, 1, scene.compute_regions_bg)
+  gpu.dispatch_workgroups(cp, scene.viewport_tiles_x, scene.viewport_tiles_y, 1)
+  gpu.end_pass(cp)
+  gpu.finish_and_submit(scene.device, encoder)
 }
 
 // Render pass only (no compute) — for fragment-only effects like mouse light
@@ -504,6 +532,7 @@ fn draw_render_only(scene: SceneHandle) -> Unit = {
   gpu.set_pipeline(rp, scene.quad_pipeline)
   gpu.set_bind_group(rp, 0, scene.quad_bg)
   gpu.set_bind_group(rp, 1, scene.quad_regions_bg)
+  gpu.set_bind_group(rp, 2, scene.quad_bg_tex)
   gpu.draw(rp, 6)
   gpu.set_pipeline(rp, scene.img_pipeline)
   gpu.set_bind_group(rp, 0, scene.img_bg)
@@ -534,7 +563,7 @@ fn render_scene(
   scroll_y: Float,
 ) -> Unit = {
   let scene = prepare_scene(device, width, height, width, height, cubics, shadows, paints,
-    img_vtx, img_idx, img_count, img_texture, img_sampler)
+    img_vtx, img_idx, img_count, img_texture, img_sampler, img_texture, img_sampler)
   draw_frame(scene, scroll_y)
 }
 

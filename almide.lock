@@ -1,0 +1,3 @@
+# almide.lock — auto-generated, do not edit
+
+lumen = { git = "https://github.com/almide-graphics/lumen.git", ref = "main", commit = "8a8afc3145d442ed85d80f0056d43720ab6c4dc7" }

@@ -142,6 +142,9 @@ fn draw_indexed(pass: Int, index_count: Int) -> Unit = _
 @extern(wasm, "gpu", "write_f32_at")
 fn write_f32_at(device: Int, buffer: Int, byte_offset: Int, value: Float) -> Unit = _
 
+@extern(wasm, "gpu", "write_u32_at")
+fn write_u32_at(device: Int, buffer: Int, byte_offset: Int, value: Int) -> Unit = _
+
 // ── Debug ──
 
 @extern(wasm, "gpu", "log_int")
