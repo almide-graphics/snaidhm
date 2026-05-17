@@ -389,10 +389,9 @@ fn prepare_scene(
   gpu.add_buffer_binding(shadow_buf) gpu.add_buffer_binding(paint_buf) gpu.add_buffer_binding(tcmd_buf)
   let compute_bg = gpu.create_bound_group(device, compute_pipeline, 0)
 
-  // Group 1 for compute: render_items + scroll_regions (both declared in shader)
+  // Group 1 for compute: render_items only (scroll_regions unused in compute entry point)
   gpu.begin_bindings()
   gpu.add_buffer_binding(items_buf)
-  gpu.add_buffer_binding(regions_buf)
   let compute_regions_bg = gpu.create_bound_group(device, compute_pipeline, 1)
 
   let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
