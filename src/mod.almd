@@ -10,6 +10,8 @@ import math
 let TILE = 16
 let MAX_SEGS = 16
 let MAX_CMDS = 8
+let DISPATCH_TILE = 64
+let MAX_ITEMS_PER_TILE = 32
 
 // ── Types ──
 
@@ -210,13 +212,18 @@ type SceneHandle = {
   viewport_tiles_y: Int,
   content_tiles_x: Int,
   content_tiles_y: Int,
+  dispatch_tiles_x: Int,
+  dispatch_tiles_y: Int,
   params_buf: Int,
   regions_buf: Int,
   pixel_buf: Int,
   items_buf: Int,
+  tile_counts_buf: Int,
+  tile_ids_buf: Int,
   compute_pipeline: Int,
   compute_bg: Int,
   compute_regions_bg: Int,
+  compute_tile_bg: Int,
   quad_pipeline: Int,
   quad_bg: Int,
   quad_regions_bg: Int,
@@ -375,6 +382,13 @@ fn prepare_scene(
   // Render items buffer: up to 256 items × 48 bytes = 12288 bytes
   let items_buf = gpu.create_buffer(device, 12288, int.bor(gpu.STORAGE, gpu.COPY_DST))
 
+  // Tile dispatch buffers (item-to-tile assignment for compute shader)
+  let dispatch_tiles_x = (width + DISPATCH_TILE - 1) / DISPATCH_TILE
+  let dispatch_tiles_y = (height + DISPATCH_TILE - 1) / DISPATCH_TILE
+  let tile_count = dispatch_tiles_x * dispatch_tiles_y
+  let tile_counts_buf = gpu.create_buffer(device, int.max(1, tile_count * 4), int.bor(gpu.STORAGE, gpu.COPY_DST))
+  let tile_ids_buf = gpu.create_buffer(device, int.max(1, tile_count * MAX_ITEMS_PER_TILE * 4), int.bor(gpu.STORAGE, gpu.COPY_DST))
+
   let shadow_buf = upload_shadows(device, shadows)
   let paint_buf = upload_paints(device, paints)
 
@@ -393,6 +407,12 @@ fn prepare_scene(
   gpu.begin_bindings()
   gpu.add_buffer_binding(items_buf)
   let compute_regions_bg = gpu.create_bound_group(device, compute_pipeline, 1)
+
+  // Group 3 for compute: tile dispatch (item-to-tile assignment)
+  gpu.begin_bindings()
+  gpu.add_buffer_binding(tile_counts_buf)
+  gpu.add_buffer_binding(tile_ids_buf)
+  let compute_tile_bg = gpu.create_bound_group(device, compute_pipeline, 3)
 
   let quad_pipeline = gpu.create_render_pipeline(device, quad_shader, 0, 0, 0, 0, format)
   gpu.begin_bindings()
@@ -421,9 +441,11 @@ fn prepare_scene(
     device: device, width: width, height: height,
     viewport_tiles_x: viewport_tiles_x, viewport_tiles_y: viewport_tiles_y,
     content_tiles_x: content_tiles_x, content_tiles_y: content_tiles_y,
+    dispatch_tiles_x: dispatch_tiles_x, dispatch_tiles_y: dispatch_tiles_y,
     params_buf: params_buf, regions_buf: regions_buf, pixel_buf: pixel_buf,
-    items_buf: items_buf,
-    compute_pipeline: compute_pipeline, compute_bg: compute_bg, compute_regions_bg: compute_regions_bg,
+    items_buf: items_buf, tile_counts_buf: tile_counts_buf, tile_ids_buf: tile_ids_buf,
+    compute_pipeline: compute_pipeline, compute_bg: compute_bg,
+    compute_regions_bg: compute_regions_bg, compute_tile_bg: compute_tile_bg,
     quad_pipeline: quad_pipeline, quad_bg: quad_bg, quad_regions_bg: quad_regions_bg, quad_bg_tex: quad_bg_tex,
     img_pipeline: img_pipeline, img_bg: img_bg,
     img_vtx: img_vtx, img_idx: img_idx, img_count: img_count,
@@ -450,6 +472,7 @@ fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float,
   gpu.set_pipeline(cp, scene.compute_pipeline)
   gpu.set_bind_group(cp, 0, scene.compute_bg)
   gpu.set_bind_group(cp, 1, scene.compute_regions_bg)
+  gpu.set_bind_group(cp, 3, scene.compute_tile_bg)
   gpu.dispatch_workgroups(cp, scene.viewport_tiles_x, scene.viewport_tiles_y, 1)
   gpu.end_pass(cp)
 
@@ -512,6 +535,17 @@ fn upload_items(scene: SceneHandle, count: Int,
   gpu.flush_to_buffer(scene.device, scene.items_buf)
 }
 
+// Upload tile assignment (item-to-tile mapping for tile dispatch)
+fn upload_tile_assignment(scene: SceneHandle,
+                          tile_counts: List[Int], tile_ids: List[Int]) -> Unit = {
+  gpu.begin_data()
+  for c in tile_counts { gpu.push_u32(c) }
+  gpu.flush_to_buffer(scene.device, scene.tile_counts_buf)
+  gpu.begin_data()
+  for id in tile_ids { gpu.push_u32(id) }
+  gpu.flush_to_buffer(scene.device, scene.tile_ids_buf)
+}
+
 // Compute pass only — bake content into pixel buffer (no render)
 fn draw_compute_only(scene: SceneHandle) -> Unit = {
   let encoder = gpu.begin_encoder(scene.device)
@@ -519,6 +553,7 @@ fn draw_compute_only(scene: SceneHandle) -> Unit = {
   gpu.set_pipeline(cp, scene.compute_pipeline)
   gpu.set_bind_group(cp, 0, scene.compute_bg)
   gpu.set_bind_group(cp, 1, scene.compute_regions_bg)
+  gpu.set_bind_group(cp, 3, scene.compute_tile_bg)
   gpu.dispatch_workgroups(cp, scene.viewport_tiles_x, scene.viewport_tiles_y, 1)
   gpu.end_pass(cp)
   gpu.finish_and_submit(scene.device, encoder)
