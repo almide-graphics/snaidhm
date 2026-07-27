@@ -9,3 +9,11 @@ lumen = { git = "https://github.com/almide-graphics/lumen.git" }
 [targets]
 wasm = true
 rust = true
+
+# Cargo dependencies of the generated native crate. These back native/gpu.rs,
+# the wgpu host for the `gpu` extern namespace (the JS runtime's counterpart).
+# Versions match ceangal-native, which native/gpu.rs is ported from.
+[native-deps]
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }

@@ -25,130 +25,164 @@ let STAGE_COMPUTE  = 0x4
 // ── Device / Context ──
 
 @extern(wasm, "gpu", "configure_canvas")
+@extern(rust, "crate::gpu", "configure_canvas")
 fn configure_canvas(device: Int, format: Int) -> Int = _
 
 @extern(wasm, "gpu", "get_preferred_format")
+@extern(rust, "crate::gpu", "get_preferred_format")
 fn get_preferred_format() -> Int = _
 
 // ── Shader ──
 
 @extern(wasm, "gpu", "create_shader")
+@extern(rust, "crate::gpu", "create_shader")
 fn create_shader(device: Int, code_ptr: Int, code_len: Int) -> Int = _
 
 // ── Buffer ──
 
 @extern(wasm, "gpu", "create_buffer")
+@extern(rust, "crate::gpu", "create_buffer")
 fn create_buffer(device: Int, size: Int, usage: Int) -> Int = _
 
 @extern(wasm, "gpu", "write_buffer")
+@extern(rust, "crate::gpu", "write_buffer")
 fn write_buffer(device: Int, buffer: Int, data_ptr: Int, data_len: Int) -> Unit = _
 
 // ── Render pipeline ──
 
 @extern(wasm, "gpu", "create_render_pipeline")
+@extern(rust, "crate::gpu", "create_render_pipeline")
 fn create_render_pipeline(device: Int, shader: Int, vs_ptr: Int, vs_len: Int, fs_ptr: Int, fs_len: Int, format: Int) -> Int = _
 
 // ── Commands ──
 
 @extern(wasm, "gpu", "begin_encoder")
+@extern(rust, "crate::gpu", "begin_encoder")
 fn begin_encoder(device: Int) -> Int = _
 
 @extern(wasm, "gpu", "begin_render_pass")
+@extern(rust, "crate::gpu", "begin_render_pass")
 fn begin_render_pass(encoder: Int, r: Float, g: Float, b: Float, a: Float) -> Int = _
 
 @extern(wasm, "gpu", "set_pipeline")
+@extern(rust, "crate::gpu", "set_pipeline")
 fn set_pipeline(pass: Int, pipeline: Int) -> Unit = _
 
 @extern(wasm, "gpu", "draw")
+@extern(rust, "crate::gpu", "draw")
 fn draw(pass: Int, vertex_count: Int) -> Unit = _
 
 @extern(wasm, "gpu", "end_pass")
+@extern(rust, "crate::gpu", "end_pass")
 fn end_pass(pass: Int) -> Unit = _
 
 @extern(wasm, "gpu", "finish_and_submit")
+@extern(rust, "crate::gpu", "finish_and_submit")
 fn finish_and_submit(device: Int, encoder: Int) -> Unit = _
 
 // ── Compute pipeline ──
 
 @extern(wasm, "gpu", "create_compute_pipeline")
+@extern(rust, "crate::gpu", "create_compute_pipeline")
 fn create_compute_pipeline(device: Int, shader: Int, entry_id: Int) -> Int = _
 
 // ── Bind group (explicit binding API) ──
 
 @extern(wasm, "gpu", "begin_bindings")
+@extern(rust, "crate::gpu", "begin_bindings")
 fn begin_bindings() -> Unit = _
 
 @extern(wasm, "gpu", "add_buffer_binding")
+@extern(rust, "crate::gpu", "add_buffer_binding")
 fn add_buffer_binding(buffer: Int) -> Unit = _
 
 @extern(wasm, "gpu", "create_bound_group")
+@extern(rust, "crate::gpu", "create_bound_group")
 fn create_bound_group(device: Int, pipeline: Int, group_idx: Int) -> Int = _
 
 @extern(wasm, "gpu", "set_bind_group")
+@extern(rust, "crate::gpu", "set_bind_group")
 fn set_bind_group(pass: Int, index: Int, bind_group: Int) -> Unit = _
 
 // ── Compute pass ──
 
 @extern(wasm, "gpu", "begin_compute_pass")
+@extern(rust, "crate::gpu", "begin_compute_pass")
 fn begin_compute_pass(encoder: Int) -> Int = _
 
 @extern(wasm, "gpu", "dispatch_workgroups")
+@extern(rust, "crate::gpu", "dispatch_workgroups")
 fn dispatch_workgroups(pass: Int, x: Int, y: Int, z: Int) -> Unit = _
 
 // ── Buffer data streaming (no raw pointers needed) ──
 
 @extern(wasm, "gpu", "begin_data")
+@extern(rust, "crate::gpu", "begin_data")
 fn begin_data() -> Unit = _
 
 @extern(wasm, "gpu", "push_f32")
+@extern(rust, "crate::gpu", "push_f32")
 fn push_f32(value: Float) -> Unit = _
 
 @extern(wasm, "gpu", "push_u32")
+@extern(rust, "crate::gpu", "push_u32")
 fn push_u32(value: Int) -> Unit = _
 
 @extern(wasm, "gpu", "flush_to_buffer")
+@extern(rust, "crate::gpu", "flush_to_buffer")
 fn flush_to_buffer(device: Int, buffer: Int) -> Unit = _
 
 // ── Bind group: texture + sampler entries ──
 
 @extern(wasm, "gpu", "add_texture_binding")
+@extern(rust, "crate::gpu", "add_texture_binding")
 fn add_texture_binding(texture: Int) -> Unit = _
 
 @extern(wasm, "gpu", "add_sampler_binding")
+@extern(rust, "crate::gpu", "add_sampler_binding")
 fn add_sampler_binding(sampler: Int) -> Unit = _
 
 // ── Specialized render pipelines ──
 
 @extern(wasm, "gpu", "create_text_pipeline")
+@extern(rust, "crate::gpu", "create_text_pipeline")
 fn create_text_pipeline(device: Int, shader: Int, format: Int) -> Int = _
 
 @extern(wasm, "gpu", "create_image_pipeline")
+@extern(rust, "crate::gpu", "create_image_pipeline")
 fn create_image_pipeline(device: Int, shader: Int, format: Int) -> Int = _
 
 // ── Vertex / index buffer rendering ──
 
 @extern(wasm, "gpu", "set_vertex_buffer")
+@extern(rust, "crate::gpu", "set_vertex_buffer")
 fn set_vertex_buffer(pass: Int, slot: Int, buffer: Int) -> Unit = _
 
 @extern(wasm, "gpu", "set_index_buffer")
+@extern(rust, "crate::gpu", "set_index_buffer")
 fn set_index_buffer(pass: Int, buffer: Int) -> Unit = _
 
 @extern(wasm, "gpu", "draw_indexed")
+@extern(rust, "crate::gpu", "draw_indexed")
 fn draw_indexed(pass: Int, index_count: Int) -> Unit = _
 
 
 // ── Partial buffer write (for scroll_y updates without full rebuild) ──
 
 @extern(wasm, "gpu", "write_f32_at")
+@extern(rust, "crate::gpu", "write_f32_at")
 fn write_f32_at(device: Int, buffer: Int, byte_offset: Int, value: Float) -> Unit = _
 
 @extern(wasm, "gpu", "write_u32_at")
+@extern(rust, "crate::gpu", "write_u32_at")
 fn write_u32_at(device: Int, buffer: Int, byte_offset: Int, value: Int) -> Unit = _
 
 // ── Debug ──
 
 @extern(wasm, "gpu", "log_int")
+@extern(rust, "crate::gpu", "log_int")
 fn log_int(value: Int) -> Unit = _
 
 @extern(wasm, "gpu", "log_str")
+@extern(rust, "crate::gpu", "log_str")
 fn log_str(ptr: Int, len: Int) -> Unit = _
