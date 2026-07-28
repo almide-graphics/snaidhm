@@ -753,7 +753,14 @@ pub fn set_depth_size(_device: i64, w: i64, h: i64) {
 
 /// Pipeline for the standard mesh vertex layout: pos(3) + normal(3) + uv(2),
 /// 32-byte stride, depth `less`, back faces culled, CCW front (glTF's winding).
-pub fn create_mesh_pipeline(_device: i64, shader: i64, _format: i64, cull: i64) -> i64 {
+pub fn create_mesh_pipeline(
+    _device: i64,
+    shader: i64,
+    _format: i64,
+    cull: i64,
+    blend: i64,
+    depth_write: i64,
+) -> i64 {
     let cull_mode = match cull {
         0 => None,
         2 => Some(wgpu::Face::Front),
@@ -782,7 +789,11 @@ pub fn create_mesh_pipeline(_device: i64, shader: i64, _format: i64, cull: i64) 
                 module,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(TARGET_FORMAT.into())],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TARGET_FORMAT,
+                    blend: if blend == 1 { Some(wgpu::BlendState::ALPHA_BLENDING) } else { None },
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -792,7 +803,7 @@ pub fn create_mesh_pipeline(_device: i64, shader: i64, _format: i64, cull: i64) 
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth24Plus,
-                depth_write_enabled: true,
+                depth_write_enabled: depth_write != 0,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: Default::default(),
                 bias: Default::default(),

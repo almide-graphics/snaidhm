@@ -178,8 +178,14 @@ export function createGpuHost(canvas) {
 
     // Fixed mesh vertex layout: pos(3) + normal(3) + uv(2), 32-byte stride,
     // depth-tested with `less`, back faces culled, glTF's CCW front.
-    create_mesh_pipeline(deviceId, shaderId, _fmt, cull) {
+    create_mesh_pipeline(deviceId, shaderId, _fmt, cull, blend, depthWrite) {
       const cullMode = N(cull) === 0 ? "none" : N(cull) === 2 ? "front" : "back";
+      const target = N(blend) === 1
+        ? { format: _format, blend: {
+            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+          } }
+        : { format: _format };
       return B(h(g(deviceId).createRenderPipeline({
         layout: "auto",
         vertex: {
@@ -190,9 +196,13 @@ export function createGpuHost(canvas) {
             { shaderLocation: 2, offset: 24, format: "float32x2" },
           ]}],
         },
-        fragment: { module: g(shaderId), entryPoint: "fs_main", targets: [{ format: _format }] },
+        fragment: { module: g(shaderId), entryPoint: "fs_main", targets: [target] },
         primitive: { topology: "triangle-list", cullMode, frontFace: "ccw" },
-        depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+        depthStencil: {
+          format: "depth24plus",
+          depthWriteEnabled: N(depthWrite) !== 0,
+          depthCompare: "less",
+        },
       })));
     },
 
