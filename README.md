@@ -47,3 +47,30 @@ snaidhm
 ## License
 
 TBD
+
+## Host
+
+`src/web/gpu.almd` declares the `gpu` extern namespace; `host/gpu.js` is its
+browser implementation. `host/MANIFEST` lists what a consumer copies into the
+directory it serves.
+
+```js
+import { createGpuHost } from "./gpu.js";
+
+const host = createGpuHost(canvas);
+host.setFormat(navigator.gpu.getPreferredCanvasFormat());
+const shaderIndex = host.registerShader(myWgsl);   // what create_shader resolves
+
+const { instance } = await WebAssembly.instantiate(bytes, { gpu: host.imports, /* … */ });
+host.setMemory(instance.exports.memory);
+
+function frame() {
+  host.beginFrame();      // resets per-frame clear ownership
+  // … drive the module …
+  requestAnimationFrame(frame);
+}
+```
+
+`node test/host-contract.mjs` checks the host implements every extern the
+contract declares — a missing one is a `LinkError` at instantiation, not a build
+failure, so it is worth catching in CI.

@@ -1,0 +1,6 @@
+# Files a consumer must place in the directory it serves.
+#
+# The toolchain ships `native/` for the native target but has no equivalent for
+# web host assets, so these are copied rather than resolved. The manifest is
+# what makes that copy mechanical and checkable instead of a fork.
+gpu.js
