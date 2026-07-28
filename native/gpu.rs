@@ -120,6 +120,10 @@ struct GpuState {
     /// Offscreen colour target created by `configure_canvas`.
     target: Option<wgpu::Texture>,
     target_view: Option<wgpu::TextureView>,
+    /// Depth target for the 3D pass, with the size it was built for. Rebuilt by
+    /// `set_depth_size` when that size changes; `None` until first asked for.
+    depth_view: Option<wgpu::TextureView>,
+    depth_size: (u32, u32),
     /// Cached handle returned by `get_preferred_format`, so repeated calls
     /// return the same value (the JS host allocates a fresh handle each time;
     /// a stable one is strictly better and nothing depends on the difference).
@@ -302,6 +306,26 @@ impl GpuState {
     // ── Lazily created resources ──────────────────────────────────────────
 
     /// Create the offscreen colour target if it does not exist yet.
+    /// Build the depth target at `w`x`h` if absent or the size changed.
+    fn ensure_depth(&mut self, w: u32, h: u32) {
+        let size = (w.max(1), h.max(1));
+        if self.depth_view.is_some() && self.depth_size == size {
+            return;
+        }
+        let tex = self.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("snaidhm depth"),
+            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        self.depth_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+        self.depth_size = size;
+    }
+
     fn ensure_target(&mut self) {
         if self.target_view.is_some() {
             return;
@@ -722,6 +746,116 @@ pub fn begin_compute_pass(encoder: i64) -> i64 {
 /// The JS host uses `_context.getCurrentTexture()`; headless, the target from
 /// `configure_canvas` stands in for the swapchain image. Calling this without
 /// `configure_canvas` first creates the target on demand.
+/// Create (or resize) the depth target the 3D pass renders against.
+pub fn set_depth_size(_device: i64, w: i64, h: i64) {
+    with((), |s| s.ensure_depth(w.max(1) as u32, h.max(1) as u32))
+}
+
+/// Pipeline for the standard mesh vertex layout: pos(3) + normal(3) + uv(2),
+/// 32-byte stride, depth `less`, back faces culled, CCW front (glTF's winding).
+pub fn create_mesh_pipeline(_device: i64, shader: i64, _format: i64) -> i64 {
+    with(0, |s| {
+        let Some(Res::Shader(module)) = s.get(shader) else { return 0 };
+        let pipeline = s.device().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("snaidhm mesh pipeline"),
+            layout: None, // == WebGPU's `layout: "auto"`
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 32,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 24, shader_location: 2 },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(TARGET_FORMAT.into())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        s.alloc(Res::RenderPipeline(pipeline))
+    })
+}
+
+/// `begin_render_pass` with the depth attachment bound. `load` chooses whether
+/// the colour target is cleared (0) or preserved (1). Depth always clears.
+pub fn begin_render_pass_3d(encoder: i64, r: f64, g: f64, b: f64, a: f64, load: i64) -> i64 {
+    with(0, |s| {
+        s.ensure_target();
+        s.ensure_depth(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        let Some(mut enc) = s.take_encoder(encoder) else { return 0 };
+        let pass = {
+            let view = s.target_view.as_ref().expect("ensured above");
+            let depth = s.depth_view.as_ref().expect("ensured above");
+            enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("snaidhm 3D pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: if load == 1 {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a })
+                        },
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            })
+            .forget_lifetime()
+        };
+        s.put_encoder(encoder, enc);
+        s.alloc(Res::Pass(Some(Pass::Render(pass))))
+    })
+}
+
+/// Bind a u16 index buffer.
+pub fn set_index_buffer_u16(pass: i64, buffer: i64) {
+    with((), |s| {
+        s.on_pass(pass, |s, p| {
+            let (Pass::Render(rp), Some(buf)) = (p, s.buffer(buffer)) else { return };
+            rp.set_index_buffer(buf.slice(..), wgpu::IndexFormat::Uint16);
+        })
+    })
+}
+
+/// No-op natively, like `write_buffer`: `src_ptr` addresses wasm linear memory,
+/// which does not exist here. A native caller uploads through its own path.
+pub fn write_buffer_at(_device: i64, _buffer: i64, _dst_offset: i64, _src_ptr: i64, _len: i64) {}
+
 pub fn begin_render_pass(encoder: i64, r: f64, g: f64, b: f64, a: f64) -> i64 {
     with(0, |s| {
         s.ensure_target();

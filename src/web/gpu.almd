@@ -186,3 +186,42 @@ fn log_int(value: Int) -> Unit = _
 @extern(wasm, "gpu", "log_str")
 @extern(rust, "crate::gpu", "log_str")
 fn log_str(ptr: Int, len: Int) -> Unit = _
+
+// ── 3D mesh pass (roadmap phase 3) ───────────────────────────────────────
+//
+// The 2D path renders a fullscreen quad from a compute-produced pixel buffer:
+// no vertex buffers, no depth attachment. Geometry needs its own pipeline and
+// its own pass, so these sit alongside rather than replacing anything above.
+
+/// Create (or resize) the depth target the 3D pass renders against. Must be
+/// called whenever the drawing buffer changes size — drawing against a stale
+/// depth size is a validation error, not a silent mismatch.
+@extern(wasm, "gpu", "set_depth_size")
+@extern(rust, "crate::gpu", "set_depth_size")
+fn set_depth_size(device: Int, w: Int, h: Int) -> Unit = _
+
+/// Pipeline for the standard mesh vertex layout — pos(3) + normal(3) + uv(2),
+/// 32-byte stride — depth-tested with `less`, back faces culled, CCW front
+/// (glTF's winding). The caller supplies the shader module.
+@extern(wasm, "gpu", "create_mesh_pipeline")
+@extern(rust, "crate::gpu", "create_mesh_pipeline")
+fn create_mesh_pipeline(device: Int, shader: Int, format: Int) -> Int = _
+
+/// Like `begin_render_pass`, with the depth attachment bound. `load` chooses
+/// whether the colour target is cleared (0) or preserved (1), so a 3D pass can
+/// be composited with the 2D pass in one frame. Depth always clears.
+@extern(wasm, "gpu", "begin_render_pass_3d")
+@extern(rust, "crate::gpu", "begin_render_pass_3d")
+fn begin_render_pass_3d(encoder: Int, r: Float, g: Float, b: Float, a: Float, load: Int) -> Int = _
+
+/// Bind a u16 index buffer — half the bandwidth of the u32 path above, and
+/// glTF's common case.
+@extern(wasm, "gpu", "set_index_buffer_u16")
+@extern(rust, "crate::gpu", "set_index_buffer_u16")
+fn set_index_buffer_u16(pass: Int, buffer: Int) -> Unit = _
+
+/// Upload from linear memory at a destination offset, so geometry built in a
+/// Bytes arena reaches the GPU without an intermediate copy.
+@extern(wasm, "gpu", "write_buffer_at")
+@extern(rust, "crate::gpu", "write_buffer_at")
+fn write_buffer_at(device: Int, buffer: Int, dst_offset: Int, src_ptr: Int, len: Int) -> Unit = _
