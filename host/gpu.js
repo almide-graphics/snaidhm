@@ -160,8 +160,13 @@ export function createGpuHost(canvas) {
     // against the same `gpu` namespace snaidhm owns. Pure boundary translation:
     // no application logic lives here.
 
-    set_depth_size(deviceId, w, h) {
-      const width = Math.max(1, N(w)), height = Math.max(1, N(h));
+    // NOTE: parameters must not be named `h`, `g`, `B` or `N` — those are the
+    // handle-table helpers this module closes over, and a parameter of the same
+    // name shadows them. `create_texture(deviceId, w, h)` did exactly that and
+    // failed at runtime with "h is not a function", which the wasm side cannot
+    // see and no signature check would catch.
+    set_depth_size(deviceId, width_, height_) {
+      const width = Math.max(1, N(width_)), height = Math.max(1, N(height_));
       if (_depth && _depth.width === width && _depth.height === height) return;
       if (_depth) _depth.tex.destroy();
       const tex = g(deviceId).createTexture({
@@ -211,9 +216,9 @@ export function createGpuHost(canvas) {
 
     // ── Textures ──
 
-    create_texture(deviceId, w, h) {
+    create_texture(deviceId, width_, height_) {
       return B(h(g(deviceId).createTexture({
-        size: [Math.max(1, N(w)), Math.max(1, N(h))],
+        size: [Math.max(1, N(width_)), Math.max(1, N(height_))],
         format: "rgba8unorm",
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
                GPUTextureUsage.RENDER_ATTACHMENT,
