@@ -40,18 +40,32 @@ const dev = host.register(anything());
 // Real handles, threaded from the calls that make them — passing 0 would hand
 // every entry point the null slot and test nothing but the null path.
 const I = host.imports;
-const shader = I.create_shader(dev, 0n, 0n);
-const buffer = I.create_buffer(dev, 256n, 64n);
-const texture = I.create_texture(dev, 8n, 8n);
-const sampler = I.create_sampler(dev, 1n, 1n);
-const pipeline = I.create_mesh_pipeline(dev, shader, 0n, 1n);
+
+// The setup calls are themselves entry points, so a throw here is the finding —
+// not a broken test. Report it the same way as the loop below rather than
+// letting it crash with an unreadable data:-URL stack.
+function must(name, fn) {
+  try {
+    return fn();
+  } catch (e) {
+    console.error(`snaidhm host — ${name} threw during setup: ${e.message}`);
+    console.error("\nFAILED — an entry point throws when called.");
+    process.exit(1);
+  }
+}
+
+const shader = must("create_shader", () => I.create_shader(dev, 0n, 0n));
+const buffer = must("create_buffer", () => I.create_buffer(dev, 256n, 64n));
+const texture = must("create_texture", () => I.create_texture(dev, 8n, 8n));
+const sampler = must("create_sampler", () => I.create_sampler(dev, 1n, 1n));
+const pipeline = must("create_mesh_pipeline", () => I.create_mesh_pipeline(dev, shader, 0n, 1n));
 I.begin_bindings();
 I.add_buffer_binding(buffer);
-const bindGroup = I.create_bound_group(dev, pipeline, 0n);
-I.set_depth_size(dev, 8n, 8n);
-const encoder = I.begin_encoder(dev);
+const bindGroup = must("create_bound_group", () => I.create_bound_group(dev, pipeline, 0n));
+must("set_depth_size", () => I.set_depth_size(dev, 8n, 8n));
+const encoder = must("begin_encoder", () => I.begin_encoder(dev));
 I.configure_canvas(dev, 0n);
-const pass = I.begin_render_pass_3d(encoder, 0, 0, 0, 1, 0n);
+const pass = must("begin_render_pass_3d", () => I.begin_render_pass_3d(encoder, 0, 0, 0, 1, 0n));
 
 const ARGS = {
   configure_canvas: [dev, 0n],
