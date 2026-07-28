@@ -209,6 +209,48 @@ export function createGpuHost(canvas) {
       })));
     },
 
+    // ── Textures ──
+
+    create_texture(deviceId, w, h) {
+      return B(h(g(deviceId).createTexture({
+        size: [Math.max(1, N(w)), Math.max(1, N(h))],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+               GPUTextureUsage.RENDER_ATTACHMENT,
+      })));
+    },
+
+    // Async by nature: `createImageBitmap` is a promise and a wasm call is not.
+    // The texture already exists at its final size, so every bind group built
+    // from it stays valid — only its contents arrive late.
+    upload_encoded_image(deviceId, textureId, ptr, len) {
+      const device = g(deviceId), texture = g(textureId);
+      if (!device || !texture) return;
+      const encoded = new Uint8Array(_wasmMemory.buffer, N(ptr), N(len)).slice();
+      createImageBitmap(new Blob([encoded]), { premultiplyAlpha: "none", colorSpaceConversion: "none" })
+        .then((bmp) => {
+          device.queue.copyExternalImageToTexture(
+            { source: bmp },
+            { texture },
+            [Math.min(bmp.width, texture.width), Math.min(bmp.height, texture.height)],
+          );
+          bmp.close?.();
+        })
+        .catch((e) => console.warn("[gpu] image decode failed:", e.message));
+    },
+
+    create_sampler(deviceId, filter, wrap) {
+      const f = N(filter) === 0 ? "nearest" : "linear";
+      const w = N(wrap) === 1 ? "repeat" : "clamp-to-edge";
+      return B(h(g(deviceId).createSampler({
+        magFilter: f, minFilter: f, addressModeU: w, addressModeV: w,
+      })));
+    },
+
+    draw_indexed_from(passId, first, count) {
+      g(passId).drawIndexed(N(count), 1, N(first), 0, 0);
+    },
+
     // u16 indices — half the bandwidth of the u32 path, and glTF's common case.
     set_index_buffer_u16(passId, bufferId) { g(passId).setIndexBuffer(g(bufferId), "uint16"); },
 
