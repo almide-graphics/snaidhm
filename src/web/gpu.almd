@@ -201,11 +201,15 @@ fn log_str(ptr: Int, len: Int) -> Unit = _
 fn set_depth_size(device: Int, w: Int, h: Int) -> Unit = _
 
 /// Pipeline for the standard mesh vertex layout — pos(3) + normal(3) + uv(2),
-/// 32-byte stride — depth-tested with `less`, back faces culled, CCW front
-/// (glTF's winding). The caller supplies the shader module.
+/// 32-byte stride — depth-tested with `less`, CCW front (glTF's winding). The
+/// caller supplies the shader module.
+///
+/// `cull` selects which faces are discarded: 0 none, 1 back, 2 front. Front
+/// culling is what an inverted-hull outline needs — the same geometry drawn
+/// expanded along its normals, with only its far side visible.
 @extern(wasm, "gpu", "create_mesh_pipeline")
 @extern(rust, "crate::gpu", "create_mesh_pipeline")
-fn create_mesh_pipeline(device: Int, shader: Int, format: Int) -> Int = _
+fn create_mesh_pipeline(device: Int, shader: Int, format: Int, cull: Int) -> Int = _
 
 /// Like `begin_render_pass`, with the depth attachment bound. `load` chooses
 /// whether the colour target is cleared (0) or preserved (1), so a 3D pass can
