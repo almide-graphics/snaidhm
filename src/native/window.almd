@@ -64,6 +64,12 @@ let WHEEL = 4
 let TEXT = 5
 /// A key handled as a key; `event_code` is its DOM keyCode.
 let KEY = 6
+/// What the input method is composing (after `set_ime(true)`): `event_text`
+/// is the whole composition, empty once it ends, and `event_code` ..
+/// `event_end` the part it marks — the clause being converted, or an empty
+/// range at its caret — in characters, -1 when it shows no caret. What it
+/// commits arrives as TEXT events.
+let COMPOSE = 7
 
 let KEY_BACKSPACE = 8
 let KEY_TAB = 9
@@ -98,3 +104,23 @@ fn event_dy() -> Float = _
 /// Mouse button (0 left, 1 right, 2 middle), typed code point, or key code.
 @extern(rust, "crate::window", "event_code")
 fn event_code() -> Int = _
+
+/// End of the marked part of the current COMPOSE, characters.
+@extern(rust, "crate::window", "event_end")
+fn event_end() -> Int = _
+
+/// Text of the current COMPOSE.
+@extern(rust, "crate::window", "event_text")
+fn event_text() -> String = _
+
+// ── Input method ──────────────────────────────────────────────────────────
+
+/// Let the platform's input method compose text in the window — Japanese,
+/// Chinese, Korean — or (`false`, the default) take keys as they are.
+@extern(rust, "crate::window", "set_ime")
+fn set_ime(allowed: Bool) -> Unit = _
+
+/// Tell the input method where the caret is, logical pixels, so its
+/// candidate window opens beside it. Call it whenever the caret moves.
+@extern(rust, "crate::window", "set_ime_area")
+fn set_ime_area(x: Float, y: Float, w: Float, h: Float) -> Unit = _

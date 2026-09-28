@@ -146,37 +146,49 @@ fn cached(device: Int, layer: TextLayer, fi: Int, gid: Int, size_px: Int) -> Tex
   let k = key(fi, gid, size_px)
   match map.get(layer.keys, k) {
     some(_) => layer,
-    none => {
-      let bm = glyph.glyph_bitmap(layer.fonts[fi], gid, int.to_float(size_px))
-      // Next shelf when this row is out of width; start over when the atlas
-      // is out of rows. A frame needing more than one atlas of glyphs would
-      // overwrite its own earlier glyphs — at UI sizes that is thousands.
-      let wrap = layer.pack_x + bm.w + PAD > ATLAS
-      let x = if wrap then PAD else layer.pack_x
-      let y0 = if wrap then layer.pack_y + layer.row_h + PAD else layer.pack_y
-      let full = y0 + bm.h + PAD > ATLAS
-      let y = if full then PAD else y0
-      let no_keys: Map[Int, Int] = map.new()
-      let no_rects: List[Int] = []
-      let base = if full then { ...layer, keys: no_keys, rects: no_rects } else layer
-      let row_h = if wrap or full then bm.h else int.max(layer.row_h, bm.h)
-      if bm.w > 0 and bm.h > 0 then {
-        gpu.begin_data()
-        let n = bm.w * bm.h
-        for i in 0..<n {
-          // White, with the coverage as alpha: r | g << 8 | b << 16 | a << 24.
-          gpu.push_u32(0x00FFFFFF + bm.coverage[i] * 16777216)
-        }
-        gpu.flush_to_texture(device, layer.texture, x, y, bm.w, bm.h)
-      } else ()
-      let slot = list.len(base.rects) / 6
-      {
-        ...base,
-        keys: map.set(base.keys, k, slot),
-        rects: base.rects + [x, y, bm.w, bm.h, bm.left, bm.top],
-        pack_x: x + bm.w + PAD, pack_y: y, row_h: row_h,
-      }
-    },
+    none => place(device, layer, k, glyph.glyph_bitmap(layer.fonts[fi], gid, int.to_float(size_px))),
+  }
+}
+
+/// The cache key of the one fully covered texel rectangles are drawn with.
+let SOLID = -1
+
+/// `layer` with the fully covered texel in the atlas.
+fn solid(device: Int, layer: TextLayer) -> TextLayer =
+  match map.get(layer.keys, SOLID) {
+    some(_) => layer,
+    none => place(device, layer, SOLID, { w: 1, h: 1, left: 0, top: 0, coverage: [255] }),
+  }
+
+/// Pack bitmap `bm` into the atlas as the slot of key `k`.
+fn place(device: Int, layer: TextLayer, k: Int, bm: glyph.Bitmap) -> TextLayer = {
+  // Next shelf when this row is out of width; start over when the atlas
+  // is out of rows. A frame needing more than one atlas of glyphs would
+  // overwrite its own earlier glyphs — at UI sizes that is thousands.
+  let wrap = layer.pack_x + bm.w + PAD > ATLAS
+  let x = if wrap then PAD else layer.pack_x
+  let y0 = if wrap then layer.pack_y + layer.row_h + PAD else layer.pack_y
+  let full = y0 + bm.h + PAD > ATLAS
+  let y = if full then PAD else y0
+  let no_keys: Map[Int, Int] = map.new()
+  let no_rects: List[Int] = []
+  let base = if full then { ...layer, keys: no_keys, rects: no_rects } else layer
+  let row_h = if wrap or full then bm.h else int.max(layer.row_h, bm.h)
+  if bm.w > 0 and bm.h > 0 then {
+    gpu.begin_data()
+    let n = bm.w * bm.h
+    for i in 0..<n {
+      // White, with the coverage as alpha: r | g << 8 | b << 16 | a << 24.
+      gpu.push_u32(0x00FFFFFF + bm.coverage[i] * 16777216)
+    }
+    gpu.flush_to_texture(device, layer.texture, x, y, bm.w, bm.h)
+  } else ()
+  let slot = list.len(base.rects) / 6
+  {
+    ...base,
+    keys: map.set(base.keys, k, slot),
+    rects: base.rects + [x, y, bm.w, bm.h, bm.left, bm.top],
+    pack_x: x + bm.w + PAD, pack_y: y, row_h: row_h,
   }
 }
 
@@ -225,6 +237,25 @@ fn add_run(device: Int, layer: TextLayer, chars: List[Int], size: Float, x: Floa
     pen = pen + advance_px(cur, p.0, p.1, size)
   }
   { ...cur, verts: verts }
+}
+
+/// Queue a rectangle, `x0 ..< x1` x `y0 ..< y1` (pixels of the drawable, y
+/// down), filled in colour (`r`, `g`, `b`, `a`) — an underline, a caret.
+fn add_rect(device: Int, layer: TextLayer, x0: Float, y0: Float, x1: Float, y1: Float,
+            r: Float, g: Float, b: Float, a: Float) -> TextLayer = {
+  let cur = solid(device, layer)
+  let slot = map.get(cur.keys, SOLID) ?? 0
+  // Every corner samples the texel's centre: nearest sampling gives full
+  // coverage across the whole quad.
+  let atlas = int.to_float(ATLAS)
+  let u = (int.to_float(cur.rects[slot * 6]) + 0.5) / atlas
+  let v = (int.to_float(cur.rects[slot * 6 + 1]) + 0.5) / atlas
+  if x1 > x0 and y1 > y0 then {
+    let verts = cur.verts
+      + [x0, y0, u, v, r, g, b, a,  x1, y0, u, v, r, g, b, a,  x0, y1, u, v, r, g, b, a]
+      + [x0, y1, u, v, r, g, b, a,  x1, y0, u, v, r, g, b, a,  x1, y1, u, v, r, g, b, a]
+    { ...cur, verts: verts }
+  } else cur
 }
 
 /// Send the queued quads to the GPU, mapped from the `width` x `height`
