@@ -48,3 +48,53 @@ fn height() -> Int = _
 /// Physical pixels per logical pixel (2.0 on a typical Retina display).
 @extern(rust, "crate::window", "scale_factor")
 fn scale_factor() -> Float = _
+
+// ── Input ─────────────────────────────────────────────────────────────────
+//
+// Window input, queued in logical pixels and read one event at a time. Kinds
+// and key codes follow the DOM, so browser and native hosts hand a UI the
+// same events.
+
+let NONE = 0
+let MOUSE_MOVE = 1
+let MOUSE_DOWN = 2
+let MOUSE_UP = 3
+let WHEEL = 4
+/// A typed character; `event_code` is its code point.
+let TEXT = 5
+/// A key handled as a key; `event_code` is its DOM keyCode.
+let KEY = 6
+
+let KEY_BACKSPACE = 8
+let KEY_TAB = 9
+let KEY_ENTER = 13
+let KEY_ESCAPE = 27
+let KEY_LEFT = 37
+let KEY_UP = 38
+let KEY_RIGHT = 39
+let KEY_DOWN = 40
+let KEY_DELETE = 46
+
+/// The kind of the next queued input (NONE once the queue is empty); the
+/// `event_*` accessors then describe it. Inputs queue across `pump` calls.
+@extern(rust, "crate::window", "next_event")
+fn next_event() -> Int = _
+
+/// Pointer position of the current input, logical pixels.
+@extern(rust, "crate::window", "event_x")
+fn event_x() -> Float = _
+
+@extern(rust, "crate::window", "event_y")
+fn event_y() -> Float = _
+
+/// Wheel distance of the current input, logical pixels; positive `dy`
+/// scrolls down, as the DOM's `deltaY`.
+@extern(rust, "crate::window", "event_dx")
+fn event_dx() -> Float = _
+
+@extern(rust, "crate::window", "event_dy")
+fn event_dy() -> Float = _
+
+/// Mouse button (0 left, 1 right, 2 middle), typed code point, or key code.
+@extern(rust, "crate::window", "event_code")
+fn event_code() -> Int = _
