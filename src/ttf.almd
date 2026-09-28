@@ -4,24 +4,33 @@
 // Converts: quadratic beziers → cubic beziers for path renderer
 // NOT supported: CFF/CFF2, variable fonts, hinting, kern table
 
-// ── Byte-level access to font data (JS holds the buffer) ──
+// ── Byte-level access to font data ──
+//
+// The host holds the font's bytes: the page's JS in the browser, and
+// native/font_data.rs natively, filled by `snaidhm.native.font.load`.
 
 @extern(wasm, "font_data", "len")
+@extern(rust, "crate::font_data", "len")
 fn data_len() -> Int
 
 @extern(wasm, "font_data", "u8")
+@extern(rust, "crate::font_data", "u8")
 fn data_u8(offset: Int) -> Int
 
 @extern(wasm, "font_data", "u16be")
+@extern(rust, "crate::font_data", "u16be")
 fn data_u16be(offset: Int) -> Int
 
 @extern(wasm, "font_data", "i16be")
+@extern(rust, "crate::font_data", "i16be")
 fn data_i16be(offset: Int) -> Int
 
 @extern(wasm, "font_data", "u32be")
+@extern(rust, "crate::font_data", "u32be")
 fn data_u32be(offset: Int) -> Int
 
 @extern(wasm, "font_data", "i8")
+@extern(rust, "crate::font_data", "i8")
 fn data_i8(offset: Int) -> Int
 
 // ── Types ──

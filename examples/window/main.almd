@@ -9,35 +9,65 @@ import self as snaidhm
 import self.web.gpu as gpu
 import self.native.window as window
 import self.native.frame as frame
+import self.native.font as font
 
-fn build(device: Int, width: Int, height: Int) -> snaidhm.SceneHandle = {
+// TrueType (glyf) fonts a desktop usually has; the first that loads is used.
+let FONTS = [
+  "/System/Library/Fonts/Supplemental/Arial.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+  "/usr/share/fonts/TTF/DejaVuSans.ttf",
+  "C:/Windows/Fonts/arial.ttf",
+]
+
+fn label(text: String, size: Float, x: Float, y: Float, color: List[Float]) -> snaidhm.TextSpec =
+  snaidhm.text_spec(snaidhm.str(text), size, x, y, snaidhm.ALIGN_CENTER, color)
+
+fn build(device: Int, width: Int, height: Int, has_font: Bool) -> snaidhm.SceneHandle = {
   let dc = [0.5, 0.5, 0.5, 1.0]
-  let cubics =
+  let shape_cubics =
     snaidhm.round_rect_cubics(-0.9, -0.9, 1.8, 1.8, 0.08, dc, 0)
     + snaidhm.circle_cubics(-0.5, 0.0, 0.18, dc, 1)
     + snaidhm.circle_cubics(0.0, 0.0, 0.18, dc, 2)
     + snaidhm.circle_cubics(0.5, 0.0, 0.18, dc, 3)
-  let paints = [
+  let shape_paints = [
     snaidhm.solid(1.0, 1.0, 1.0, 1.0),
     snaidhm.radial_grad([1.0, 0.55, 0.5, 0.9], [0.82, 0.18, 0.12, 0.9], -0.5, 0.0, 0.18),
     snaidhm.radial_grad([0.45, 0.92, 0.55, 0.9], [0.12, 0.62, 0.22, 0.9], 0.0, 0.0, 0.18),
     snaidhm.radial_grad([0.5, 0.7, 1.0, 0.9], [0.15, 0.35, 0.82, 0.9], 0.5, 0.0, 0.18),
   ]
+  // Sizes are physical pixels of the drawable, so scale logical sizes up.
+  let s = window.scale_factor()
+  let ink = [0.2, 0.22, 0.3, 1.0]
+  let specs = if has_font then [
+    label("snaidhm", 40.0 * s, 0.0, 0.62, ink),
+    label("Almide > native > wgpu", 14.0 * s, 0.0, 0.5, [0.45, 0.47, 0.55, 1.0]),
+    label("Red", 13.0 * s, -0.5, -0.3, ink),
+    label("Green", 13.0 * s, 0.0, -0.3, ink),
+    label("Blue", 13.0 * s, 0.5, -0.3, ink),
+  ] else []
+  let text = snaidhm.build_text_cubics(specs, int.to_float(height))
+  // Text paths are numbered after the shapes'.
+  let offset = list.len(shape_paints)
+  let text_cubics = text.cubics |> list.map((c) =>
+    { a: c.a, b: c.b, c: c.c, d: c.d, color: c.color, path_id: c.path_id + offset })
   let shadows = [
     snaidhm.rect_shadow(-0.9, -0.9, 1.8, 1.8, 0.08, 0.01, -0.02, 0.08, [0.0, 0.0, 0.0, 0.2]),
   ]
   // The image layer is empty: in the browser the page supplies its buffers.
   let img_vtx = gpu.create_buffer(device, 32, int.bor(gpu.VERTEX, gpu.COPY_DST))
   let img_idx = gpu.create_buffer(device, 16, int.bor(gpu.INDEX, gpu.COPY_DST))
-  snaidhm.prepare_scene(device, width, height, width, height, cubics, shadows, paints,
+  snaidhm.prepare_scene(device, width, height, width, height,
+    shape_cubics + text_cubics, shadows, shape_paints + text.paints,
     img_vtx, img_idx, 0, 0, 0, 0, 0)
 }
 
 effect fn main() -> Unit = {
   let capture = list.get(env.args(), 0)
   if window.open("snaidhm", 640, 640) then {
+    let has_font = FONTS |> list.any((path) => font.load(path))
+    if has_font then () else println("no TrueType font found; drawing shapes only")
     let device = 1
-    var scene = build(device, window.width(), window.height())
+    var scene = build(device, window.width(), window.height(), has_font)
     match capture {
       some(path) => {
         snaidhm.draw_frame(scene, 0.0)
@@ -45,7 +75,7 @@ effect fn main() -> Unit = {
       },
       none => {
         while window.pump() {
-          if window.resized() then { scene = build(device, window.width(), window.height()) }
+          if window.resized() then { scene = build(device, window.width(), window.height(), has_font) }
           snaidhm.draw_frame(scene, 0.0)
         }
       },
