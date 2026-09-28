@@ -1,0 +1,88 @@
+// Glyph rasterizer tests: every pixel's coverage must be the exact area the
+// outline covers — the same quantity the fine pass computes, taken here by
+// brute force over every line with its `seg_area` — rounded to 0–255.
+
+import self.coarse as coarse
+import self.glyph as glyph
+
+fn seg_area(x0: Float, y0: Float, x1: Float, y1: Float) -> Float = {
+  let dx = x1 - x0
+  let dyl = y1 - y0
+  let ya = float.clamp(y0, 0.0, 1.0)
+  let yb = float.clamp(y0 + dyl, 0.0, 1.0)
+  let dy = ya - yb
+  if float.abs(dy) < 0.000000001 then 0.0
+  else {
+    let t0 = (ya - y0) / dyl
+    let t1 = (yb - y0) / dyl
+    let xa = x0 + t0 * dx
+    let xb = x0 + t1 * dx
+    let xmin = float.min(float.min(xa, xb), 1.0) - 0.000001
+    let xmax = float.max(xa, xb)
+    let b = float.min(xmax, 1.0)
+    let c = float.max(b, 0.0)
+    let d = float.max(xmin, 0.0)
+    let a = (b + 0.5 * (d * d - c * c) - xmin) / (xmax - xmin)
+    (1.0 - a) * dy
+  }
+}
+
+fn exact(lines: List[coarse.Line], px: Int, py: Int) -> Int = {
+  let fx = int.to_float(px)
+  let fy = int.to_float(py)
+  let area = lines |> list.fold(0.0, (acc, l) => acc + seg_area(l.x0 - fx, l.y0 - fy, l.x1 - fx, l.y1 - fy))
+  float.to_int(float.round(float.min(1.0, float.abs(area)) * 255.0))
+}
+
+// The largest difference, in 0–255 steps, over the whole bitmap.
+fn worst(lines: List[coarse.Line], w: Int, h: Int) -> Int = {
+  let got = glyph.rasterize(lines, w, h)
+  var worst = 0
+  for py in 0..<h {
+    for px in 0..<w {
+      worst = int.max(worst, int.abs(got[py * w + px] - exact(lines, px, py)))
+    }
+  }
+  worst
+}
+
+fn polygon(pts: List[Float]) -> List[coarse.Line] = {
+  let n = list.len(pts) / 2
+  0..<n |> list.map((i) => {
+    let j = (i + 1) % n
+    { x0: pts[i * 2], y0: pts[i * 2 + 1], x1: pts[j * 2], y1: pts[j * 2 + 1] }
+  })
+}
+
+fn circle(cx: Float, cy: Float, r: Float, n: Int, reverse: Bool) -> List[coarse.Line] =
+  polygon(0..<n |> list.flat_map((i) => {
+    let k = if reverse then n - i else i
+    let t = 2.0 * math.pi() * int.to_float(k) / int.to_float(n)
+    [cx + r * math.cos(t), cy + r * math.sin(t)]
+  }))
+
+test "a pixel-aligned square is solid inside and empty outside" {
+  let lines = polygon([2.0, 2.0, 8.0, 2.0, 8.0, 8.0, 2.0, 8.0])
+  let got = glyph.rasterize(lines, 10, 10)
+  assert_eq(got[5 * 10 + 5], 255)
+  assert_eq(got[0], 0)
+  assert(worst(lines, 10, 10) <= 1)
+}
+
+test "a sloped quad matches the exact area everywhere" {
+  assert(worst(polygon([1.3, 0.7, 13.9, 3.2, 11.4, 12.6, 0.2, 9.9]), 15, 14) <= 1)
+}
+
+test "a steep and a shallow edge" {
+  assert(worst(polygon([0.5, 0.2, 1.4, 13.8, 13.7, 12.9]), 15, 15) <= 1)
+}
+
+test "a ring: a counter-wound hole cuts out" {
+  let lines = circle(10.0, 10.0, 8.5, 40, false) + circle(10.0, 10.0, 4.2, 30, true)
+  assert(worst(lines, 20, 20) <= 1)
+  assert_eq(glyph.rasterize(lines, 20, 20)[10 * 20 + 10], 0)
+}
+
+test "an outline touching every edge of its bitmap" {
+  assert(worst(polygon([0.0, 3.0, 12.0, 0.0, 12.0, 9.0, 4.0, 9.0]), 12, 9) <= 1)
+}

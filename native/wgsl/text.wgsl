@@ -1,11 +1,9 @@
-// SDF text renderer — sample SDF atlas texture, smoothstep for crisp edges
-
-struct Params {
-  atlas_width: f32,
-  atlas_height: f32,
-  screen_width: f32,
-  screen_height: f32,
-}
+// Glyph-cache text — blit coverage from the glyph atlas (snaidhm text.almd)
+//
+// Each glyph was rasterized once at the size it is shown at, into the atlas's
+// alpha channel as exact area coverage (glyph.almd). Quads are placed on
+// whole pixels and sampled nearest, so a glyph reaches the screen as it was
+// rasterized: the coverage is the alpha, the run's colour the colour.
 
 struct VertexOutput {
   @builtin(position) pos: vec4<f32>,
@@ -13,12 +11,10 @@ struct VertexOutput {
   @location(1) color: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var sdf_texture: texture_2d<f32>;
-@group(0) @binding(2) var sdf_sampler: sampler;
+@group(0) @binding(0) var atlas: texture_2d<f32>;
+@group(0) @binding(1) var atlas_sampler: sampler;
 
-// Vertex: positioned quad per glyph
-// Vertex data: pos(2) + uv(2) + color(4) = 8 floats per vertex
+// Vertex data: pos (normal space) 2 + atlas uv 2 + colour 4 = 8 floats.
 @vertex
 fn vs_main(
   @location(0) pos: vec2<f32>,
@@ -26,7 +22,6 @@ fn vs_main(
   @location(2) color: vec4<f32>,
 ) -> VertexOutput {
   var out: VertexOutput;
-  // pos is in NDC [-1, 1]
   out.pos = vec4<f32>(pos, 0.0, 1.0);
   out.uv = uv;
   out.color = color;
@@ -35,20 +30,6 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-  let dist = textureSample(sdf_texture, sdf_sampler, in.uv).r;
-
-  // Debug: show raw SDF value as grayscale
-  // return vec4<f32>(dist, dist, dist, 1.0);
-
-  // SDF: 0.5 = edge (stored as 128/255 ≈ 0.502)
-  let edge = 0.502;
-  // Adaptive smoothing based on screen-space derivatives
-  let dx = dpdx(in.uv.x) * params.atlas_width;
-  let dy = dpdy(in.uv.y) * params.atlas_height;
-  let spread = clamp(0.5 * length(vec2<f32>(dx, dy)), 0.02, 0.5);
-  let alpha = smoothstep(edge - spread, edge + spread, dist);
-
-  if (alpha < 0.01) { discard; }
-
-  return vec4<f32>(in.color.rgb, in.color.a * alpha);
+  let coverage = textureSample(atlas, atlas_sampler, in.uv).a;
+  return vec4<f32>(in.color.rgb, in.color.a * coverage);
 }

@@ -10,6 +10,8 @@ import self.web.gpu as gpu
 import self.native.window as window
 import self.native.frame as frame
 import self.native.font as font
+import self.ttf as ttf
+import self.text as text
 
 // TrueType (glyf) fonts a desktop usually has; the first that loads is used.
 let FONTS = [
@@ -38,17 +40,13 @@ fn build(device: Int, width: Int, height: Int, has_font: Bool) -> snaidhm.SceneH
   // Sizes are physical pixels of the drawable, so scale logical sizes up.
   let s = window.scale_factor()
   let ink = [0.2, 0.22, 0.3, 1.0]
-  let specs = if has_font then [
-    label("snaidhm", 40.0 * s, 0.0, 0.62, ink),
-    label("Almide > native > wgpu", 14.0 * s, 0.0, 0.5, [0.45, 0.47, 0.55, 1.0]),
-    label("Red", 13.0 * s, -0.5, -0.3, ink),
-    label("Green", 13.0 * s, 0.0, -0.3, ink),
-    label("Blue", 13.0 * s, 0.5, -0.3, ink),
-  ] else []
-  let text = snaidhm.build_text_cubics(specs, int.to_float(height))
+  // The title is a path (vector, any size); the small text below comes from
+  // the glyph cache (see `labels`).
+  let specs = if has_font then [label("snaidhm", 40.0 * s, 0.0, 0.62, ink)] else []
+  let title = snaidhm.build_text_cubics(specs, int.to_float(height))
   // Text paths are numbered after the shapes'.
   let offset = list.len(shape_paints)
-  let text_cubics = text.cubics |> list.map((c) =>
+  let title_cubics = title.cubics |> list.map((c) =>
     { a: c.a, b: c.b, c: c.c, d: c.d, color: c.color, path_id: c.path_id + offset })
   let shadows = [
     snaidhm.rect_shadow(-0.9, -0.9, 1.8, 1.8, 0.08, 0.01, -0.02, 0.08, [0.0, 0.0, 0.0, 0.2]),
@@ -57,8 +55,32 @@ fn build(device: Int, width: Int, height: Int, has_font: Bool) -> snaidhm.SceneH
   let img_vtx = gpu.create_buffer(device, 32, int.bor(gpu.VERTEX, gpu.COPY_DST))
   let img_idx = gpu.create_buffer(device, 16, int.bor(gpu.INDEX, gpu.COPY_DST))
   snaidhm.prepare_scene(device, width, height, width, height,
-    shape_cubics + text_cubics, shadows, shape_paints + text.paints,
+    shape_cubics + title_cubics, shadows, shape_paints + title.paints,
     img_vtx, img_idx, 0, 0, 0, 0, 0)
+}
+
+// Pixel x of normal-space x on a `width`-wide drawable.
+fn px(x: Float, width: Int) -> Float = (x + 1.0) * 0.5 * int.to_float(width)
+
+// A run centred on normal-space `x`, its baseline at pixel row `y`.
+fn centred(device: Int, layer: text.TextLayer, s: String, size: Float, x: Float, y: Float,
+           width: Int, height: Int, grey: Float) -> text.TextLayer = {
+  let chars = string.to_bytes(s)
+  let left = px(x, width) - text.measure(layer, chars, size) / 2.0
+  text.add_run(device, layer, chars, size, left, y, grey, grey, grey + 0.08, 1.0, 0.0, int.to_float(height))
+}
+
+// Subtitle and labels, from the glyph cache.
+fn labels(device: Int, layer: text.TextLayer, width: Int, height: Int) -> text.TextLayer = {
+  let s = window.scale_factor()
+  let h = int.to_float(height)
+  var l = text.clear(layer)
+  l = centred(device, l, "Almide > native > wgpu", 14.0 * s, 0.0, h * 0.26, width, height, 0.45)
+  l = centred(device, l, "Red", 13.0 * s, -0.5, h * 0.66, width, height, 0.2)
+  l = centred(device, l, "Green", 13.0 * s, 0.0, h * 0.66, width, height, 0.2)
+  l = centred(device, l, "Blue", 13.0 * s, 0.5, h * 0.66, width, height, 0.2)
+  l = centred(device, l, "glyph cache: each glyph rasterized once per size, then blitted", 11.0 * s, 0.0, h * 0.86, width, height, 0.5)
+  text.upload(device, l, width, height)
 }
 
 effect fn main() -> Unit = {
@@ -68,15 +90,19 @@ effect fn main() -> Unit = {
     if has_font then () else println("no TrueType font found; drawing shapes only")
     let device = 1
     var scene = build(device, window.width(), window.height(), has_font)
+    var layer = labels(device, text.new_layer(device, ttf.parse_font()), window.width(), window.height())
     match capture {
       some(path) => {
-        snaidhm.draw_frame(scene, 0.0)
+        snaidhm.draw_frame_2d_text(scene, layer, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         println(if frame.save_png(path) then "saved ${path}" else "capture failed")
       },
       none => {
         while window.pump() {
-          if window.resized() then { scene = build(device, window.width(), window.height(), has_font) }
-          snaidhm.draw_frame(scene, 0.0)
+          if window.resized() then {
+            scene = build(device, window.width(), window.height(), has_font)
+            layer = labels(device, layer, window.width(), window.height())
+          } else ()
+          snaidhm.draw_frame_2d_text(scene, layer, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         }
       },
     }

@@ -6,6 +6,7 @@
 import self.web.gpu as gpu
 import self.ttf as ttf
 import self.coarse as coarse
+import self.text as text
 import math
 
 let TILE = 16
@@ -436,7 +437,20 @@ fn prepare_scene(
 
 fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float,
                  bar_opacity_y: Float, bar_opacity_x: Float,
-                 bar_hover_y: Float, bar_hover_x: Float) -> Unit = {
+                 bar_hover_y: Float, bar_hover_x: Float) -> Unit =
+  encode_frame(scene, scroll_x, scroll_y, bar_opacity_y, bar_opacity_x, bar_hover_y, bar_hover_x, 0, 0, 0, 0)
+
+/// `draw_frame_2d`, then the text `layer` holds (see text.almd) over it.
+fn draw_frame_2d_text(scene: SceneHandle, layer: text.TextLayer, scroll_x: Float, scroll_y: Float,
+                      bar_opacity_y: Float, bar_opacity_x: Float,
+                      bar_hover_y: Float, bar_hover_x: Float) -> Unit =
+  encode_frame(scene, scroll_x, scroll_y, bar_opacity_y, bar_opacity_x, bar_hover_y, bar_hover_x,
+    layer.pipeline, layer.bind_group, layer.vtx, layer.count)
+
+fn encode_frame(scene: SceneHandle, scroll_x: Float, scroll_y: Float,
+                bar_opacity_y: Float, bar_opacity_x: Float,
+                bar_hover_y: Float, bar_hover_x: Float,
+                text_pipeline: Int, text_bg: Int, text_vtx: Int, text_count: Int) -> Unit = {
   gpu.write_f32_at(scene.device, scene.params_buf, 28, scroll_y)
   gpu.write_f32_at(scene.device, scene.params_buf, 32, scroll_x)
   gpu.write_f32_at(scene.device, scene.params_buf, 36, bar_opacity_y)
@@ -467,6 +481,13 @@ fn draw_frame_2d(scene: SceneHandle, scroll_x: Float, scroll_y: Float,
   gpu.set_vertex_buffer(rp, 0, scene.img_vtx)
   gpu.set_index_buffer(rp, scene.img_idx)
   gpu.draw_indexed(rp, scene.img_count)
+
+  if text_count > 0 then {
+    gpu.set_pipeline(rp, text_pipeline)
+    gpu.set_bind_group(rp, 0, text_bg)
+    gpu.set_vertex_buffer(rp, 0, text_vtx)
+    gpu.draw(rp, text_count)
+  } else ()
 
   gpu.end_pass(rp)
   gpu.finish_and_submit(scene.device, encoder)

@@ -48,6 +48,11 @@ type CmapFormat4 = {
 
 type Font = {
   units_per_em: Int,
+  // hhea line metrics in font units, y up: the baseline to the top of the
+  // tallest glyph, to the bottom of the lowest (negative), and the extra gap.
+  ascent: Int,
+  descent: Int,
+  line_gap: Int,
   num_glyphs: Int,
   index_to_loc_format: Int,
   loca_offset: Int,
@@ -92,6 +97,9 @@ fn parse_font() -> Font = {
   // hhea table
   let hhea = find_table(0x68, 0x68, 0x65, 0x61)  // "hhea"
   let num_h_metrics = data_u16be(hhea.offset + 34)
+  let ascent = data_i16be(hhea.offset + 4)
+  let descent = data_i16be(hhea.offset + 6)
+  let line_gap = data_i16be(hhea.offset + 8)
 
   // loca table
   let loca = find_table(0x6C, 0x6F, 0x63, 0x61)  // "loca"
@@ -108,6 +116,9 @@ fn parse_font() -> Font = {
 
   {
     units_per_em: units_per_em,
+    ascent: ascent,
+    descent: descent,
+    line_gap: line_gap,
     num_glyphs: num_glyphs,
     index_to_loc_format: index_to_loc_format,
     loca_offset: loca.offset,
