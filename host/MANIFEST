@@ -4,3 +4,4 @@
 # web host assets, so these are copied rather than resolved. The manifest is
 # what makes that copy mechanical and checkable instead of a fork.
 gpu.js
+wasi.js

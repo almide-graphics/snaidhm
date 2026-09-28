@@ -17,7 +17,7 @@
 // (see coarse.almd).
 
 import self.coarse as coarse
-import self.ttf as ttf
+import self.sfnt as sfnt
 
 /// A glyph's coverage bitmap and where it sits relative to the pen: its top
 /// left pixel is `left` px right of the pen and `top` px above the baseline.
@@ -100,23 +100,32 @@ fn rasterize(lines: List[coarse.Line], w: Int, h: Int) -> List[Int] = {
   out
 }
 
-/// Line segments approximating a cubic, in the cubic's own coordinates.
-fn flatten(c: ttf.CubicBez) -> List[coarse.Line] = {
-  let d1x = c.cx - 2.0 * c.bx + c.ax
-  let d1y = c.cy - 2.0 * c.by + c.ay
-  let d2x = c.dx - 2.0 * c.cx + c.bx
-  let d2y = c.dy - 2.0 * c.cy + c.by
+/// Line segments approximating the cubic at `c[k ..< k + 8]` (start, two
+/// controls, end), in the cubic's own coordinates.
+fn flatten(c: List[Float], k: Int) -> List[coarse.Line] = {
+  let ax = c[k]
+  let ay = c[k + 1]
+  let bx = c[k + 2]
+  let by = c[k + 3]
+  let cx = c[k + 4]
+  let cy = c[k + 5]
+  let dx = c[k + 6]
+  let dy = c[k + 7]
+  let d1x = cx - 2.0 * bx + ax
+  let d1y = cy - 2.0 * by + ay
+  let d2x = dx - 2.0 * cx + bx
+  let d2y = dy - 2.0 * cy + by
   let dd = float.max(math.sqrt(d1x * d1x + d1y * d1y), math.sqrt(d2x * d2x + d2y * d2y))
   let n = int.clamp(float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * TOL)))), 1, 64)
   let nf = int.to_float(n)
   var out: List[coarse.Line] = []
-  var px = c.ax
-  var py = c.ay
+  var px = ax
+  var py = ay
   for i in 1...n {
     let t = int.to_float(i) / nf
     let u = 1.0 - t
-    let qx = u * u * u * c.ax + 3.0 * u * u * t * c.bx + 3.0 * u * t * t * c.cx + t * t * t * c.dx
-    let qy = u * u * u * c.ay + 3.0 * u * u * t * c.by + 3.0 * u * t * t * c.cy + t * t * t * c.dy
+    let qx = u * u * u * ax + 3.0 * u * u * t * bx + 3.0 * u * t * t * cx + t * t * t * dx
+    let qy = u * u * u * ay + 3.0 * u * u * t * by + 3.0 * u * t * t * cy + t * t * t * dy
     list.push(out, { x0: px, y0: py, x1: qx, y1: qy })
     px = qx
     py = qy
@@ -126,14 +135,14 @@ fn flatten(c: ttf.CubicBez) -> List[coarse.Line] = {
 
 /// Glyph `glyph_id` of `font` rasterized at `size_px` pixels per em. A glyph
 /// with no outline (a space) is a 0 x 0 bitmap.
-fn glyph_bitmap(font: ttf.Font, glyph_id: Int, size_px: Float) -> Bitmap = {
+fn glyph_bitmap(font: sfnt.Font, glyph_id: Int, size_px: Float) -> Bitmap = {
   let scale = size_px / int.to_float(font.units_per_em)
   // Font units, y up, scaled to pixels with the pen at the origin.
-  let cubics = ttf.glyph_cubics(font, glyph_id, scale, 0.0, 0.0)
+  let cubics = sfnt.closed_cubics(sfnt.outline(font, glyph_id), scale, 0.0, 0.0)
   var lines: List[coarse.Line] = []
-  let nc = list.len(cubics)
+  let nc = list.len(cubics) / 8
   for i in 0..<nc {
-    let flat = flatten(cubics[i])
+    let flat = flatten(cubics, i * 8)
     let nf = list.len(flat)
     for k in 0..<nf { list.push(lines, flat[k]) }
   }
