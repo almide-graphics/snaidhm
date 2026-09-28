@@ -200,7 +200,10 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
-                if let Some(text) = &event.text {
+                // Space arrives as `NamedKey::Space`, and on macOS without
+                // `text`; the key's own text covers it.
+                let text = event.text.as_deref().or_else(|| event.logical_key.to_text());
+                if let Some(text) = text {
                     for ch in text.chars().filter(|c| !c.is_control()) {
                         let input = self.at_cursor(TEXT, i64::from(u32::from(ch)));
                         self.push(input);
