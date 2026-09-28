@@ -67,7 +67,8 @@ fn centred(device: Int, layer: text.TextLayer, s: String, size: Float, x: Float,
            width: Int, height: Int, grey: Float) -> text.TextLayer = {
   let chars = string.to_bytes(s)
   let left = px(x, width) - text.measure(layer, chars, size) / 2.0
-  text.add_run(device, layer, chars, size, left, y, grey, grey, grey + 0.08, 1.0, 0.0, int.to_float(height))
+  text.add_run(device, layer, chars, size, left, y, grey, grey, grey + 0.08, 1.0,
+    0.0, 0.0, int.to_float(width), int.to_float(height))
 }
 
 // Subtitle and labels, from the glyph cache.

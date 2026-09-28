@@ -8,7 +8,7 @@
 // A layer is a value threaded through `add_run` calls, then uploaded:
 //
 //   var layer = text.clear(layer)
-//   layer = text.add_run(layer, chars, 13.0, x, baseline, r, g, b, a, 0.0, h)
+//   layer = text.add_run(device, layer, chars, 13.0, x, baseline, r, g, b, a, 0.0, 0.0, w, h)
 //   layer = text.upload(device, layer, width, height)
 //
 // and drawn with `snaidhm.draw_frame_2d_text`.
@@ -137,9 +137,12 @@ fn cached(device: Int, layer: TextLayer, gid: Int, size_px: Int) -> TextLayer = 
 
 /// Queue `chars` at `size` px per em, the pen starting at `x` on the baseline
 /// `y` (pixels of the drawable, y down), in colour (`r`, `g`, `b`, `a`), and
-/// cut to the rows `clip_top ..< clip_bottom`.
+/// cut to the rectangle `clip_left ..< clip_right` x `clip_top ..< clip_bottom`
+/// — a label hides what overflows its box, a list what scrolls out of its
+/// frame.
 fn add_run(device: Int, layer: TextLayer, chars: List[Int], size: Float, x: Float, y: Float,
-           r: Float, g: Float, b: Float, a: Float, clip_top: Float, clip_bottom: Float) -> TextLayer = {
+           r: Float, g: Float, b: Float, a: Float,
+           clip_left: Float, clip_top: Float, clip_right: Float, clip_bottom: Float) -> TextLayer = {
   let size_px = int.max(1, float.to_int(float.round(size)))
   let scale = size / int.to_float(layer.font.units_per_em)
   let baseline = float.round(y)
@@ -158,19 +161,21 @@ fn add_run(device: Int, layer: TextLayer, chars: List[Int], size: Float, x: Floa
     if w > 0 and h > 0 then {
       let left = float.round(pen) + int.to_float(cur.rects[slot * 6 + 4])
       let top = baseline - int.to_float(cur.rects[slot * 6 + 5])
-      // Cut to the clip rows, moving the atlas rows with the quad's edges.
+      // Cut to the clip rectangle, moving the atlas texels with the quad's
+      // edges so what stays is exactly what was there.
+      let x0 = float.max(left, clip_left)
+      let x1 = float.min(left + int.to_float(w), clip_right)
       let y0 = float.max(top, clip_top)
       let y1 = float.min(top + int.to_float(h), clip_bottom)
-      if y1 > y0 then {
+      if x1 > x0 and y1 > y0 then {
         let atlas = int.to_float(ATLAS)
-        let u0 = int.to_float(ax) / atlas
-        let u1 = int.to_float(ax + w) / atlas
+        let u0 = (int.to_float(ax) + x0 - left) / atlas
+        let u1 = (int.to_float(ax) + x1 - left) / atlas
         let v0 = (int.to_float(ay) + y0 - top) / atlas
         let v1 = (int.to_float(ay) + y1 - top) / atlas
-        let x1 = left + int.to_float(w)
         verts = verts
-          + [left, y0, u0, v0, r, g, b, a,  x1, y0, u1, v0, r, g, b, a,  left, y1, u0, v1, r, g, b, a]
-          + [left, y1, u0, v1, r, g, b, a,  x1, y0, u1, v0, r, g, b, a,  x1, y1, u1, v1, r, g, b, a]
+          + [x0, y0, u0, v0, r, g, b, a,  x1, y0, u1, v0, r, g, b, a,  x0, y1, u0, v1, r, g, b, a]
+          + [x0, y1, u0, v1, r, g, b, a,  x1, y0, u1, v0, r, g, b, a,  x1, y1, u1, v1, r, g, b, a]
       } else ()
     } else ()
     pen = pen + int.to_float(ttf.get_advance_width(cur.font, gid)) * scale
