@@ -5,11 +5,10 @@
 
 import self.web.gpu as gpu
 import self.ttf as ttf
+import self.coarse as coarse
 import math
 
 let TILE = 16
-let MAX_SEGS = 16
-let MAX_CMDS = 8
 let DISPATCH_TILE = 64
 let MAX_ITEMS_PER_TILE = 32
 
@@ -296,100 +295,52 @@ fn prepare_scene(
   for cub in cubics {
     segments = segments + flatten_cubic(cub.a, cub.b, cub.c, cub.d, cub.color, cub.path_id)
   }
-  let seg_count = list.len(segments)
   let num_paths = list.len(paints)
 
-  // ── DDA tile assignment + backdrop (command list) ──
-  var tile_cmd_counts: List[Int] = list.repeat(0, num_tiles)
-  var tile_cmds_data: List[Int] = list.repeat(0, num_tiles * MAX_CMDS * 4)
-  var tile_seg_ids: List[Int] = list.repeat(0, num_tiles * MAX_SEGS)
-  var tile_seg_counts: List[Int] = list.repeat(0, num_tiles)
-
+  // ── Coarse raster: packed per-tile command lists (see coarse.almd) ──
+  // Lines go to pixel space for tiling and back to normal space for upload,
+  // the space raster.wgsl reads them in.
   let w_f = int.to_float(width)
   let h_f = int.to_float(height)
-  let tile_f = int.to_float(TILE)
-
-  // Group segments by path_id
-  var path_starts: List[Int] = list.repeat(0, num_paths)
-  var path_seg_counts: List[Int] = list.repeat(0, num_paths)
-  for si in 0..<seg_count {
-    path_seg_counts[segments[si].path_id] = path_seg_counts[segments[si].path_id] + 1
+  var path_lines: List[coarse.PathLine] = []
+  for seg in segments {
+    list.push(path_lines, {
+      path: seg.path_id,
+      x0: (seg.p0.x + 1.0) * 0.5 * w_f, y0: (1.0 - seg.p0.y) * 0.5 * h_f,
+      x1: (seg.p1.x + 1.0) * 0.5 * w_f, y1: (1.0 - seg.p1.y) * 0.5 * h_f,
+    })
   }
-  var ps_acc = 0
-  for pid in 0..<num_paths {
-    path_starts[pid] = ps_acc
-    ps_acc = ps_acc + path_seg_counts[pid]
-  }
-
-  for pid in 0..<num_paths {
-    var seg_offsets: List[Int] = list.repeat(0, num_tiles)
-    for tid in 0..<num_tiles { seg_offsets[tid] = tile_seg_counts[tid] }
-
-    for si_off in 0..<path_seg_counts[pid] {
-      let si = path_starts[pid] + si_off
-      let seg = segments[si]
-      if float.abs(seg.p0.y - seg.p1.y) < 0.0001 then () else {
-        let max_x = float.max(seg.p0.x, seg.p1.x)
-        let min_y = float.min(seg.p0.y, seg.p1.y)
-        let max_y = float.max(seg.p0.y, seg.p1.y)
-        let t_max_x = int.min(content_tiles_x - 1, float.to_int(float.floor((max_x + 1.0) * 0.5 * w_f / tile_f)) + 1)
-        // 1-tile margin for scroll: segments available in adjacent tiles
-        let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)) - 1)
-        let t_max_y = int.min(content_tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)) + 1)
-        for ty in t_min_y...t_max_y {
-          for tx in 0...t_max_x {
-            let tid = ty * content_tiles_x + tx
-            let slot = tile_seg_counts[tid]
-            if slot < MAX_SEGS then {
-              tile_seg_ids[tid * MAX_SEGS + slot] = si
-              tile_seg_counts[tid] = slot + 1
-            } else ()
-          }
-        }
-      }
-    }
-
-    // Build commands (no backdrop — all-columns-left doesn't need it)
-    for tid in 0..<num_tiles {
-      let sc = tile_seg_counts[tid] - seg_offsets[tid]
-      if sc > 0 then {
-        let ci = tile_cmd_counts[tid]
-        if ci < MAX_CMDS then {
-          let base = tid * MAX_CMDS * 4 + ci * 4
-          tile_cmds_data[base] = pid
-          tile_cmds_data[base + 1] = 0
-          tile_cmds_data[base + 2] = seg_offsets[tid]
-          tile_cmds_data[base + 3] = sc
-          tile_cmd_counts[tid] = ci + 1
-        } else ()
-      } else ()
-    }
-  }
+  let tiles = coarse.build(path_lines, TILE, content_tiles_x, content_tiles_y, num_paths)
+  let seg_count = list.len(tiles.lines)
 
   // ── Upload buffers ──
+  // Every buffer holds at least one element: a zero-sized storage binding is a
+  // validation error, and an empty scene is ordinary.
   let seg_buf = gpu.create_buffer(device, int.max(1, seg_count) * 48, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
-  for seg in segments {
-    gpu.push_f32(seg.p0.x) gpu.push_f32(seg.p0.y) gpu.push_f32(seg.p1.x) gpu.push_f32(seg.p1.y)
-    gpu.push_f32(seg.color[0]) gpu.push_f32(seg.color[1]) gpu.push_f32(seg.color[2]) gpu.push_f32(seg.color[3])
-    gpu.push_u32(seg.path_id) gpu.push_u32(0) gpu.push_u32(0) gpu.push_u32(0)
+  for l in tiles.lines {
+    gpu.push_f32(l.x0 / (0.5 * w_f) - 1.0) gpu.push_f32(1.0 - l.y0 / (0.5 * h_f))
+    gpu.push_f32(l.x1 / (0.5 * w_f) - 1.0) gpu.push_f32(1.0 - l.y1 / (0.5 * h_f))
+    for _ in 0..<8 { gpu.push_u32(0) }
   }
   if seg_count == 0 then { for _ in 0..<12 { gpu.push_u32(0) } } else ()
   gpu.flush_to_buffer(device, seg_buf)
 
-  let tc_buf = gpu.create_buffer(device, num_tiles * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  // Per tile: first command, command count.
+  let tc_buf = gpu.create_buffer(device, int.max(1, num_tiles * 2) * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
-  for c in tile_cmd_counts { gpu.push_u32(c) }
+  for v in tiles.index { gpu.push_u32(v) }
   gpu.flush_to_buffer(device, tc_buf)
 
-  let ts_buf = gpu.create_buffer(device, num_tiles * MAX_SEGS * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  let ts_buf = gpu.create_buffer(device, int.max(1, list.len(tiles.line_ids)) * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
-  for id in tile_seg_ids { gpu.push_u32(id) }
+  for id in tiles.line_ids { gpu.push_u32(id) }
   gpu.flush_to_buffer(device, ts_buf)
 
-  let tcmd_buf = gpu.create_buffer(device, num_tiles * MAX_CMDS * 4 * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  // Per command: path, backdrop (i32 bits), first slot in ts_buf, line count.
+  let tcmd_buf = gpu.create_buffer(device, int.max(1, list.len(tiles.cmds)) * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
-  for v in tile_cmds_data { gpu.push_u32(v) }
+  for v in tiles.cmds { gpu.push_u32(v) }
   gpu.flush_to_buffer(device, tcmd_buf)
 
   // Pixel buffer = viewport size (vlist: only visible items rendered at viewport coords)

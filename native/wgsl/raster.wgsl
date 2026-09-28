@@ -1,7 +1,6 @@
 // snaidhm Phase 1 — Tiled path renderer (content-space 2D scroll + scrollbar)
 
 const TILE_SIZE: u32 = 16u;
-const MAX_SEGS_PER_TILE: u32 = 16u;
 
 struct LineSeg {
   p0: vec2<f32>,
@@ -66,7 +65,7 @@ fn evaluate_paint(paint: Paint, p: vec2<f32>) -> vec4<f32> {
 }
 
 @group(0) @binding(0) var<storage, read>       segments: array<LineSeg>;
-@group(0) @binding(1) var<storage, read>       tile_cmd_counts: array<u32>;
+@group(0) @binding(1) var<storage, read>       tile_cmd_index: array<u32>;  // per tile: first command, count
 @group(0) @binding(2) var<storage, read>       tile_seg_ids: array<u32>;
 @group(0) @binding(3) var<storage, read_write> pixels: array<u32>;
 @group(0) @binding(4) var<uniform>             params: Params;
@@ -84,7 +83,6 @@ fn evaluate_paint(paint: Paint, p: vec2<f32>) -> vec4<f32> {
 //   [i*3+1] = (scroll_x, scroll_y, content_w, content_h)
 //   [i*3+2] = (parent_id_f, region_count_f, 0, 0)
 
-const MAX_CMDS_PER_TILE: u32 = 8u;
 const MAX_SCROLL_REGIONS: u32 = 8u;
 // Tile-based item dispatch (group 3 — compute only, avoids group 2 conflict with bg_texture)
 @group(3) @binding(0) var<storage, read>       tile_item_counts: array<u32>;
@@ -207,9 +205,9 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
   let content_tile_y = u32(content_py) / TILE_SIZE;
   let path_tile_id = content_tile_y * params.content_tiles_x + content_tile_x;
 
-  let cmd_count = min(tile_cmd_counts[path_tile_id], MAX_CMDS_PER_TILE);
-  let tile_base = path_tile_id * MAX_SEGS_PER_TILE;
-  let cmd_base = path_tile_id * MAX_CMDS_PER_TILE * 4u;
+  // Packed command lists (snaidhm coarse.almd): no per-tile limit.
+  let cmd_first = tile_cmd_index[path_tile_id * 2u];
+  let cmd_count = tile_cmd_index[path_tile_id * 2u + 1u];
 
   let p = vec2<f32>(
     content_px / f32(params.width) * 2.0 - 1.0,
@@ -230,7 +228,7 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
   let ndc_to_py = 0.5 * f32(params.height);
 
   for (var ci = 0u; ci < cmd_count; ci++) {
-    let cb = cmd_base + ci * 4u;
+    let cb = (cmd_first + ci) * 4u;
     let path_id = tile_cmds[cb];
     let backdrop = bitcast<i32>(tile_cmds[cb + 1u]);
     let seg_offset = tile_cmds[cb + 2u];
@@ -238,7 +236,7 @@ fn fine(@builtin(global_invocation_id) gid: vec3<u32>,
 
     var area = f32(backdrop);
     for (var si = 0u; si < seg_count; si++) {
-      let seg_idx = tile_seg_ids[tile_base + seg_offset + si];
+      let seg_idx = tile_seg_ids[seg_offset + si];
       let seg = segments[seg_idx];
       let sp0 = vec2<f32>(
         (seg.p0.x + 1.0) * ndc_to_px - content_px,
