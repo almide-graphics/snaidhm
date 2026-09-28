@@ -35,18 +35,44 @@ fn cubic_eval(a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) -> Vec2 = {
     y: uu*u*a.y + 3.0*uu*t*b.y + 3.0*u*tt*c.y + tt*t*d.y }
 }
 
+// Flattening tolerance in normal space: half a pixel at up to a 1024px viewport.
+let FLATTEN_TOL = 0.5 / 1024.0
+
 fn wang_n(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Int = {
   let d1x = c.x - 2.0*b.x + a.x
   let d1y = c.y - 2.0*b.y + a.y
   let d2x = d.x - 2.0*c.x + b.x
   let d2y = d.y - 2.0*c.y + b.y
   let dd = float.max(math.sqrt(d1x*d1x + d1y*d1y), math.sqrt(d2x*d2x + d2y*d2y))
-  let tol = 0.5 / 1024.0  // tolerance for up to 1024px viewport
-  int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
+  int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * FLATTEN_TOL))))))
 }
 
+// Whether `p` lies on the chord a→d, within tolerance and between its ends.
+fn on_chord(p: Vec2, a: Vec2, d: Vec2) -> Bool = {
+  let dx = d.x - a.x
+  let dy = d.y - a.y
+  let len2 = dx * dx + dy * dy
+  let px = p.x - a.x
+  let py = p.y - a.y
+  if len2 < FLATTEN_TOL * FLATTEN_TOL then px * px + py * py <= FLATTEN_TOL * FLATTEN_TOL
+  else {
+    let t = (px * dx + py * dy) / len2
+    let cross = px * dy - py * dx
+    t >= 0.0 and t <= 1.0 and cross * cross <= FLATTEN_TOL * FLATTEN_TOL * len2
+  }
+}
+
+// A cubic whose control points lie on its chord is a straight line, and
+// flattens to exactly one segment. Wang's bound measures how unevenly the
+// curve is parametrised, not how it bends: an edge written with its control
+// points on its endpoints (round_rect_cubics does) has a large second
+// difference and would be cut into ~50 collinear pieces — enough to overflow
+// the per-tile segment budget and silently drop the rest of the path.
+fn segment_count(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Int =
+  if on_chord(b, a, d) and on_chord(c, a, d) then 1 else wang_n(a, b, c, d)
+
 fn flatten_cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], pid: Int) -> List[Seg] = {
-  let n = wang_n(a, b, c, d)
+  let n = segment_count(a, b, c, d)
   let nf = int.to_float(n)
   0..<n |> list.map((i) => {
     let t0 = int.to_float(i) / nf
@@ -178,7 +204,9 @@ fn measure_text(font: ttf.Font, chars: List[Int], size: Float, viewport_h: Float
 // ── Upload helpers (internal) ──
 
 fn upload_shadows(device: Int, shadows: List[Shadow]) -> Int = {
-  let buf = gpu.create_buffer(device, list.len(shadows) * 48, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  // At least one element: a zero-sized storage binding is a validation error,
+  // and a scene without shadows is ordinary.
+  let buf = gpu.create_buffer(device, int.max(1, list.len(shadows)) * 48, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
   for s in shadows {
     gpu.push_f32(s.cx) gpu.push_f32(s.cy) gpu.push_f32(s.hw) gpu.push_f32(s.hh)
@@ -190,7 +218,7 @@ fn upload_shadows(device: Int, shadows: List[Shadow]) -> Int = {
 }
 
 fn upload_paints(device: Int, paints: List[Paint]) -> Int = {
-  let buf = gpu.create_buffer(device, list.len(paints) * 64, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  let buf = gpu.create_buffer(device, int.max(1, list.len(paints)) * 64, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
   for p in paints {
     gpu.push_u32(p.kind) gpu.push_u32(0) gpu.push_u32(0) gpu.push_u32(0)
