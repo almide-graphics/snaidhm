@@ -1,0 +1,247 @@
+// snaidhm truetype — glyf outlines, as the cubics sfnt.almd hands out
+//
+// A contour is on- and off-curve points; two off-curve points in a row imply
+// the on-curve point halfway between them, and each quadratic is raised to
+// the cubic that traces the same curve. Composite glyphs place every
+// component with its offset and its scale or 2x2 transform.
+//
+// Written as index loops over flat lists, for the wasm renderer (see
+// coarse.almd).
+
+type Outline = { cmds: List[Int], pts: List[Float] }
+
+// Command codes, as sfnt.almd defines them.
+let MOVE = 0
+let LINE = 1
+let CUBIC = 2
+let CLOSE = 3
+
+/// Components nest at most this deep; a deeper (or cyclic) glyph is cut.
+let MAX_DEPTH = 8
+
+fn glyph_span(data: Bytes, loca: Int, long_loca: Bool, gid: Int) -> (Int, Int) =
+  if long_loca then (bytes.read_u32_be(data, loca + gid * 4), bytes.read_u32_be(data, loca + gid * 4 + 4))
+  else (bytes.read_u16_be(data, loca + gid * 2) * 2, bytes.read_u16_be(data, loca + gid * 2 + 2) * 2)
+
+/// Glyph `gid`'s outline, font units, y up. `lsb` is its left side bearing
+/// from hmtx: as TrueType rasterizers place a glyph (the phantom point at
+/// xMin - lsb goes to the origin), the outline moves right by lsb - xMin —
+/// nothing, in a font whose hmtx agrees with its glyf bounding boxes.
+fn outline(data: Bytes, loca: Int, glyf: Int, long_loca: Bool, gid: Int, lsb: Int) -> Outline = {
+  let span = glyph_span(data, loca, long_loca, gid)
+  let shift = if span.1 > span.0 then lsb - bytes.read_i16_be(data, glyf + span.0 + 2) else 0
+  placed(data, loca, glyf, long_loca, gid, [1.0, 0.0, 0.0, 1.0, int.to_float(shift), 0.0], 0)
+}
+
+/// Glyph `gid` with every point mapped by `m` = [a, b, c, d, dx, dy]:
+/// (x, y) -> (a x + c y + dx, b x + d y + dy).
+fn placed(data: Bytes, loca: Int, glyf: Int, long_loca: Bool, gid: Int, m: List[Float], depth: Int) -> Outline = {
+  let span = glyph_span(data, loca, long_loca, gid)
+  if span.1 <= span.0 or depth > MAX_DEPTH then { cmds: [], pts: [] }
+  else {
+    let at = glyf + span.0
+    let contours = bytes.read_i16_be(data, at)
+    if contours >= 0 then simple(data, at, contours, m)
+    else composite(data, loca, glyf, long_loca, at, m, depth)
+  }
+}
+
+fn tx(m: List[Float], x: Float, y: Float) -> Float = m[0] * x + m[2] * y + m[4]
+fn ty(m: List[Float], x: Float, y: Float) -> Float = m[1] * x + m[3] * y + m[5]
+
+fn simple(data: Bytes, at: Int, contours: Int, m: List[Float]) -> Outline = {
+  let cmds: List[Int] = []
+  let pts: List[Float] = []
+  if contours == 0 then { cmds: cmds, pts: pts }
+  else {
+    var ends: List[Int] = []
+    for c in 0..<contours { list.push(ends, bytes.read_u16_be(data, at + 10 + c * 2)) }
+    let n = ends[contours - 1] + 1
+    var pos = at + 10 + contours * 2
+    pos = pos + 2 + bytes.read_u16_be(data, pos)
+    // Flags, with their repeats.
+    var flags: List[Int] = []
+    while list.len(flags) < n {
+      let f = bytes.read_u8(data, pos)
+      pos = pos + 1
+      list.push(flags, f)
+      if int.band(f, 0x08) != 0 then {
+        let r = bytes.read_u8(data, pos)
+        pos = pos + 1
+        for _ in 0..<r { list.push(flags, f) }
+      } else ()
+    }
+    // Coordinates: short (1 byte, sign in the flag), repeated, or a word.
+    var xs: List[Float] = []
+    var x = 0
+    for i in 0..<n {
+      let f = flags[i]
+      if int.band(f, 0x02) != 0 then {
+        let d = bytes.read_u8(data, pos)
+        pos = pos + 1
+        x = x + (if int.band(f, 0x10) != 0 then d else 0 - d)
+      } else if int.band(f, 0x10) == 0 then {
+        x = x + bytes.read_i16_be(data, pos)
+        pos = pos + 2
+      } else ()
+      list.push(xs, int.to_float(x))
+    }
+    var ys: List[Float] = []
+    var y = 0
+    for i in 0..<n {
+      let f = flags[i]
+      if int.band(f, 0x04) != 0 then {
+        let d = bytes.read_u8(data, pos)
+        pos = pos + 1
+        y = y + (if int.band(f, 0x20) != 0 then d else 0 - d)
+      } else if int.band(f, 0x20) == 0 then {
+        y = y + bytes.read_i16_be(data, pos)
+        pos = pos + 2
+      } else ()
+      list.push(ys, int.to_float(y))
+    }
+    var px: List[Float] = []
+    var py: List[Float] = []
+    var on: List[Bool] = []
+    for i in 0..<n {
+      list.push(px, tx(m, xs[i], ys[i]))
+      list.push(py, ty(m, xs[i], ys[i]))
+      list.push(on, int.band(flags[i], 0x01) != 0)
+    }
+    var out: Outline = { cmds: cmds, pts: pts }
+    var first = 0
+    for c in 0..<contours {
+      out = contour(out, px, py, on, first, ends[c])
+      first = ends[c] + 1
+    }
+    out
+  }
+}
+
+/// Append the contour of points `first ... last`.
+fn contour(out: Outline, px: List[Float], py: List[Float], on: List[Bool], first: Int, last: Int) -> Outline = {
+  let n = last - first + 1
+  var cmds = out.cmds
+  var pts = out.pts
+  if n < 1 then { cmds: cmds, pts: pts }
+  else {
+    // Start on the first on-curve point; when there is none, on the point
+    // implied between the last and the first.
+    var k = 0 - 1
+    for j in 0..<n {
+      if k < 0 and on[first + j] then { k = j } else ()
+    }
+    let all_off = k < 0
+    let sx = if all_off then (px[last] + px[first]) / 2.0 else px[first + k]
+    let sy = if all_off then (py[last] + py[first]) / 2.0 else py[first + k]
+    let steps = if all_off then n else n - 1
+    let base = if all_off then 0 else k + 1
+    list.push(cmds, MOVE)
+    list.push(pts, sx)
+    list.push(pts, sy)
+    var cx = sx
+    var cy = sy
+    var pending = false
+    var qx = 0.0
+    var qy = 0.0
+    // Every point after the start, then the start again to close.
+    for s in 0...steps {
+      let back = s == steps
+      let i = first + (base + s) % n
+      let is_on = back or on[i]
+      let x = if back then sx else px[i]
+      let y = if back then sy else py[i]
+      if is_on then {
+        if pending then {
+          list.push(cmds, CUBIC)
+          for v in quad(cx, cy, qx, qy, x, y) { list.push(pts, v) }
+          pending = false
+        } else if not back then {
+          list.push(cmds, LINE)
+          list.push(pts, x)
+          list.push(pts, y)
+        } else ()
+        cx = x
+        cy = y
+      } else {
+        if pending then {
+          let mx = (qx + x) / 2.0
+          let my = (qy + y) / 2.0
+          list.push(cmds, CUBIC)
+          for v in quad(cx, cy, qx, qy, mx, my) { list.push(pts, v) }
+          cx = mx
+          cy = my
+        } else ()
+        pending = true
+        qx = x
+        qy = y
+      }
+    }
+    list.push(cmds, CLOSE)
+    { cmds: cmds, pts: pts }
+  }
+}
+
+/// The cubic tracing the quadratic (x0, y0) (qx, qy) (x1, y1): control points
+/// two thirds of the way from each end toward the quadratic's control.
+fn quad(x0: Float, y0: Float, qx: Float, qy: Float, x1: Float, y1: Float) -> List[Float] =
+  [x0 + 2.0 / 3.0 * (qx - x0), y0 + 2.0 / 3.0 * (qy - y0),
+   x1 + 2.0 / 3.0 * (qx - x1), y1 + 2.0 / 3.0 * (qy - y1), x1, y1]
+
+fn f2dot14(data: Bytes, at: Int) -> Float = int.to_float(bytes.read_i16_be(data, at)) / 16384.0
+
+fn composite(data: Bytes, loca: Int, glyf: Int, long_loca: Bool, at: Int, m: List[Float], depth: Int) -> Outline = {
+  var cmds: List[Int] = []
+  var pts: List[Float] = []
+  var pos = at + 10
+  var more = true
+  while more {
+    let flags = bytes.read_u16_be(data, pos)
+    let child = bytes.read_u16_be(data, pos + 2)
+    pos = pos + 4
+    let words = int.band(flags, 0x0001) != 0
+    let xy = int.band(flags, 0x0002) != 0
+    let a1 = if words then bytes.read_i16_be(data, pos) else i8(data, pos)
+    let a2 = if words then bytes.read_i16_be(data, pos + 2) else i8(data, pos + 1)
+    pos = pos + (if words then 4 else 2)
+    // Offsets; matched-point placement (not x/y values) is not supported and
+    // places the component unmoved.
+    let dx = if xy then int.to_float(a1) else 0.0
+    let dy = if xy then int.to_float(a2) else 0.0
+    var a = 1.0
+    var b = 0.0
+    var c = 0.0
+    var d = 1.0
+    if int.band(flags, 0x0008) != 0 then {
+      a = f2dot14(data, pos)
+      d = a
+      pos = pos + 2
+    } else if int.band(flags, 0x0040) != 0 then {
+      a = f2dot14(data, pos)
+      d = f2dot14(data, pos + 2)
+      pos = pos + 4
+    } else if int.band(flags, 0x0080) != 0 then {
+      a = f2dot14(data, pos)
+      b = f2dot14(data, pos + 2)
+      c = f2dot14(data, pos + 4)
+      d = f2dot14(data, pos + 6)
+      pos = pos + 8
+    } else ()
+    // The component's own transform, then the parent's.
+    let cm = [
+      m[0] * a + m[2] * b, m[1] * a + m[3] * b,
+      m[0] * c + m[2] * d, m[1] * c + m[3] * d,
+      m[0] * dx + m[2] * dy + m[4], m[1] * dx + m[3] * dy + m[5],
+    ]
+    let part = placed(data, loca, glyf, long_loca, child, cm, depth + 1)
+    cmds = cmds + part.cmds
+    pts = pts + part.pts
+    more = int.band(flags, 0x0020) != 0
+  }
+  { cmds: cmds, pts: pts }
+}
+
+fn i8(data: Bytes, at: Int) -> Int = {
+  let v = bytes.read_u8(data, at)
+  if v >= 128 then v - 256 else v
+}

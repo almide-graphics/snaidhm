@@ -1,0 +1,21 @@
+// Print what sfnt.almd reads from a font (sfnt_describe.almd's form), for
+// oracle.py to compare with fontTools.
+//
+//   almide run test/font-oracle/dump.almd -- FONT FACE CODE...
+
+import env
+import fs
+import io
+import self.sfnt as sfnt
+import self.sfnt_describe as describe
+
+effect fn main() -> Unit = {
+  let args = env.args()
+  let data = fs.read_bytes_raw(args[0])!
+  let font = sfnt.load(data, int.parse(args[1])!)!
+  let codes = list.drop(args, 2)
+  var ints: List[Int] = []
+  let n = list.len(codes)
+  for i in 0..<n { list.push(ints, int.parse(codes[i])!) }
+  io.print(describe.describe(font, ints))
+}
