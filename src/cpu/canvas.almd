@@ -5,17 +5,33 @@
 // compositor as it is. Rectangles are filled directly; text is blended from
 // the same exact-coverage glyph bitmaps the GPU text layer caches
 // (glyph.almd), each rasterized once per font, glyph and size.
+//
+// Everything is drawn in units, not pixels: a canvas made for a screen of
+// scale 2 (or 1.6) is that many pixels per unit, and the same drawing comes
+// out the same size there, only sharper. Code that draws never multiplies by
+// the scale — it cannot forget to.
 
 import self.sfnt as sfnt
 import self.glyph as glyph
 
-type Canvas = { w: Int, h: Int, px: Bytes }
+/// `w` x `h` pixels, `scale` pixels per unit.
+type Canvas = { w: Int, h: Int, scale: Float, px: Bytes }
 
 // Rasterized glyphs: (font * 65536 + glyph) * 1024 + pixel size -> bitmap.
 var glyphs: Map[Int, glyph.Bitmap] = map.new()
 
-/// A `w` x `h` canvas, transparent black.
-fn new(w: Int, h: Int) -> Canvas = { w: w, h: h, px: bytes.new(w * h * 4) }
+/// A `w` x `h` pixel canvas, one pixel per unit, transparent black.
+fn new(w: Int, h: Int) -> Canvas = scaled(w, h, 1.0)
+
+/// A `w` x `h` pixel canvas of `scale` pixels per unit — a window's
+/// `width()`, `height()` and `scale()` — transparent black.
+fn scaled(w: Int, h: Int, scale: Float) -> Canvas = { w: w, h: h, scale: scale, px: bytes.new(w * h * 4) }
+
+/// The canvas's width in units.
+fn width(c: Canvas) -> Float = int.to_float(c.w) / c.scale
+
+/// The canvas's height in units.
+fn height(c: Canvas) -> Float = int.to_float(c.h) / c.scale
 
 fn channel(v: Float) -> Int = float.to_int(float.round(float.clamp(v, 0.0, 1.0) * 255.0))
 
@@ -45,16 +61,20 @@ fn clear(c: Canvas, r: Float, g: Float, b: Float) -> Canvas = {
   { ...c, px: px }
 }
 
-/// Blend a rectangle, `x0 ..< x1` x `y0 ..< y1` in pixels, with rounded
+/// Blend a rectangle, `x0 ..< x1` x `y0 ..< y1` in units, with rounded
 /// corners of radius `radius` (0: square), anti-aliased at its edges.
-fn rect(c: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, radius: Float,
+fn rect(c: Canvas, ux0: Float, uy0: Float, ux1: Float, uy1: Float, radius: Float,
         r: Float, g: Float, b: Float, a: Float) -> Canvas = {
   var px = c.px
+  let x0 = ux0 * c.scale
+  let y0 = uy0 * c.scale
+  let x1 = ux1 * c.scale
+  let y1 = uy1 * c.scale
   let lo_x = int.max(0, float.to_int(float.floor(x0)))
   let hi_x = int.min(c.w, float.to_int(float.ceil(x1)))
   let lo_y = int.max(0, float.to_int(float.floor(y0)))
   let hi_y = int.min(c.h, float.to_int(float.ceil(y1)))
-  let rad = float.min(radius, float.min(x1 - x0, y1 - y0) / 2.0)
+  let rad = float.min(radius * c.scale, float.min(x1 - x0, y1 - y0) / 2.0)
   for y in lo_y..<hi_y {
     for x in lo_x..<hi_x {
       let cov = coverage(int.to_float(x) + 0.5, int.to_float(y) + 0.5, x0, y0, x1, y1, rad)
@@ -77,14 +97,15 @@ fn coverage(px: Float, py: Float, x0: Float, y0: Float, x1: Float, y1: Float, ra
   float.clamp(0.5 - dist, 0.0, 1.0)
 }
 
-/// Draw `chars` at `size` pixels per em, the pen starting at `x` on the
+/// Draw `chars` at `size` units per em, the pen starting at `x` on the
 /// baseline `y`, each character from the first of `fonts` that has it.
-fn draw_text(c: Canvas, fonts: List[sfnt.Font], chars: List[Int], size: Float, x: Float, y: Float,
+fn draw_text(c: Canvas, fonts: List[sfnt.Font], chars: List[Int], usize: Float, x: Float, y: Float,
              r: Float, g: Float, b: Float, a: Float) -> Canvas = {
   var px = c.px
+  let size = usize * c.scale
   let size_px = int.max(1, float.to_int(float.round(size)))
-  let baseline = float.to_int(float.round(y))
-  var pen = x
+  let baseline = float.to_int(float.round(y * c.scale))
+  var pen = x * c.scale
   let n = list.len(chars)
   for i in 0..<n {
     let p = sfnt.pick(fonts, chars[i])
@@ -115,7 +136,7 @@ fn draw_text(c: Canvas, fonts: List[sfnt.Font], chars: List[Int], size: Float, x
   { ...c, px: px }
 }
 
-/// The width `chars` take at `size`, as `draw_text` sets them.
+/// The width `chars` take at `size`, in units, as `draw_text` sets them.
 fn measure(fonts: List[sfnt.Font], chars: List[Int], size: Float) -> Float = {
   var w = 0.0
   let n = list.len(chars)

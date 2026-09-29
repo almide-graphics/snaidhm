@@ -52,10 +52,20 @@ var xdg_surface = 0
 var toplevel = 0
 var layer_shell = 0
 var layer_surface = 0
+var viewporter = 0
+var fractional = 0
+var viewport = 0
+var surface_scale = 0
 var pointer = 0
 var keyboard = 0
 
-// The window: its size, what the compositor last asked for, and state.
+// The window: its size in surface units (what the compositor configures and
+// the pointer reports), what the compositor last asked for, and state. The
+// buffer is that size times the scale, in 120ths (wp_fractional_scale_v1's
+// unit) — 120 on a plain screen, 240 at 2x, 192 at 1.6x.
+var log_w = 0
+var log_h = 0
+var scale120 = 120
 var cur_w = 0
 var cur_h = 0
 var want_w = 0
@@ -105,8 +115,7 @@ let ANCHOR_RIGHT = 8
 effect fn connect(need: String) -> Result[Bool, String] = {
   if registry != 0 then {
     // Already connected (the surface was hidden): a new surface only.
-    surface = client.new_id()
-    client.send(compositor, 0, [surface], [])!
+    make_surface()!
     ok(true)
   } else match client.connect() {
     err(e) => {
@@ -122,12 +131,46 @@ effect fn connect(need: String) -> Result[Bool, String] = {
         eprintln("[snaidhm/wayland] the compositor lacks wl_compositor, wl_shm or ${need}")
         ok(false)
       } else {
-        surface = client.new_id()
-        client.send(compositor, 0, [surface], [])!
+        make_surface()!
         ok(true)
       }
     },
   }
+}
+
+/// A surface, with what tells it the output's scale: wp_fractional_scale_v1
+/// (any scale, drawn through a wp_viewport) where the compositor has it,
+/// else wl_surface's own preferred_buffer_scale (whole numbers).
+effect fn make_surface() -> Result[Unit, String] = {
+  surface = client.new_id()
+  client.send(compositor, 0, [surface], [])!
+  if fractional != 0 and viewporter != 0 then {
+    viewport = client.new_id()
+    client.send(viewporter, 1, [viewport, surface], [])!
+    surface_scale = client.new_id()
+    client.send(fractional, 1, [surface_scale, surface], [])!
+  } else ()
+  ok(())
+}
+
+/// The compositor's size for the surface, in surface units: the buffer
+/// follows it at the current scale.
+fn set_size(w: Int, h: Int) -> Unit = {
+  log_w = w
+  log_h = h
+  rescale()
+}
+
+/// The buffer size for the surface size at the current scale — rounded, as
+/// wp_fractional_scale_v1 says — noting a change.
+fn rescale() -> Unit = {
+  let w = int.max(1, (log_w * scale120 + 60) / 120)
+  let h = int.max(1, (log_h * scale120 + 60) / 120)
+  if w != cur_w or h != cur_h then {
+    cur_w = w
+    cur_h = h
+    was_resized = true
+  } else ()
 }
 
 /// Commit the surface with its role set and wait for the first configure,
@@ -193,6 +236,13 @@ effect fn resize_layer(width: Int, height: Int) -> Result[Unit, String] = {
   ok(())
 }
 
+/// Anchor the layer surface to other edges (0: none, centred), from its
+/// next commit — `resize_layer`'s. Anchored to all four edges at size 0, a
+/// layer surface's first configure says how much room the output has, less
+/// the bars' exclusive zones: a popup sizes itself from that, then lets go.
+effect fn anchor_layer(anchor: Int) -> Result[Unit, String] =
+  client.send(layer_surface, 1, [anchor], [])
+
 /// Take the surface off the screen — a notification popup with nothing to
 /// show — keeping the connection; `open_layer` (or `open`) shows a new one.
 effect fn hide() -> Result[Unit, String] = {
@@ -201,6 +251,8 @@ effect fn hide() -> Result[Unit, String] = {
   for b in retired { client.send(b, 0, [], [])! }
   if pool != 0 then { client.send(pool, 1, [], [])! } else ()
   if pool_fd >= 0 then { net.unix_close(pool_fd)! } else ()
+  if viewport != 0 then { client.send(viewport, 0, [], [])! } else ()
+  if surface_scale != 0 then { client.send(surface_scale, 0, [], [])! } else ()
   if layer_surface != 0 then { client.send(layer_surface, 7, [], [])! } else ()
   if toplevel != 0 then { client.send(toplevel, 0, [], [])! } else ()
   if xdg_surface != 0 then { client.send(xdg_surface, 0, [], [])! } else ()
@@ -218,10 +270,14 @@ effect fn hide() -> Result[Unit, String] = {
   toplevel = 0
   xdg_surface = 0
   surface = 0
+  viewport = 0
+  surface_scale = 0
   configured = false
   closed = false
   cur_w = 0
   cur_h = 0
+  log_w = 0
+  log_h = 0
   ok(())
 }
 
@@ -246,11 +302,22 @@ fn resized() -> Bool = {
   r
 }
 
-/// Width of the window in pixels, the width `present` takes.
+/// Width of the window in pixels, the width `present` takes: its size on the
+/// screen times `scale()`.
 fn width() -> Int = cur_w
 
 /// Height of the window in pixels.
 fn height() -> Int = cur_h
+
+/// The window's size in units — what the pointer's coordinates run over,
+/// and what a canvas made for it measures (`canvas.width`, `canvas.height`).
+fn extent() -> (Float, Float) = (int.to_float(log_w), int.to_float(log_h))
+
+/// Pixels per unit on the output the window is on (1.0 on a plain screen,
+/// 2.0 or 1.6 on a dense one). Draw on `canvas.scaled(width(), height(),
+/// scale())` in units and the UI keeps its size, sharp; `resized()` reports a
+/// change of scale too.
+fn scale() -> Float = int.to_float(scale120) / 120.0
 
 /// The XKB keymap the compositor gave for the keyboard (empty until then).
 fn keymap_text() -> String = bytes.to_string_lossy(keymap)
@@ -265,6 +332,10 @@ effect fn present(pixels: Bytes) -> Result[Unit, String] = {
   let size = cur_w * cur_h * 4
   net.shm_write(pool_fd, slot * size, pixels)!
   busy = list.set(busy, slot, true)
+  // The buffer covers the surface at the scale: through the viewport at any
+  // scale, or as a whole-number buffer scale.
+  if viewport != 0 then { client.send(viewport, 2, [log_w, log_h], [])! }
+  else { client.send(surface, 8, [scale120 / 120], [])! }
   client.send(surface, 1, [buffers[slot], 0, 0], [])!
   client.send(surface, 9, [0, 0, cur_w, cur_h], [])!
   client.send(surface, 6, [], [])!
@@ -312,13 +383,9 @@ effect fn event(e: wire.Event) -> Result[Unit, String] = {
     client.send(wm_base, 3, [wire.uint_at(e.args, 0)], [])!
   } else if e.obj == xdg_surface and e.op == 0 then {
     let serial = wire.uint_at(e.args, 0)
-    let w = if want_w > 0 then want_w else int.max(1, cur_w)
-    let h = if want_h > 0 then want_h else int.max(1, cur_h)
-    if w != cur_w or h != cur_h then {
-      cur_w = w
-      cur_h = h
-      was_resized = true
-    } else ()
+    let w = if want_w > 0 then want_w else int.max(1, log_w)
+    let h = if want_h > 0 then want_h else int.max(1, log_h)
+    set_size(w, h)
     client.send(xdg_surface, 4, [serial], [])!
     configured = true
   } else if e.obj == toplevel and e.op == 0 then {
@@ -334,15 +401,19 @@ effect fn event(e: wire.Event) -> Result[Unit, String] = {
     let serial = wire.uint_at(e.args, 0)
     let w = if wire.uint_at(e.args, 4) > 0 then wire.uint_at(e.args, 4) else int.max(1, want_w)
     let h = if wire.uint_at(e.args, 8) > 0 then wire.uint_at(e.args, 8) else int.max(1, want_h)
-    if w != cur_w or h != cur_h then {
-      cur_w = w
-      cur_h = h
-      was_resized = true
-    } else ()
+    set_size(w, h)
     client.send(layer_surface, 6, [serial], [])!
     configured = true
   } else if e.obj == layer_surface and e.op == 1 then {
     closed = true
+  } else if e.obj == surface_scale and e.op == 0 then {
+    // wp_fractional_scale_v1.preferred_scale: the scale times 120.
+    scale120 = int.max(120, wire.uint_at(e.args, 0))
+    rescale()
+  } else if e.obj == surface and e.op == 2 and viewport == 0 then {
+    // wl_surface.preferred_buffer_scale (v6): a whole-number scale.
+    scale120 = 120 * int.max(1, wire.int_at(e.args, 0))
+    rescale()
   } else if e.obj == seat and e.op == 0 then {
     // capabilities: devices come and go (a mouse unplugged, a virtual
     // keyboard added), and each change says what the seat has now — take
@@ -386,11 +457,13 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
   let iface = wire.string_at(args, 4)
   let version = wire.uint_at(args, iface.1)
   let want = match iface.0 {
-    "wl_compositor" => 4,
+    "wl_compositor" => 6,
     "wl_shm" => 1,
     "xdg_wm_base" => 1,
     "zwlr_layer_shell_v1" => 4,
     "wl_seat" => 5,
+    "wp_viewporter" => 1,
+    "wp_fractional_scale_manager_v1" => 1,
     _ => 0,
   }
   if want > 0 then {
@@ -402,6 +475,8 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
       "wl_shm" => { shm = id },
       "xdg_wm_base" => { wm_base = id },
       "zwlr_layer_shell_v1" => { layer_shell = id },
+      "wp_viewporter" => { viewporter = id },
+      "wp_fractional_scale_manager_v1" => { fractional = id },
       _ => { seat = id },
     }
   } else ()
@@ -460,7 +535,8 @@ effect fn keyboard_event(e: wire.Event) -> Result[Unit, String] = {
     // the keymap, never from the number: a named key, or a character.
     let code = wire.uint_at(e.args, 8)
     let plain = xkb.keysym(keys, code, 1)
-    let letter = string.len(plain) == 1 and string.to_upper(plain) != string.to_lower(plain)
+    let typed = string.from_codepoint(xkb.char_of(plain))
+    let letter = xkb.char_of(plain) > 0 and string.to_upper(typed) != string.to_lower(typed)
     let level = if shift != (caps and letter) then 2 else 1
     let sym = xkb.keysym(keys, code, level)
     let key = xkb.named(sym)
@@ -493,7 +569,9 @@ fn next_event() -> Int = {
   }
 }
 
-/// Pointer position of the current input, pixels.
+/// Pointer position of the current input, in units (pixels / `scale()`):
+/// the units a canvas made with `canvas.scaled(width(), height(), scale())`
+/// draws in.
 fn event_x() -> Float = current[1]
 
 fn event_y() -> Float = current[2]
