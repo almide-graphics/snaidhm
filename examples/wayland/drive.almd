@@ -67,10 +67,15 @@ effect fn main() -> Unit = {
         i = i + 1
       } else if a == "scroll" then {
         let steps = int.parse(args[i + 1]) ?? 1
-        // axis_source(wheel), then axis_discrete(time, vertical, distance, steps).
-        client.send(ptr, 5, [0], [])!
-        client.send(ptr, 7, [t, 0, wire.fixed(int.to_float(steps) * 15.0), wire.int32(steps)], [])!
-        client.send(ptr, 4, [], [])!
+        // One frame per notch, as a mouse wheel sends them: axis_source(wheel),
+        // axis_discrete(time, vertical, 15, ±1). (Several notches in one
+        // frame reached Hyprland's clients as a zero distance.)
+        let dir = if steps < 0 then 0 - 1 else 1
+        for _ in 0..<int.abs(steps) {
+          client.send(ptr, 5, [0], [])!
+          client.send(ptr, 7, [t, 0, wire.fixed(int.to_float(dir) * 15.0), wire.int32(dir)], [])!
+          client.send(ptr, 4, [], [])!
+        }
         i = i + 2
       } else if a == "sleep" then {
         let _ = client.roundtrip()!

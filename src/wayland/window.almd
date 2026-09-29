@@ -90,6 +90,12 @@ var retired: List[Int] = []
 // Input.
 var cursor_x = 0.0
 var cursor_y = 0.0
+// The wheel within the current pointer frame: the axis events' distances
+// and the discrete steps (notches) that came with them, per axis (x, y).
+var wheel_dist: List[Float] = [0.0, 0.0]
+var wheel_steps: List[Float] = [0.0, 0.0]
+// The seat's version as bound: pointer frames exist from 5.
+var seat_version = 0
 var inputs: List[List[Float]] = []
 var current: List[Float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 // The keyboard's keymap, as the compositor handed it over (XKB text), what
@@ -511,7 +517,10 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
       "zwlr_layer_shell_v1" => { layer_shell = id },
       "wp_viewporter" => { viewporter = id },
       "wp_fractional_scale_manager_v1" => { fractional = id },
-      _ => { seat = id },
+      _ => {
+        seat = id
+        seat_version = v
+      },
     }
   } else ()
   ok(())
@@ -528,6 +537,19 @@ fn button(code: Int) -> Int = match code {
   0x112 => 2,
   _ => 0 - 1,
 }
+
+/// The wheel input collected since the last frame, queued: its distance, or
+/// 15 per notch where it came without one.
+fn flush_wheel() -> Unit = {
+  let dx = if wheel_dist[1] != 0.0 then wheel_dist[1] else wheel_steps[1] * 15.0
+  let dy = if wheel_dist[0] != 0.0 then wheel_dist[0] else wheel_steps[0] * 15.0
+  if dx != 0.0 or dy != 0.0 then queue(WHEEL, cursor_x, cursor_y, dx, dy, 0) else ()
+  wheel_dist = [0.0, 0.0]
+  wheel_steps = [0.0, 0.0]
+}
+
+/// The wheel slot of Wayland axis `axis` (0 vertical, 1 horizontal).
+fn wheel_axis(axis: Int) -> Int = if axis == 0 then 0 else 1
 
 fn pointer_event(e: wire.Event) -> Unit = {
   if e.op == 0 then {
@@ -547,10 +569,19 @@ fn pointer_event(e: wire.Event) -> Unit = {
     if b >= 0 then queue(kind, cursor_x, cursor_y, 0.0, 0.0, b) else ()
   } else if e.op == 4 then {
     // axis: time, axis (0 vertical, 1 horizontal), value — positive scrolls
-    // down or right, as the DOM's deltas.
-    let v = wire.fixed_at(e.args, 8)
-    if wire.uint_at(e.args, 4) == 0 then queue(WHEEL, cursor_x, cursor_y, 0.0, v, 0)
-    else queue(WHEEL, cursor_x, cursor_y, v, 0.0, 0)
+    // down or right, as the DOM's deltas. Collected until the frame.
+    let i = wheel_axis(wire.uint_at(e.args, 4))
+    wheel_dist = list.set(wheel_dist, i, wheel_dist[i] + wire.fixed_at(e.args, 8))
+    // Before version 5 no frame comes: the axis event is the whole input.
+    if seat_version < 5 then flush_wheel() else ()
+  } else if e.op == 8 then {
+    // axis_discrete: axis, steps — a mouse wheel's notches, which some
+    // compositors send with a zero distance (a virtual pointer's wheel).
+    let i = wheel_axis(wire.uint_at(e.args, 0))
+    wheel_steps = list.set(wheel_steps, i, wheel_steps[i] + int.to_float(wire.int_at(e.args, 4)))
+  } else if e.op == 5 then {
+    // frame: the events since the last one are one input.
+    flush_wheel()
   } else ()
 }
 
