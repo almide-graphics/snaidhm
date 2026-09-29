@@ -159,10 +159,11 @@ effect fn open(title: String, width: Int, height: Int) -> Result[Bool, String] =
 /// along an axis anchored at both ends stretches across the output.
 /// `exclusive` pixels along the anchored edge are kept clear of windows (0:
 /// none, -1: not even other layers' zones). `keyboard` asks for key focus
-/// (0 none, 1 exclusive, 2 on demand). `namespace` names it to the
-/// compositor ("bar", "launcher").
+/// (0 none, 1 exclusive, 2 on demand). `margin` keeps it that many pixels
+/// off the edges it is anchored to. `namespace` names it to the compositor
+/// ("bar", "launcher").
 effect fn open_layer(namespace: String, layer: Int, anchor: Int, width: Int, height: Int,
-                     exclusive: Int, keyboard: Int) -> Result[Bool, String] = {
+                     exclusive: Int, keyboard: Int, margin: Int) -> Result[Bool, String] = {
   if connect("zwlr_layer_shell_v1")! then {
     want_w = width
     want_h = height
@@ -173,9 +174,23 @@ effect fn open_layer(namespace: String, layer: Int, anchor: Int, width: Int, hei
     client.send(layer_surface, 0, [width, height], [])!
     client.send(layer_surface, 1, [anchor], [])!
     client.send(layer_surface, 2, [wire.int32(exclusive)], [])!
+    client.send(layer_surface, 3, [margin, margin, margin, margin], [])!
     client.send(layer_surface, 4, [keyboard], [])!
     first_configure()
   } else ok(false)
+}
+
+/// Ask for a new size of the layer surface (a notification column that grew)
+/// and wait until the compositor agrees; `width()` / `height()` then say what
+/// it gave.
+effect fn resize_layer(width: Int, height: Int) -> Result[Unit, String] = {
+  want_w = width
+  want_h = height
+  client.send(layer_surface, 0, [width, height], [])!
+  configured = false
+  client.send(surface, 6, [], [])!
+  while not configured and not closed { handle(client.read(0 - 1)!)! }
+  ok(())
 }
 
 /// Take the surface off the screen — a notification popup with nothing to
