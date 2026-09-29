@@ -103,7 +103,12 @@ let ANCHOR_RIGHT = 8
 /// Connect and bind the globals; `false` (the reason on stderr) when there is
 /// no compositor or it lacks `need` ("xdg_wm_base" or "zwlr_layer_shell_v1").
 effect fn connect(need: String) -> Result[Bool, String] = {
-  match client.connect() {
+  if registry != 0 then {
+    // Already connected (the surface was hidden): a new surface only.
+    surface = client.new_id()
+    client.send(compositor, 0, [surface], [])!
+    ok(true)
+  } else match client.connect() {
     err(e) => {
       eprintln("[snaidhm/wayland] ${e}")
       ok(false)
@@ -172,6 +177,41 @@ effect fn open_layer(namespace: String, layer: Int, anchor: Int, width: Int, hei
     first_configure()
   } else ok(false)
 }
+
+/// Take the surface off the screen — a notification popup with nothing to
+/// show — keeping the connection; `open_layer` (or `open`) shows a new one.
+effect fn hide() -> Result[Unit, String] = {
+  let n = list.len(buffers)
+  for i in 0..<n { client.send(buffers[i], 0, [], [])! }
+  for b in retired { client.send(b, 0, [], [])! }
+  if pool != 0 then { client.send(pool, 1, [], [])! } else ()
+  if pool_fd >= 0 then { net.unix_close(pool_fd)! } else ()
+  if layer_surface != 0 then { client.send(layer_surface, 7, [], [])! } else ()
+  if toplevel != 0 then { client.send(toplevel, 0, [], [])! } else ()
+  if xdg_surface != 0 then { client.send(xdg_surface, 0, [], [])! } else ()
+  client.send(surface, 0, [], [])!
+  let none_ids: List[Int] = []
+  let none_busy: List[Bool] = []
+  buffers = none_ids
+  busy = none_busy
+  retired = none_ids
+  pool = 0
+  pool_fd = 0 - 1
+  pool_w = 0
+  pool_h = 0
+  layer_surface = 0
+  toplevel = 0
+  xdg_surface = 0
+  surface = 0
+  configured = false
+  closed = false
+  cur_w = 0
+  cur_h = 0
+  ok(())
+}
+
+/// Whether a surface is shown (between an `open` and a `hide`).
+fn shown() -> Bool = surface != 0
 
 /// Handle what the compositor sent within `timeout_ms` (0: without waiting).
 /// `false` once the window has been asked to close.
