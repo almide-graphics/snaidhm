@@ -99,16 +99,38 @@ var keys: xkb.Keymap = xkb.empty()
 var shift = false
 var caps = false
 
-// Layer-shell layers, bottom to top, and the edges a layer surface anchors
-// to (combine with int.bor).
-let LAYER_BACKGROUND = 0
-let LAYER_BOTTOM = 1
-let LAYER_TOP = 2
-let LAYER_OVERLAY = 3
-let ANCHOR_TOP = 1
-let ANCHOR_BOTTOM = 2
-let ANCHOR_LEFT = 4
-let ANCHOR_RIGHT = 8
+/// A layer-shell layer, bottom to top: under the windows (Background,
+/// Bottom) or over them (Top — a bar —, Overlay — a popup over everything).
+type Layer = | Background | Bottom | Top | Overlay
+
+/// An edge of the output a layer surface is anchored to.
+type Edge = | TopEdge | BottomEdge | LeftEdge | RightEdge
+
+/// Whether a layer surface takes the keyboard: never, exclusively while it is
+/// up (a launcher), or when clicked (a panel with a text field).
+type Keyboard = | NoKeyboard | ExclusiveKeyboard | OnDemandKeyboard
+
+fn layer_number(l: Layer) -> Int = match l {
+  Background => 0,
+  Bottom => 1,
+  Top => 2,
+  Overlay => 3,
+}
+
+/// The protocol's bit set of `edges`.
+fn anchor_bits(edges: List[Edge]) -> Int =
+  edges |> list.fold(0, (bits, e) => int.bor(bits, match e {
+    TopEdge => 1,
+    BottomEdge => 2,
+    LeftEdge => 4,
+    RightEdge => 8,
+  }))
+
+fn keyboard_number(k: Keyboard) -> Int = match k {
+  NoKeyboard => 0,
+  ExclusiveKeyboard => 1,
+  OnDemandKeyboard => 2,
+}
 
 /// Connect and bind the globals; `false` (the reason on stderr) when there is
 /// no compositor or it lacks `need` ("xdg_wm_base" or "zwlr_layer_shell_v1").
@@ -197,28 +219,40 @@ effect fn open(title: String, width: Int, height: Int) -> Result[Bool, String] =
   } else ok(false)
 }
 
-/// Open a layer surface — a bar, a panel, an on-screen display — on `layer`,
-/// anchored to the `anchor` edges and `width` x `height` pixels, where 0
-/// along an axis anchored at both ends stretches across the output.
-/// `exclusive` pixels along the anchored edge are kept clear of windows (0:
-/// none, -1: not even other layers' zones). `keyboard` asks for key focus
-/// (0 none, 1 exclusive, 2 on demand). `margin` keeps it that many pixels
-/// off the edges it is anchored to. `namespace` names it to the compositor
-/// ("bar", "launcher").
-effect fn open_layer(namespace: String, layer: Int, anchor: Int, width: Int, height: Int,
-                     exclusive: Int, keyboard: Int, margin: Int) -> Result[Bool, String] = {
+/// Open a layer surface — a bar, a panel, an on-screen display — named
+/// `namespace` to the compositor ("bar", "launcher"). Every other setting is
+/// named at the call and has a default:
+///
+///   window.open_layer("bar", layer: window.Top,
+///     anchor: [window.TopEdge, window.LeftEdge, window.RightEdge],
+///     height: 30, exclusive: 30)!
+///
+/// - `layer`: which layer it is on (default Top, over the windows).
+/// - `anchor`: the edges it is attached to (default none: centred).
+/// - `width` x `height`: its size; 0 along an axis anchored at both ends
+///   stretches it across the output.
+/// - `exclusive`: that many pixels along its anchored edge are kept clear of
+///   windows (0: none; -1: not even of other layers' zones).
+/// - `keyboard`: whether it takes the keyboard (default NoKeyboard).
+/// - `margin`: pixels between it and each edge it is anchored to.
+///
+/// `false` (the reason on stderr) when there is no compositor or it lacks
+/// wlr-layer-shell.
+effect fn open_layer(namespace: String, layer: Layer = Top, anchor: List[Edge] = [], width: Int = 0,
+                     height: Int = 0, exclusive: Int = 0, keyboard: Keyboard = NoKeyboard,
+                     margin: Int = 0) -> Result[Bool, String] = {
   if connect("zwlr_layer_shell_v1")! then {
     want_w = width
     want_h = height
     layer_surface = client.new_id()
     // get_layer_surface(id, surface, output = null: the compositor's choice,
     // layer, namespace)
-    client.send(layer_shell, 0, [layer_surface, surface, 0, layer] + wire.string(namespace), [])!
+    client.send(layer_shell, 0, [layer_surface, surface, 0, layer_number(layer)] + wire.string(namespace), [])!
     client.send(layer_surface, 0, [width, height], [])!
-    client.send(layer_surface, 1, [anchor], [])!
+    client.send(layer_surface, 1, [anchor_bits(anchor)], [])!
     client.send(layer_surface, 2, [wire.int32(exclusive)], [])!
     client.send(layer_surface, 3, [margin, margin, margin, margin], [])!
-    client.send(layer_surface, 4, [keyboard], [])!
+    client.send(layer_surface, 4, [keyboard_number(keyboard)], [])!
     first_configure()
   } else ok(false)
 }
@@ -236,12 +270,12 @@ effect fn resize_layer(width: Int, height: Int) -> Result[Unit, String] = {
   ok(())
 }
 
-/// Anchor the layer surface to other edges (0: none, centred), from its
-/// next commit — `resize_layer`'s. Anchored to all four edges at size 0, a
-/// layer surface's first configure says how much room the output has, less
-/// the bars' exclusive zones: a popup sizes itself from that, then lets go.
-effect fn anchor_layer(anchor: Int) -> Result[Unit, String] =
-  client.send(layer_surface, 1, [anchor], [])
+/// Anchor the layer surface to other edges (none: centred), from its next
+/// commit — `resize_layer`'s. Anchored to all four edges at size 0, a layer
+/// surface's first configure says how much room the output has, less the
+/// bars' exclusive zones: a popup sizes itself from that, then lets go.
+effect fn anchor_layer(anchor: List[Edge]) -> Result[Unit, String] =
+  client.send(layer_surface, 1, [anchor_bits(anchor)], [])
 
 /// Take the surface off the screen — a notification popup with nothing to
 /// show — keeping the connection; `open_layer` (or `open`) shows a new one.
