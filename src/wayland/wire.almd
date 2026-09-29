@@ -1,0 +1,96 @@
+// snaidhm wayland wire — the Wayland wire protocol, in Almide
+//
+// A message is 32-bit words in host byte order (little-endian on every
+// platform Wayland runs on): the object id, then the size in bytes (high 16
+// bits) with the opcode (low 16), then the arguments. Every argument fills
+// whole words — ints, uints, 24.8 fixed-point numbers and object ids one
+// each; a string or an array its byte length, then its bytes padded to a
+// word (a string's with its NUL). File descriptors travel beside the bytes,
+// in the socket's ancillary data, in the order their messages use them.
+//
+// Requests are built as lists of words and events are read back from bytes;
+// nothing here touches the socket (client.almd does).
+
+/// An event: the object it is for, its opcode, and its argument bytes.
+type Event = { obj: Int, op: Int, args: Bytes }
+
+// ── Building requests ──
+
+/// The words of a string argument.
+fn string(s: String) -> List[Int] = {
+  let b = string.to_bytes(s)
+  let len = list.len(b) + 1
+  var words = [len]
+  let n = (len + 3) / 4
+  for w in 0..<n {
+    // Little-endian: the first byte is the lowest.
+    var v = 0
+    for k in 0..<4 {
+      let i = w * 4 + 3 - k
+      let byte = if i < list.len(b) then b[i] else 0
+      v = v * 256 + byte
+    }
+    list.push(words, v)
+  }
+  words
+}
+
+/// The word of a 24.8 fixed-point argument.
+fn fixed(x: Float) -> Int = int.band(float.to_int(float.round(x * 256.0)), 0xFFFFFFFF)
+
+/// The word of a signed int argument.
+fn int32(v: Int) -> Int = int.band(v, 0xFFFFFFFF)
+
+/// Request `op` of object `obj` with argument words `args`, as bytes.
+fn request(obj: Int, op: Int, args: List[Int]) -> Bytes = {
+  let n = list.len(args)
+  var b = bytes.new(8 + n * 4)
+  bytes.set_u32_le(b, 0, obj)
+  bytes.set_u32_le(b, 4, (8 + n * 4) * 65536 + op)
+  for i in 0..<n { bytes.set_u32_le(b, 8 + i * 4, int.band(args[i], 0xFFFFFFFF)) }
+  b
+}
+
+// ── Reading events ──
+
+/// The complete events at the front of `buf`, and the bytes after them (the
+/// start of one not fully arrived yet).
+fn split(buf: Bytes) -> (List[Event], Bytes) = {
+  var events: List[Event] = []
+  var at = 0
+  let total = bytes.len(buf)
+  var more = true
+  while more and at + 8 <= total {
+    let head = bytes.read_u32_le(buf, at + 4)
+    let size = head / 65536
+    if size < 8 or at + size > total then { more = false }
+    else {
+      list.push(events, { obj: bytes.read_u32_le(buf, at), op: int.band(head, 0xFFFF),
+                          args: bytes.slice(buf, at + 8, at + size) })
+      at = at + size
+    }
+  }
+  (events, bytes.slice(buf, at, total))
+}
+
+/// The uint argument at byte `pos` of `args`.
+fn uint_at(args: Bytes, pos: Int) -> Int = bytes.read_u32_le(args, pos)
+
+/// The int argument at byte `pos`.
+fn int_at(args: Bytes, pos: Int) -> Int = bytes.read_i32_le(args, pos)
+
+/// The fixed-point argument at byte `pos`.
+fn fixed_at(args: Bytes, pos: Int) -> Float = int.to_float(bytes.read_i32_le(args, pos)) / 256.0
+
+/// The string argument at byte `pos`, and the position after it.
+fn string_at(args: Bytes, pos: Int) -> (String, Int) = {
+  let len = bytes.read_u32_le(args, pos)
+  let text = if len == 0 then "" else bytes.to_string_lossy(bytes.slice(args, pos + 4, pos + 4 + len - 1))
+  (text, pos + 4 + (len + 3) / 4 * 4)
+}
+
+/// The array argument at byte `pos`, and the position after it.
+fn array_at(args: Bytes, pos: Int) -> (Bytes, Int) = {
+  let len = bytes.read_u32_le(args, pos)
+  (bytes.slice(args, pos + 4, pos + 4 + len), pos + 4 + (len + 3) / 4 * 4)
+}

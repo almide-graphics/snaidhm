@@ -214,6 +214,24 @@ fn cmap4(data: Bytes, at: Int, code: Int) -> Int = {
   }
 }
 
+/// The font drawing code point `code` — the first of `fonts` with a glyph
+/// for it, else the first — and the glyph: (font index, glyph).
+fn pick(fonts: List[Font], code: Int) -> (Int, Int) = {
+  var found = 0 - 1
+  var gid = 0
+  let n = list.len(fonts)
+  for i in 0..<n {
+    if found < 0 then {
+      let g = glyph_id(fonts[i], code)
+      if g != 0 then {
+        found = i
+        gid = g
+      } else ()
+    } else ()
+  }
+  if found < 0 then (0, 0) else (found, gid)
+}
+
 // ── Metrics ──
 
 /// Advance width of glyph `gid`, font units.

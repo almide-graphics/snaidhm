@@ -1,0 +1,139 @@
+// snaidhm wayland client — the connection to the compositor
+//
+// One Unix socket at $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY, requests written to
+// it as they are made, events read from it and split into messages
+// (wire.almd). Descriptors that arrive with events queue in arrival order;
+// an event that carries one (wl_keyboard.keymap) takes the next.
+//
+// The whole client is Almide over `net`'s Unix-socket primitives: no libwayland.
+
+import env
+import net
+import self.wayland.wire as wire
+
+/// The wl_display object every client starts with.
+let DISPLAY = 1
+
+var sock = 0 - 1
+var pending: Bytes = bytes.new(0)
+var fds: List[Int] = []
+// Object ids this client allocates, from 2 (1 is the display); the server's
+// start at 0xFF000000.
+var next_id = 2
+// WAYLAND_DEBUG=1 traces every message on stderr, as libwayland does.
+var debug = false
+
+/// Connect to the compositor named by $WAYLAND_DISPLAY (default wayland-0), a
+/// socket in $XDG_RUNTIME_DIR unless the name is an absolute path.
+effect fn connect() -> Result[Unit, String] = {
+  let name = env.get("WAYLAND_DISPLAY") ?? "wayland-0"
+  let path = if string.starts_with(name, "/") then name
+    else match env.get("XDG_RUNTIME_DIR") {
+      some(dir) => "${dir}/${name}",
+      none => "",
+    }
+  debug = (env.get("WAYLAND_DEBUG") ?? "") == "1"
+  if path == "" then err("XDG_RUNTIME_DIR is not set; no Wayland session to connect to")
+  else {
+    sock = net.unix_connect(path)!
+    ok(())
+  }
+}
+
+/// A fresh object id for a request that creates an object.
+fn new_id() -> Int = {
+  let id = next_id
+  next_id = next_id + 1
+  id
+}
+
+/// Send request `op` of object `obj`, its argument words `args`, and the
+/// descriptors `with` for its fd arguments, in order.
+effect fn send(obj: Int, op: Int, args: List[Int], with: List[Int]) -> Result[Unit, String] = {
+  if debug then eprintln("[wayland] -> ${int.to_string(obj)}.${int.to_string(op)} ${words(args)}${if list.len(with) > 0 then " fds ${int.to_string(list.len(with))}" else ""}") else ()
+  net.unix_send(sock, wire.request(obj, op, args), with)
+}
+
+fn words(args: List[Int]) -> String = args |> list.map((w) => int.to_string(w)) |> list.join(" ")
+
+/// Events that arrive within `timeout_ms` (0: those already there; < 0: wait
+/// for at least one), in order. A wl_display.error ends the session.
+effect fn read(timeout_ms: Int) -> Result[List[wire.Event], String] = {
+  var events: List[wire.Event] = []
+  var wait = timeout_ms
+  var more = true
+  var gone = false
+  while more {
+    if net.unix_poll(sock, wait)! then {
+      let got = net.unix_recv(sock, 65536)!
+      if bytes.len(got) == 0 then {
+        gone = true
+        more = false
+      } else {
+        fds = fds + net.unix_take_fds(sock)
+        let split = wire.split(bytes.concat(pending, got))
+        pending = split.1
+        events = events + split.0
+        if debug then {
+          for e in split.0 { eprintln("[wayland] <- ${int.to_string(e.obj)}.${int.to_string(e.op)} (${int.to_string(bytes.len(e.args))} bytes)") }
+        } else ()
+        // Take what else is already there, without waiting again.
+        wait = 0
+      }
+    } else {
+      more = false
+    }
+  }
+  // An error event, if the compositor sent one before closing, says why.
+  let checked = check(events)
+  if gone then {
+    match checked {
+      err(e) => err(e),
+      ok(_) => err("the compositor closed the connection"),
+    }
+  } else checked
+}
+
+/// `events`, or the error the compositor reported in one of them.
+fn check(events: List[wire.Event]) -> Result[List[wire.Event], String] = {
+  var failure = ""
+  let n = list.len(events)
+  for i in 0..<n {
+    let e = events[i]
+    if e.obj == DISPLAY and e.op == 0 and failure == "" then {
+      let code = wire.uint_at(e.args, 4)
+      let msg = wire.string_at(e.args, 8).0
+      failure = "Wayland error on object ${int.to_string(wire.uint_at(e.args, 0))} (code ${int.to_string(code)}): ${msg}"
+    } else ()
+  }
+  if failure == "" then ok(events) else err(failure)
+}
+
+/// The next descriptor that arrived with the events, for the event being
+/// handled that carries one; -1 when none is queued.
+fn take_fd() -> Int = {
+  if list.len(fds) == 0 then 0 - 1
+  else {
+    let fd = fds[0]
+    fds = list.drop(fds, 1)
+    fd
+  }
+}
+
+/// Every event up to the point the compositor has handled all requests sent
+/// so far (a wl_display.sync round trip).
+effect fn roundtrip() -> Result[List[wire.Event], String] = {
+  let callback = new_id()
+  send(DISPLAY, 0, [callback], [])!
+  var events: List[wire.Event] = []
+  var done = false
+  while not done {
+    let got = read(0 - 1)!
+    let n = list.len(got)
+    for i in 0..<n {
+      if got[i].obj == callback and got[i].op == 0 then { done = true }
+      else { list.push(events, got[i]) }
+    }
+  }
+  ok(events)
+}
