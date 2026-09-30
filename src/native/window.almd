@@ -151,6 +151,14 @@ fn set_ime(allowed: Bool) -> Unit = _
 @extern(rust, "crate::window", "keep_open")
 fn keep_open() -> Unit = _
 
+/// Minimize the window to the Dock.
+@extern(rust, "crate::window", "minimize")
+fn minimize() -> Unit = _
+
+/// Make the window full screen (a space of its own on macOS), or back.
+@extern(rust, "crate::window", "toggle_fullscreen")
+fn toggle_fullscreen() -> Unit = _
+
 /// Fill what a frame doesn't cover with this colour (0..1 each): the edge a
 /// window being resized uncovers before the program draws for its new size.
 /// macOS only.

@@ -54,7 +54,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
 /// How long `open` waits for the platform to deliver the event that allows a
 /// window to be created. Normally one pump; the bound only turns a platform
@@ -528,6 +528,25 @@ mod watch {
 /// `false`): after asking whether to close and hearing no. The window stays.
 pub fn keep_open() {
     with_host((), |host| host.app.close_requested = false)
+}
+
+/// Put the window in the Dock (minimize it).
+pub fn minimize() {
+    with_host((), |host| {
+        if let Some(w) = host.app.window.as_ref() {
+            w.set_minimized(true);
+        }
+    });
+}
+
+/// Fill the screen with the window, or give it back its frame when it does:
+/// on macOS a full-screen space of its own, as the green button makes.
+pub fn toggle_fullscreen() {
+    with_host((), |host| {
+        if let Some(w) = host.app.window.as_ref() {
+            w.set_fullscreen(if w.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
+        }
+    });
 }
 
 /// Fill what a frame doesn't cover with this colour (0..1 each) — the edge a
