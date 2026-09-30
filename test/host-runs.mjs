@@ -58,7 +58,7 @@ const shader = must("create_shader", () => I.create_shader(dev, 0n, 0n));
 const buffer = must("create_buffer", () => I.create_buffer(dev, 256n, 64n));
 const texture = must("create_texture", () => I.create_texture(dev, 8n, 8n));
 const sampler = must("create_sampler", () => I.create_sampler(dev, 1n, 1n));
-const pipeline = must("create_mesh_pipeline", () => I.create_mesh_pipeline(dev, shader, 0n, 1n));
+const pipeline = must("create_mesh_pipeline", () => I.create_mesh_pipeline(dev, shader, 0n, 1n, 0n, 1n));
 I.begin_bindings();
 I.add_buffer_binding(buffer);
 const bindGroup = must("create_bound_group", () => I.create_bound_group(dev, pipeline, 0n));
@@ -79,7 +79,7 @@ const ARGS = {
   create_compute_pipeline: [dev, shader, 0n],
   create_text_pipeline: [dev, shader, 0n],
   create_image_pipeline: [dev, shader, 0n],
-  create_mesh_pipeline: [dev, shader, 0n, 1n],
+  create_mesh_pipeline: [dev, shader, 0n, 1n, 0n, 1n],
   create_bound_group: [dev, pipeline, 0n],
   set_bind_group: [pass, 0n, bindGroup],
   begin_encoder: [dev],
