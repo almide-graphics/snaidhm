@@ -80,6 +80,19 @@ let KEY_UP = 38
 let KEY_RIGHT = 39
 let KEY_DOWN = 40
 let KEY_DELETE = 46
+let KEY_PAGE_UP = 33
+let KEY_PAGE_DOWN = 34
+let KEY_END = 35
+let KEY_HOME = 36
+let KEY_INSERT = 45
+/// F1 .. F12 are KEY_F1 .. KEY_F1 + 11.
+let KEY_F1 = 112
+
+/// Modifier bits of `event_mods`.
+let MOD_SHIFT = 1
+let MOD_CTRL = 2
+let MOD_ALT = 4
+let MOD_SUPER = 8
 
 /// The kind of the next queued input (NONE once the queue is empty); the
 /// `event_*` accessors then describe it. Inputs queue across `pump` calls.
@@ -108,6 +121,12 @@ fn event_code() -> Int = _
 /// End of the marked part of the current COMPOSE, characters.
 @extern(rust, "crate::window", "event_end")
 fn event_end() -> Int = _
+
+/// Modifiers held when the current input happened (MOD_* bits). With Ctrl,
+/// Alt or Super held, a TEXT input carries the key's own character — `c` for
+/// Ctrl+C — rather than what the platform would type.
+@extern(rust, "crate::window", "event_mods")
+fn event_mods() -> Int = _
 
 /// Text of the current COMPOSE.
 @extern(rust, "crate::window", "event_text")
