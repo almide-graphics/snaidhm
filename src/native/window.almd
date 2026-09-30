@@ -145,6 +145,12 @@ fn event_text() -> String = _
 @extern(rust, "crate::window", "set_ime")
 fn set_ime(allowed: Bool) -> Unit = _
 
+/// Take back a close the user asked for — the window's close button — after
+/// `pump` or a wait returned false for it: for a program that asks first
+/// ("a program is still running; close?") and heard no.
+@extern(rust, "crate::window", "keep_open")
+fn keep_open() -> Unit = _
+
 /// Fill what a frame doesn't cover with this colour (0..1 each): the edge a
 /// window being resized uncovers before the program draws for its new size.
 /// macOS only.
