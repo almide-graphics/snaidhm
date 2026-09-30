@@ -1,0 +1,138 @@
+// Coarse raster tests: the per-tile commands must reproduce, at every pixel
+// and for every path, exactly the coverage the fine pass would compute from
+// the path's whole line list. That brute force is the definition of correct;
+// the coarse raster only decides which part of it each tile carries.
+
+import self.coarse as coarse
+
+let TILE = 16
+
+// raster.wgsl `seg_area`, with the line in pixel-local coordinates (the pixel
+// is [0,1] x [0,1]).
+fn seg_area(x0: Float, y0: Float, x1: Float, y1: Float) -> Float = {
+  let dx = x1 - x0
+  let dyl = y1 - y0
+  let ya = float.clamp(y0, 0.0, 1.0)
+  let yb = float.clamp(y0 + dyl, 0.0, 1.0)
+  let dy = ya - yb
+  if float.abs(dy) < 0.000000001 then 0.0
+  else {
+    let t0 = (ya - y0) / dyl
+    let t1 = (yb - y0) / dyl
+    let xa = x0 + t0 * dx
+    let xb = x0 + t1 * dx
+    let xmin = float.min(float.min(xa, xb), 1.0) - 0.000001
+    let xmax = float.max(xa, xb)
+    let b = float.min(xmax, 1.0)
+    let c = float.max(b, 0.0)
+    let d = float.max(xmin, 0.0)
+    let a = (b + 0.5 * (d * d - c * c) - xmin) / (xmax - xmin)
+    (1.0 - a) * dy
+  }
+}
+
+fn area_at(l: coarse.Line, px: Int, py: Int) -> Float = {
+  let fx = int.to_float(px)
+  let fy = int.to_float(py)
+  seg_area(l.x0 - fx, l.y0 - fy, l.x1 - fx, l.y1 - fy)
+}
+
+// The fine pass's value for one path at one pixel, from the coarse commands.
+fn coarse_area(c: coarse.Coarse, tiles_x: Int, path: Int, px: Int, py: Int) -> Float = {
+  let tile = (py / TILE) * tiles_x + px / TILE
+  let first = c.index[tile * 2]
+  let count = c.index[tile * 2 + 1]
+  0..<count |> list.fold(0.0, (acc, i) => {
+    let cb = (first + i) * 4
+    if c.cmds[cb] != path then acc
+    else {
+      let ids = 0..<c.cmds[cb + 3] |> list.map((k) => c.line_ids[c.cmds[cb + 2] + k])
+      acc + int.to_float(c.cmds[cb + 1])
+        + (ids |> list.fold(0.0, (s, id) => s + area_at(c.lines[id], px, py)))
+    }
+  })
+}
+
+// The same value from every line of the path — no tiles at all.
+fn brute_area(lines: List[coarse.PathLine], path: Int, px: Int, py: Int) -> Float =
+  lines
+    |> list.filter((pl) => pl.path == path)
+    |> list.fold(0.0, (acc, pl) => acc + area_at({ x0: pl.x0, y0: pl.y0, x1: pl.x1, y1: pl.y1 }, px, py))
+
+// The largest disagreement over every pixel and path of a `w` x `h` view.
+fn worst(lines: List[coarse.PathLine], num_paths: Int, w: Int, h: Int) -> Float = {
+  let tiles_x = w / TILE
+  let c = coarse.build(lines, TILE, tiles_x, h / TILE, num_paths)
+  var worst = 0.0
+  for py in 0..<h {
+    for px in 0..<w {
+      for path in 0..<num_paths {
+        let diff = float.abs(coarse_area(c, tiles_x, path, px, py) - brute_area(lines, path, px, py))
+        worst = float.max(worst, diff)
+      }
+    }
+  }
+  worst
+}
+
+// A closed polygon through `pts` (x, y pairs), as path `path`.
+fn polygon(path: Int, pts: List[Float]) -> List[coarse.PathLine] = {
+  let n = list.len(pts) / 2
+  0..<n |> list.map((i) => {
+    let j = (i + 1) % n
+    { path: path, x0: pts[i * 2], y0: pts[i * 2 + 1], x1: pts[j * 2], y1: pts[j * 2 + 1] }
+  })
+}
+
+fn circle(path: Int, cx: Float, cy: Float, r: Float, n: Int) -> List[coarse.PathLine] =
+  polygon(path, 0..<n |> list.flat_map((i) => {
+    let t = 2.0 * math.pi() * int.to_float(i) / int.to_float(n)
+    [cx + r * math.cos(t), cy + r * math.sin(t)]
+  }))
+
+let TOL = 0.0005
+
+test "a sloped quad inside one view" {
+  let lines = polygon(0, [5.3, 4.1, 58.7, 9.9, 51.2, 60.4, 3.3, 47.8])
+  assert(worst(lines, 1, 64, 64) < TOL)
+}
+
+test "a rectangle on the tile grid, vertices on tile corners" {
+  let lines = polygon(0, [16.0, 16.0, 48.0, 16.0, 48.0, 48.0, 16.0, 48.0])
+  assert(worst(lines, 1, 64, 64) < TOL)
+}
+
+test "a triangle whose vertices sit on tile edges" {
+  let lines = polygon(0, [32.0, 3.0, 61.0, 32.0, 32.0, 60.5])
+  assert(worst(lines, 1, 64, 64) < TOL)
+}
+
+test "a row of circles, the shape that overflowed fixed tile slots" {
+  let lines = circle(0, 14.0, 32.0, 11.0, 40) + circle(1, 38.0, 32.0, 11.0, 40)
+    + circle(2, 62.0, 32.0, 11.0, 40) + circle(3, 86.0, 30.5, 9.0, 40)
+  assert(worst(lines, 4, 96, 64) < TOL)
+}
+
+test "a shape running off every side of the view" {
+  let lines = polygon(0, [-20.0, 10.0, 40.0, -15.0, 90.0, 30.0, 30.0, 85.0])
+  assert(worst(lines, 1, 64, 64) < TOL)
+}
+
+test "overlapping paths keep separate commands" {
+  let lines = polygon(0, [2.0, 2.0, 60.0, 2.0, 60.0, 60.0, 2.0, 60.0])
+    + circle(1, 32.0, 32.0, 17.0, 32)
+  assert(worst(lines, 2, 64, 64) < TOL)
+}
+
+test "a ring: a hole wound the other way" {
+  let outer = circle(0, 32.0, 32.0, 26.0, 48)
+  let inner = polygon(0, [20.0, 20.0, 20.0, 44.0, 44.0, 44.0, 44.0, 20.0])
+  assert(worst(outer + inner, 1, 64, 64) < TOL)
+}
+
+test "a wide row packs without a per-tile limit" {
+  // Twelve paths in one tile row: fixed slots of 16 lines / 8 commands per
+  // tile dropped most of this; packed lists keep all of it.
+  let lines = 0..<12 |> list.flat_map((i) => circle(i, 8.0 + int.to_float(i) * 10.0, 8.0, 6.0, 24))
+  assert(worst(lines, 12, 128, 16) < TOL)
+}
