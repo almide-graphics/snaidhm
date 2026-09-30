@@ -49,6 +49,9 @@ export function createGpuHost(canvas) {
     create_buffer(deviceId, size, usage) {
       return B(h(g(deviceId).createBuffer({ size: N(size), usage: N(usage) })));
     },
+    create_stream_buffer(deviceId, size, usage) {
+      return B(h(g(deviceId).createBuffer({ size: N(size), usage: N(usage) })));
+    },
     destroy_buffer(_deviceId, bufferId) {
       const b = g(bufferId);
       if (b && typeof b.destroy === "function" && b instanceof GPUBuffer) {
@@ -168,6 +171,18 @@ export function createGpuHost(canvas) {
           { texture: g(texId), origin: [N(x), N(y)] },
           new Uint8Array(px.buffer, 0, width * height * 4),
           { bytesPerRow: width * 4 }, [width, height]);
+      }
+      _dataChunks = []; _dataIsF32 = [];
+    },
+    flush_to_buffer_rect(deviceId, bufferId, stride, x, y, w, rows) {
+      const s = N(stride), x0 = N(x), y0 = N(y), width = N(w), height = N(rows);
+      const words = new Uint32Array(_dataChunks.length);
+      for (let i = 0; i < _dataChunks.length; i++) words[i] = _dataChunks[i];
+      if (width > 0 && height > 0 && x0 + width <= s && words.length >= width * height) {
+        const queue = g(deviceId).queue, buf = g(bufferId);
+        for (let r = 0; r < height; r++) {
+          queue.writeBuffer(buf, ((y0 + r) * s + x0) * 4, words, r * width, width);
+        }
       }
       _dataChunks = []; _dataIsF32 = [];
     },

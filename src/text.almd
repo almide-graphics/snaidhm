@@ -1,7 +1,8 @@
 // snaidhm text layer — UI text drawn from a glyph cache
 //
 // A glyph is rasterized once per pixel size (glyph.almd), packed into an
-// atlas texture, and drawn after that as a quad on whole pixels, sampled
+// atlas (a texture, or a buffer: `new_buffer_layer`), and drawn after that as
+// a quad on whole pixels, sampled
 // nearest: what reaches the screen is exactly the rasterized coverage. Text
 // that scrolls only moves its quads; nothing is rasterized again.
 //
@@ -36,7 +37,10 @@ let VERTEX_FLOATS = 8
 
 type TextLayer = {
   fonts: List[sfnt.Font],
+  // The atlas: a texture, or — for a layer from `new_buffer_layer` — a
+  // buffer, the other one 0.
   texture: Int,
+  buffer: Int,
   pipeline: Int,
   bind_group: Int,
   // Glyph cache: `key(font, glyph, pixel size)` -> slot; slot `s` is
@@ -70,11 +74,46 @@ fn new_layer(device: Int, fonts: List[sfnt.Font]) -> TextLayer = {
   let rects: List[Int] = []
   let verts: List[Float] = []
   {
-    fonts: fonts, texture: texture, pipeline: pipeline, bind_group: bind_group,
+    fonts: fonts, texture: texture, buffer: 0, pipeline: pipeline, bind_group: bind_group,
     keys: keys, rects: rects, pack_x: PAD, pack_y: PAD, row_h: 0,
     verts: verts, vtx: 0, capacity: 0, count: 0,
   }
 }
+
+/// `new_layer`, with the atlas in a storage buffer — one byte of coverage per
+/// pixel — instead of a texture; drawn and used the same way. Natively this
+/// is the lighter one: on Metal the first texture write from the CPU makes
+/// the driver set up ~50 MB of GPU memory, and a buffer write does not.
+/// Its shader is `native/wgsl/text_buffer.wgsl`, shader index 4: built in
+/// natively; a browser host registers it after `image.wgsl`.
+fn new_buffer_layer(device: Int, fonts: List[sfnt.Font]) -> TextLayer = {
+  let buffer = gpu.create_buffer(device, ATLAS * ATLAS, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  let shader = gpu.create_shader(device, 4, 0)
+  let pipeline = gpu.create_text_pipeline(device, shader, gpu.get_preferred_format())
+  gpu.begin_bindings()
+  gpu.add_buffer_binding(buffer)
+  let bind_group = gpu.create_bound_group(device, pipeline, 0)
+  let keys: Map[Int, Int] = map.new()
+  let rects: List[Int] = []
+  let verts: List[Float] = []
+  {
+    fonts: fonts, texture: 0, buffer: buffer, pipeline: pipeline, bind_group: bind_group,
+    keys: keys, rects: rects, pack_x: WORD, pack_y: PAD, row_h: 0,
+    verts: verts, vtx: 0, capacity: 0, count: 0,
+  }
+}
+
+/// Pixels per word of a buffer atlas: a glyph there starts on a word and
+/// takes whole words, so each of its rows is written without touching a
+/// neighbour's.
+let WORD = 4
+
+/// `n` rounded up to whole words.
+fn words_of(n: Int) -> Int = (n + WORD - 1) / WORD
+
+/// The value of a unit in byte `k` of a word.
+fn byte_place(k: Int) -> Int =
+  if k == 0 then 1 else if k == 1 then 256 else if k == 2 then 65536 else 16777216
 
 /// The layer with no text queued; the cache is kept.
 fn clear(layer: TextLayer) -> TextLayer = {
@@ -147,8 +186,12 @@ fn place(device: Int, layer: TextLayer, k: Int, bm: glyph.Bitmap) -> TextLayer =
   // Next shelf when this row is out of width; start over when the atlas
   // is out of rows. A frame needing more than one atlas of glyphs would
   // overwrite its own earlier glyphs — at UI sizes that is thousands.
-  let wrap = layer.pack_x + bm.w + PAD > ATLAS
-  let x = if wrap then PAD else layer.pack_x
+  let buffered = layer.buffer != 0
+  // The width taken in the atlas, and where the row's next glyph may start.
+  let taken = if buffered then words_of(bm.w) * WORD else bm.w
+  let start = if buffered then words_of(layer.pack_x) * WORD else layer.pack_x
+  let wrap = start + taken + PAD > ATLAS
+  let x = if wrap then (if buffered then WORD else PAD) else start
   let y0 = if wrap then layer.pack_y + layer.row_h + PAD else layer.pack_y
   let full = y0 + bm.h + PAD > ATLAS
   let y = if full then PAD else y0
@@ -156,7 +199,24 @@ fn place(device: Int, layer: TextLayer, k: Int, bm: glyph.Bitmap) -> TextLayer =
   let no_rects: List[Int] = []
   let base = if full then { ...layer, keys: no_keys, rects: no_rects } else layer
   let row_h = if wrap or full then bm.h else int.max(layer.row_h, bm.h)
-  if bm.w > 0 and bm.h > 0 then {
+  if bm.w > 0 and bm.h > 0 and buffered then {
+    gpu.begin_data()
+    let words = taken / WORD
+    for row in 0..<bm.h {
+      let at = row * bm.w
+      for w in 0..<words {
+        // Four pixels to a word, the leftmost in the low byte; past the
+        // glyph's width, nothing.
+        var packed = 0
+        for k in 0..<WORD {
+          let px = w * WORD + k
+          if px < bm.w then packed = packed + bm.coverage[at + px] * byte_place(k) else ()
+        }
+        gpu.push_u32(packed)
+      }
+    }
+    gpu.flush_to_buffer_rect(device, layer.buffer, ATLAS / WORD, x / WORD, y, words, bm.h)
+  } else if bm.w > 0 and bm.h > 0 then {
     gpu.begin_data()
     let n = bm.w * bm.h
     for i in 0..<n {
@@ -170,7 +230,7 @@ fn place(device: Int, layer: TextLayer, k: Int, bm: glyph.Bitmap) -> TextLayer =
     ...base,
     keys: map.set(base.keys, k, slot),
     rects: base.rects + [x, y, bm.w, bm.h, bm.left, bm.top],
-    pack_x: x + bm.w + PAD, pack_y: y, row_h: row_h,
+    pack_x: x + taken + PAD, pack_y: y, row_h: row_h,
   }
 }
 

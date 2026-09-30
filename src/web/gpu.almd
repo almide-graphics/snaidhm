@@ -44,6 +44,13 @@ fn create_shader(device: Int, code_ptr: Int, code_len: Int) -> Int = _
 @extern(rust, "crate::gpu", "create_buffer")
 fn create_buffer(device: Int, size: Int, usage: Int) -> Int = _
 
+/// A buffer rewritten every frame — a UI's vertices — written with
+/// `flush_to_buffer` and bound like any other. Natively it is a ring of
+/// copies written in place, with no staging; in the browser, a buffer.
+@extern(wasm, "gpu", "create_stream_buffer")
+@extern(rust, "crate::gpu", "create_stream_buffer")
+fn create_stream_buffer(device: Int, size: Int, usage: Int) -> Int = _
+
 /// Free `buffer` now rather than when the program ends — for a buffer that
 /// was outgrown and replaced. Work already submitted with it still runs.
 @extern(wasm, "gpu", "destroy_buffer")
@@ -145,6 +152,15 @@ fn flush_to_buffer(device: Int, buffer: Int) -> Unit = _
 @extern(wasm, "gpu", "flush_to_texture")
 @extern(rust, "crate::gpu", "flush_to_texture")
 fn flush_to_texture(device: Int, texture: Int, x: Int, y: Int, w: Int, h: Int) -> Unit = _
+
+/// Write the staged values into `buffer` seen as rows of `stride` 32-bit
+/// words: `h` rows of `w` values, one `push_u32` each, row by row, the first
+/// at word `x` of row `y`. For an image kept in a buffer rather than a
+/// texture. Natively the rectangles reach the GPU at the next submit, a
+/// frame's all in one write.
+@extern(wasm, "gpu", "flush_to_buffer_rect")
+@extern(rust, "crate::gpu", "flush_to_buffer_rect")
+fn flush_to_buffer_rect(device: Int, buffer: Int, stride: Int, x: Int, y: Int, w: Int, h: Int) -> Unit = _
 
 // ── Bind group: texture + sampler entries ──
 

@@ -51,8 +51,9 @@ use std::sync::{Mutex, OnceLock};
 const RASTER_WGSL: &str = include_str!("wgsl/raster.wgsl");
 const TEXT_WGSL: &str = include_str!("wgsl/text.wgsl");
 const IMAGE_WGSL: &str = include_str!("wgsl/image.wgsl");
+const TEXT_BUFFER_WGSL: &str = include_str!("wgsl/text_buffer.wgsl");
 
-const SHADERS: [&str; 4] = [RASTER_WGSL, RASTER_WGSL, TEXT_WGSL, IMAGE_WGSL];
+const SHADERS: [&str; 5] = [RASTER_WGSL, RASTER_WGSL, TEXT_WGSL, IMAGE_WGSL, TEXT_BUFFER_WGSL];
 
 /// Colour format of the offscreen target, and the format a surface is asked
 /// for first. Not sRGB: the shaders write display-encoded colour, which is what
@@ -82,6 +83,23 @@ enum Pass {
 /// dropped to end the pass) while their handle is still live — taking the
 /// payload out also lets a method hold `&mut` on one slot and `&` on another
 /// without fighting the borrow checker.
+/// A buffer a program rewrites every frame, as a ring of `STREAM_COPIES`: each
+/// frame writes the next copy, directly through a mapping where the device
+/// allows it (unified memory: Apple silicon), once the GPU has finished the
+/// frame that last read it. No staging buffer is involved; `write_buffer`
+/// staged every frame's data in a fresh buffer, and Metal kept those pooled —
+/// about 40 MB for a terminal redrawing 100 x 30 cells while output streams.
+struct Stream {
+    copies: Vec<wgpu::Buffer>,
+    /// The submission that last read each copy.
+    last: Vec<Option<wgpu::SubmissionIndex>>,
+    current: usize,
+    /// Written through a mapping (else through `write_buffer`).
+    mapped: bool,
+}
+
+const STREAM_COPIES: usize = 3;
+
 enum Res {
     Null,
     /// Stand-in for the canvas context the JS host returns from
@@ -94,6 +112,8 @@ enum Res {
     PreferredFormat,
     Shader(wgpu::ShaderModule),
     Buffer(wgpu::Buffer),
+    /// A buffer rewritten every frame (see `create_stream_buffer`).
+    Stream(Stream),
     ComputePipeline(wgpu::ComputePipeline),
     RenderPipeline(wgpu::RenderPipeline),
     BindGroup(wgpu::BindGroup),
@@ -174,6 +194,23 @@ struct GpuState {
     /// `create_bound_group` over a texture binding could not be satisfied.
     fallback_texture: Option<wgpu::Texture>,
     fallback_sampler: Option<wgpu::Sampler>,
+
+    /// Stream buffers written since the last submit: the submit is what
+    /// their current copies wait on before they are written again.
+    streams_written: Vec<usize>,
+
+    /// CPU copies of the buffers written with `flush_to_buffer_rect`, by
+    /// table index (see `Shadow`).
+    shadows: std::collections::HashMap<usize, Shadow>,
+}
+
+/// What a buffer written a rectangle at a time holds, kept on the CPU so that
+/// a frame's rectangles — a row of new glyphs, each a few pixels wide — reach
+/// the GPU as one write of the rows they touch, at the next submit.
+struct Shadow {
+    bytes: Vec<u8>,
+    /// The byte range written since the last submit.
+    dirty: Option<(usize, usize)>,
 }
 
 fn state() -> &'static Mutex<GpuState> {
@@ -240,7 +277,9 @@ impl GpuState {
         // everything it has.
         let desc = wgpu::DeviceDescriptor {
             label: Some("snaidhm"),
-            required_features: wgpu::Features::empty(),
+            // Vertex buffers the CPU writes directly, for stream buffers,
+            // where memory is shared and the adapter says so.
+            required_features: adapter.features() & wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
             required_limits: adapter.limits(),
             memory_hints: wgpu::MemoryHints::default(),
         };
@@ -309,10 +348,61 @@ impl GpuState {
         self.index(handle).map(|i| &self.res[i])
     }
 
+    /// The buffer behind `handle`: a buffer, or a stream's current copy.
     fn buffer(&self, handle: i64) -> Option<&wgpu::Buffer> {
         match self.get(handle) {
             Some(Res::Buffer(b)) => Some(b),
+            Some(Res::Stream(st)) => st.copies.get(st.current),
             _ => None,
+        }
+    }
+
+    /// Submit `cmd`, and remember it as what the stream copies written for it
+    /// must wait on before their next write.
+    fn submit(&mut self, cmd: wgpu::CommandBuffer) {
+        self.flush_shadows();
+        let index = self.queue().submit(std::iter::once(cmd));
+        for i in std::mem::take(&mut self.streams_written) {
+            if let Some(Res::Stream(st)) = self.res.get_mut(i) {
+                let c = st.current;
+                st.last[c] = Some(index.clone());
+            }
+        }
+    }
+
+    /// `usage` for a buffer of `size` bytes, made writable through a mapping
+    /// where memory is shared, and whether to make it mapped (and so zeroed)
+    /// — see `create_buffer`.
+    fn cpu_writable(&self, usage: wgpu::BufferUsages, size: u64) -> (wgpu::BufferUsages, bool) {
+        let mappable = self.device().features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS)
+            && usage.contains(wgpu::BufferUsages::COPY_DST)
+            && !usage.contains(wgpu::BufferUsages::MAP_READ)
+            && size % 4 == 0;
+        if mappable { (usage | wgpu::BufferUsages::MAP_WRITE, true) } else { (usage, false) }
+    }
+
+    /// Write what changed in each shadowed buffer since the last submit:
+    /// through a mapping when the buffer has one — once the GPU is done with
+    /// the frame that last read it — else with `write_buffer`.
+    fn flush_shadows(&mut self) {
+        let device = self.device.clone().expect("device checked by `with`");
+        let queue = self.queue.clone().expect("queue checked by `with`");
+        for (&idx, shadow) in self.shadows.iter_mut() {
+            let Some((from, to)) = shadow.dirty.take() else { continue };
+            // A mapping starts on 8 bytes (`MAP_ALIGNMENT`); the shadow holds
+            // what is there.
+            let from = from & !7;
+            let Some(Res::Buffer(buf)) = self.res.get(idx) else { continue };
+            let bytes = &shadow.bytes[from..to];
+            if buf.usage().contains(wgpu::BufferUsages::MAP_WRITE) {
+                let slice = buf.slice(from as u64..to as u64);
+                if map_now(&device, &slice) {
+                    slice.get_mapped_range_mut().copy_from_slice(bytes);
+                    buf.unmap();
+                    continue;
+                }
+            }
+            queue.write_buffer(buf, from as u64, bytes);
         }
     }
 
@@ -600,14 +690,25 @@ pub fn create_shader(_device: i64, code_ptr: i64, _code_len: i64) -> i64 {
 
 // ── Buffer ────────────────────────────────────────────────────────────────
 
+/// Where memory is shared (`mappable`), a buffer is also mappable for writing,
+/// and made zeroed through its mapping: otherwise wgpu zeroes it before its
+/// first use with a GPU transfer command — and on Metal the first transfer
+/// command sets up ~46 MB of driver memory for a second or so, every time the
+/// program goes from idle to drawing. `flush_to_buffer_rect` writes such a
+/// buffer through the mapping too.
 pub fn create_buffer(_device: i64, size: i64, usage: i64) -> i64 {
     with(0, |s| {
+        let size = size.max(0) as u64;
+        let (usage, mapped) = s.cpu_writable(wgpu::BufferUsages::from_bits_truncate(usage as u32), size);
         let buffer = s.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("snaidhm buffer"),
-            size: size.max(0) as u64,
-            usage: wgpu::BufferUsages::from_bits_truncate(usage as u32),
-            mapped_at_creation: false,
+            size,
+            usage,
+            mapped_at_creation: mapped,
         });
+        if mapped {
+            buffer.unmap();
+        }
         s.alloc(Res::Buffer(buffer))
     })
 }
@@ -619,13 +720,16 @@ pub fn destroy_buffer(_device: i64, buffer: i64) {
     with((), |s| {
         let Some(idx) = s.index(buffer) else { return };
         // Anything but a buffer is left alone.
-        if !matches!(s.res[idx], Res::Buffer(_)) {
+        if !matches!(s.res[idx], Res::Buffer(_) | Res::Stream(_)) {
             return;
         }
-        if let Res::Buffer(b) = std::mem::replace(&mut s.res[idx], Res::Null) {
-            b.destroy();
-            s.free_slots.push(idx);
+        s.shadows.remove(&idx);
+        match std::mem::replace(&mut s.res[idx], Res::Null) {
+            Res::Buffer(b) => b.destroy(),
+            Res::Stream(st) => st.copies.iter().for_each(|b| b.destroy()),
+            _ => {}
         }
+        s.free_slots.push(idx);
     })
 }
 
@@ -693,8 +797,126 @@ pub fn flush_to_texture(_device: i64, texture: i64, x: i64, y: i64, w: i64, h: i
     })
 }
 
+/// Write the staged values into `buffer` seen as rows of `stride` 32-bit
+/// words: `h` rows of `w` words, the first at word `x` of row `y` (see the
+/// contract in `src/web/gpu.almd`). What is written reaches the GPU at the next
+/// submit, all of a frame's rectangles in one write (see `Shadow`).
+pub fn flush_to_buffer_rect(_device: i64, buffer: i64, stride: i64, x: i64, y: i64, w: i64, h: i64) {
+    with((), |s| {
+        let [stride, x, y, w, h] = [stride, x, y, w, h].map(|v| v.max(0) as usize);
+        let idx = s.index(buffer).filter(|&i| matches!(s.res[i], Res::Buffer(_)));
+        if let (Some(idx), true) = (idx, w * h > 0 && x + w <= stride && s.data.len() >= w * h) {
+            let size = s.buffer(buffer).map_or(0, |b| b.size() as usize);
+            let data = std::mem::take(&mut s.data);
+            // A new shadow is dirty in full: its first write initializes the
+            // whole buffer, so wgpu never clears it with a GPU command.
+            let shadow = s.shadows.entry(idx).or_insert_with(|| Shadow { bytes: vec![0; size], dirty: Some((0, size)) });
+            let end = ((y + h - 1) * stride + x + w) * 4;
+            if end <= shadow.bytes.len() {
+                let src: &[u8] = bytemuck::cast_slice(&data[..w * h]);
+                for r in 0..h {
+                    let at = ((y + r) * stride + x) * 4;
+                    shadow.bytes[at..at + w * 4].copy_from_slice(&src[r * w * 4..(r + 1) * w * 4]);
+                }
+                let from = (y * stride + x) * 4;
+                shadow.dirty = Some(shadow.dirty.map_or((from, end), |(a, b)| (a.min(from), b.max(end))));
+            }
+            s.data = data;
+        }
+        s.data.clear();
+    })
+}
+
+/// A buffer of `size` bytes for data rewritten every frame — vertices of a
+/// UI redrawn in full — written with `flush_to_buffer` and bound with
+/// `set_vertex_buffer` like any other. See `Stream`.
+pub fn create_stream_buffer(_device: i64, size: i64, usage: i64) -> i64 {
+    with(0, |s| {
+        let mapped = s.device().features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
+        let mut usage = wgpu::BufferUsages::from_bits_truncate(usage as u32);
+        if mapped {
+            usage = (usage - wgpu::BufferUsages::COPY_DST) | wgpu::BufferUsages::MAP_WRITE;
+        }
+        // Zeroed through a mapping when mappable (see `create_buffer`): a
+        // frame writes only the front of a copy, and wgpu would zero the rest
+        // with a GPU transfer command.
+        let size = (size.max(4) as u64).next_multiple_of(4);
+        let copies = (0..STREAM_COPIES)
+            .map(|_| {
+                let buf = s.device().create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("snaidhm stream buffer"),
+                    size,
+                    usage,
+                    mapped_at_creation: mapped,
+                });
+                if mapped {
+                    buf.unmap();
+                }
+                buf
+            })
+            .collect();
+        s.alloc(Res::Stream(Stream { copies, last: vec![None; STREAM_COPIES], current: 0, mapped }))
+    })
+}
+
+/// Write the staged data into the next copy of stream `idx`.
+fn write_stream(s: &mut GpuState, idx: usize) {
+    let data = std::mem::take(&mut s.data);
+    let bytes: &[u8] = bytemuck::cast_slice(&data);
+    let device = s.device.clone().expect("device checked by `with`");
+    let queue = s.queue.clone().expect("queue checked by `with`");
+    if let Some(Res::Stream(st)) = s.res.get_mut(idx) {
+        st.current = (st.current + 1) % st.copies.len();
+        let c = st.current;
+        let buf = &st.copies[c];
+        if !bytes.is_empty() && bytes.len() as u64 <= buf.size() {
+            if st.mapped {
+                // Wait for the frame that last read this copy, then write it
+                // in place.
+                if let Some(index) = st.last[c].take() {
+                    let _ = device.poll(wgpu::Maintain::WaitForSubmissionIndex(index));
+                }
+                let slice = buf.slice(..bytes.len() as u64);
+                if map_now(&device, &slice) {
+                    slice.get_mapped_range_mut().copy_from_slice(bytes);
+                    buf.unmap();
+                }
+            } else {
+                queue.write_buffer(buf, 0, bytes);
+            }
+        }
+    }
+    s.streams_written.push(idx);
+    s.data = data;
+    s.data.clear();
+}
+
+/// Map `slice` for writing and wait until it is: until the GPU is done with
+/// the work that reads it. `false` when the mapping failed.
+fn map_now(device: &wgpu::Device, slice: &wgpu::BufferSlice) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ready = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = ready.clone();
+    slice.map_async(wgpu::MapMode::Write, move |r| flag.store(r.is_ok(), Ordering::Release));
+    // An idle buffer maps on the next poll; `Wait` would wait for every frame
+    // still in flight, not just the one reading it.
+    let mut polls = 0;
+    while !ready.load(Ordering::Acquire) && polls < 64 {
+        let _ = device.poll(wgpu::Maintain::Poll);
+        polls += 1;
+    }
+    if !ready.load(Ordering::Acquire) {
+        let _ = device.poll(wgpu::Maintain::Wait);
+    }
+    ready.load(Ordering::Acquire)
+}
+
 pub fn flush_to_buffer(_device: i64, buffer: i64) {
     with((), |s| {
+        if let Some(idx) = s.index(buffer).filter(|&i| matches!(s.res[i], Res::Stream(_))) {
+            write_stream(s, idx);
+            return;
+        }
         if let Some(buf) = s.buffer(buffer) {
             s.queue().write_buffer(buf, 0, bytemuck::cast_slice(&s.data));
         }
@@ -844,7 +1066,13 @@ pub fn add_sampler_binding(sampler: i64) {
 /// the pending list, like the JS host.
 pub fn create_bound_group(_device: i64, pipeline: i64, group_idx: i64) -> i64 {
     with(0, |s| {
-        s.ensure_fallbacks();
+        // Only for a texture or sampler binding: the fallback texture is
+        // written (`write_texture`), and on Metal the first such write sets up
+        // ~50 MB of GPU memory, which a program binding only buffers should
+        // not pay for.
+        if s.pending_bindings.iter().any(|b| !matches!(b, Binding::Buffer(_))) {
+            s.ensure_fallbacks();
+        }
         let layout = match s.get(pipeline) {
             Some(Res::ComputePipeline(p)) => p.get_bind_group_layout(group_idx.max(0) as u32),
             Some(Res::RenderPipeline(p)) => p.get_bind_group_layout(group_idx.max(0) as u32),
@@ -1169,7 +1397,7 @@ pub fn end_pass(pass: i64) {
 pub fn finish_and_submit(_device: i64, encoder: i64) {
     with((), |s| {
         let Some(enc) = s.take_encoder(encoder) else { return };
-        s.queue().submit(std::iter::once(enc.finish()));
+        s.submit(enc.finish());
         s.release(encoder);
     })
 }
@@ -1501,10 +1729,15 @@ pub(crate) fn resize_surface(width: u32, height: u32) {
 
 /// Show the frame recorded since the last call, if a render pass drew one.
 /// The window calls this each time control returns to its event loop.
-pub(crate) fn present_frame() {
+/// Show the frame drawn since the last call; `true` if there was one.
+pub(crate) fn present_frame() -> bool {
     let mut s = lock();
-    let Some(screen) = s.screen.as_mut() else { return };
-    if let Some((texture, _view)) = screen.frame.take() {
-        texture.present();
+    let Some(screen) = s.screen.as_mut() else { return false };
+    match screen.frame.take() {
+        Some((texture, _view)) => {
+            texture.present();
+            true
+        }
+        None => false,
     }
 }
