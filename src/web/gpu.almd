@@ -162,6 +162,13 @@ fn flush_to_texture(device: Int, texture: Int, x: Int, y: Int, w: Int, h: Int) -
 @extern(rust, "crate::gpu", "flush_to_buffer_rect")
 fn flush_to_buffer_rect(device: Int, buffer: Int, stride: Int, x: Int, y: Int, w: Int, h: Int) -> Unit = _
 
+/// Show frames as soon as they are drawn rather than in step with the
+/// display: less delay between input and what it shows, for a terminal or an
+/// editor. Natively only (a no-op in the browser, which paces frames itself).
+@extern(wasm, "gpu", "set_low_latency")
+@extern(rust, "crate::gpu", "set_low_latency")
+fn set_low_latency(on: Bool) -> Unit = _
+
 // ── Bind group: texture + sampler entries ──
 
 @extern(wasm, "gpu", "add_texture_binding")

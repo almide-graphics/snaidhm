@@ -73,6 +73,7 @@ const ARGS = {
   create_buffer: [dev, 256n, 64n],
   create_stream_buffer: [dev, 256n, 40n],
   flush_to_buffer_rect: [dev, buffer, 8n, 0n, 0n, 1n, 1n],
+  set_low_latency: [1],
   write_buffer: [dev, buffer, 0n, 16n],
   write_buffer_at: [dev, buffer, 0n, 0n, 16n],
   write_f32_at: [dev, buffer, 0n, 1.0],

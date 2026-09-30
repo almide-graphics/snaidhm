@@ -174,6 +174,8 @@ export function createGpuHost(canvas) {
       }
       _dataChunks = []; _dataIsF32 = [];
     },
+    // The browser paces frames itself (requestAnimationFrame).
+    set_low_latency(_on) {},
     flush_to_buffer_rect(deviceId, bufferId, stride, x, y, w, rows) {
       const s = N(stride), x0 = N(x), y0 = N(y), width = N(w), height = N(rows);
       const words = new Uint32Array(_dataChunks.length);
