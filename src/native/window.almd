@@ -145,6 +145,12 @@ fn event_text() -> String = _
 @extern(rust, "crate::window", "set_ime")
 fn set_ime(allowed: Bool) -> Unit = _
 
+/// Fill what a frame doesn't cover with this colour (0..1 each): the edge a
+/// window being resized uncovers before the program draws for its new size.
+/// macOS only.
+@extern(rust, "crate::window", "set_background")
+fn set_background(r: Float, g: Float, b: Float) -> Unit = _
+
 /// Tell the input method where the caret is, logical pixels, so its
 /// candidate window opens beside it. Call it whenever the caret moves.
 @extern(rust, "crate::window", "set_ime_area")
