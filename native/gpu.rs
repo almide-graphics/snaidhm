@@ -612,6 +612,23 @@ pub fn create_buffer(_device: i64, size: i64, usage: i64) -> i64 {
     })
 }
 
+/// Free `buffer` now instead of at exit: for a buffer outgrown and replaced,
+/// which would otherwise hold its GPU memory for good. Submitted work still
+/// using it finishes first (wgpu defers the free); the handle is reused.
+pub fn destroy_buffer(_device: i64, buffer: i64) {
+    with((), |s| {
+        let Some(idx) = s.index(buffer) else { return };
+        // Anything but a buffer is left alone.
+        if !matches!(s.res[idx], Res::Buffer(_)) {
+            return;
+        }
+        if let Res::Buffer(b) = std::mem::replace(&mut s.res[idx], Res::Null) {
+            b.destroy();
+            s.free_slots.push(idx);
+        }
+    })
+}
+
 /// No-op natively.
 ///
 // TODO: `data_ptr`/`data_len` address wasm linear memory, which does not exist

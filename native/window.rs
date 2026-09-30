@@ -52,7 +52,7 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -345,6 +345,7 @@ pub fn open(title: &str, width: i64, height: i64) -> bool {
         let attrs = Window::default_attributes()
             .with_title(title)
             .with_inner_size(LogicalSize::new(width.max(1) as f64, height.max(1) as f64));
+        let _ = PROXY.set(event_loop.create_proxy());
         let mut host = Host { event_loop, app: App { pending: Some(attrs), ..App::default() } };
         let deadline = Instant::now() + OPEN_DEADLINE;
         while host.app.window.is_none() && !host.app.failed {
@@ -373,6 +374,101 @@ pub fn pump() -> bool {
 /// input: an idle window costs no CPU.
 pub fn wait() -> bool {
     with_host(false, |host| host.pump(None))
+}
+
+/// End the frame and sleep until an event arrives, one of `fds` has something
+/// to read, or `timeout_ms` passes (negative: no limit). `false` once the
+/// window has been asked to close.
+///
+/// For a program that also waits on files — a terminal on its PTYs: it
+/// sleeps through both at once, where polling each in turn would wake it
+/// every few milliseconds for nothing.
+pub fn wait_fds(fds: &[i64], timeout_ms: i64) -> bool {
+    #[cfg(unix)]
+    watch::arm(fds.iter().map(|&fd| fd as i32).collect());
+    let timeout = if timeout_ms < 0 { None } else { Some(Duration::from_millis(timeout_ms as u64)) };
+    let alive = with_host(false, |host| host.pump(timeout));
+    #[cfg(unix)]
+    watch::disarm();
+    alive
+}
+
+/// Wakes the event loop from other threads.
+static PROXY: std::sync::OnceLock<EventLoopProxy<()>> = std::sync::OnceLock::new();
+
+/// The thread behind `wait_fds`: while armed it polls the fds, and when one is
+/// readable it wakes the event loop and disarms, so a file nobody has read
+/// yet can't keep it spinning. A pipe interrupts its poll when the set
+/// changes.
+#[cfg(unix)]
+mod watch {
+    use std::sync::{Condvar, Mutex, OnceLock};
+
+    struct State { fds: Vec<i32>, armed: bool }
+
+    struct Watch { state: Mutex<State>, changed: Condvar, pipe: (i32, i32) }
+
+    static WATCH: OnceLock<&'static Watch> = OnceLock::new();
+
+    fn get() -> &'static Watch {
+        WATCH.get_or_init(|| {
+            let mut p = [0i32; 2];
+            unsafe { libc::pipe(p.as_mut_ptr()) };
+            for fd in p {
+                unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
+            }
+            let w: &'static Watch = Box::leak(Box::new(Watch {
+                state: Mutex::new(State { fds: Vec::new(), armed: false }),
+                changed: Condvar::new(),
+                pipe: (p[0], p[1]),
+            }));
+            std::thread::spawn(move || run(w));
+            w
+        })
+    }
+
+    fn run(w: &'static Watch) {
+        loop {
+            let fds = {
+                let mut st = w.state.lock().unwrap();
+                while !st.armed {
+                    st = w.changed.wait(st).unwrap();
+                }
+                st.fds.clone()
+            };
+            let mut pfds: Vec<libc::pollfd> = fds
+                .iter()
+                .map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 })
+                .collect();
+            pfds.push(libc::pollfd { fd: w.pipe.0, events: libc::POLLIN, revents: 0 });
+            unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, -1) };
+            let mut buf = [0u8; 64];
+            while unsafe { libc::read(w.pipe.0, buf.as_mut_ptr() as *mut _, buf.len()) } > 0 {}
+            let ready = pfds[..fds.len()].iter().any(|p| p.revents != 0);
+            if ready {
+                w.state.lock().unwrap().armed = false;
+                if let Some(proxy) = super::PROXY.get() {
+                    let _ = proxy.send_event(());
+                }
+            }
+        }
+    }
+
+    pub fn arm(fds: Vec<i32>) {
+        let w = get();
+        let mut st = w.state.lock().unwrap();
+        st.fds = fds;
+        st.armed = true;
+        w.changed.notify_one();
+        drop(st);
+        unsafe { libc::write(w.pipe.1, [1u8].as_ptr() as *const _, 1) };
+    }
+
+    pub fn disarm() {
+        let w = get();
+        w.state.lock().unwrap().armed = false;
+        unsafe { libc::write(w.pipe.1, [1u8].as_ptr() as *const _, 1) };
+    }
 }
 
 /// `true` exactly once after each change of the window's size — the moment to

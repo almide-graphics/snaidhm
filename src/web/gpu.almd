@@ -44,6 +44,12 @@ fn create_shader(device: Int, code_ptr: Int, code_len: Int) -> Int = _
 @extern(rust, "crate::gpu", "create_buffer")
 fn create_buffer(device: Int, size: Int, usage: Int) -> Int = _
 
+/// Free `buffer` now rather than when the program ends — for a buffer that
+/// was outgrown and replaced. Work already submitted with it still runs.
+@extern(wasm, "gpu", "destroy_buffer")
+@extern(rust, "crate::gpu", "destroy_buffer")
+fn destroy_buffer(device: Int, buffer: Int) -> Unit = _
+
 @extern(wasm, "gpu", "write_buffer")
 @extern(rust, "crate::gpu", "write_buffer")
 fn write_buffer(device: Int, buffer: Int, data_ptr: Int, data_len: Int) -> Unit = _

@@ -246,6 +246,8 @@ fn upload(device: Int, layer: TextLayer, width: Int, height: Int) -> TextLayer =
   let count = list.len(layer.verts) / VERTEX_FLOATS
   let grow = count > layer.capacity
   let capacity = if grow then int.max(count, layer.capacity * 2) else layer.capacity
+  // An outgrown buffer is freed, or every growth would keep its GPU memory.
+  if grow and layer.vtx != 0 then gpu.destroy_buffer(device, layer.vtx)
   let vtx = if grow then gpu.create_buffer(device, int.max(1, capacity) * VERTEX_FLOATS * 4, int.bor(gpu.VERTEX, gpu.COPY_DST))
             else layer.vtx
   if count > 0 then {
