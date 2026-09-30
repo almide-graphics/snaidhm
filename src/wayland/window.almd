@@ -15,6 +15,7 @@
 
 import net
 import self.wayland.client as client
+import self.wayland.text_input as ti
 import self.wayland.wire as wire
 import self.wayland.xkb as xkb
 
@@ -27,6 +28,11 @@ let MOUSE_UP = 3
 let WHEEL = 4
 let TEXT = 5
 let KEY = 6
+/// What the input method is composing (after `set_ime(true)`): `event_text`
+/// is the whole composition, empty once it ends, and `event_code` ..
+/// `event_end` the part it marks, in characters, -1 when it shows no caret.
+/// What it commits arrives as TEXT events.
+let COMPOSE = 7
 
 let KEY_BACKSPACE = 8
 let KEY_TAB = 9
@@ -59,6 +65,8 @@ var surface_scale = 0
 var pointer = 0
 var cursor_shapes = 0
 var cursor_device = 0
+var text_inputs = 0
+var text_input = 0
 var keyboard = 0
 
 // The window: its size in surface units (what the compositor configures and
@@ -102,8 +110,19 @@ var seat_version = 0
 // the pointer on it (-1 while it is elsewhere): a shape is set against it.
 var cursor: Cursor = Arrow
 var enter_serial = 0 - 1
+// Queued inputs: kind, x, y, dx, dy, code, end — and each one's text.
 var inputs: List[List[Float]] = []
-var current: List[Float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+var input_texts: List[String] = []
+var current: List[Float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+var current_text = ""
+// The input method: whether the program lets it compose, whether the window
+// has its focus, where the caret is (units), the events since its last
+// `done`, and whether a composition is showing.
+var ime_allowed = false
+var ime_focused = false
+var ime_area: List[Int] = [0, 0, 1, 1]
+var ime_pending: ti.Pending = ti.empty()
+var composing = false
 // The keyboard's keymap, as the compositor handed it over (XKB text), what
 // it says each key types, and the modifiers now held or locked.
 var keymap: Bytes = bytes.new(0)
@@ -498,6 +517,7 @@ effect fn event(e: wire.Event) -> Result[Unit, String] = {
     } else ()
   } else if e.obj == pointer then pointer_event(e)!
   else if e.obj == keyboard then keyboard_event(e)!
+  else if e.obj == text_input and text_input != 0 then text_input_event(e)!
   else if e.op == 0 and list.contains(retired, e.obj) then {
     // wl_buffer.release of a buffer of an old size: now it can go.
     client.send(e.obj, 0, [], [])!
@@ -526,6 +546,7 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
     "wp_viewporter" => 1,
     "wp_fractional_scale_manager_v1" => 1,
     "wp_cursor_shape_manager_v1" => 1,
+    "zwp_text_input_manager_v3" => 1,
     _ => 0,
   }
   if want > 0 then {
@@ -540,17 +561,35 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
       "wp_viewporter" => { viewporter = id },
       "wp_fractional_scale_manager_v1" => { fractional = id },
       "wp_cursor_shape_manager_v1" => { cursor_shapes = id },
+      "zwp_text_input_manager_v3" => { text_inputs = id },
       _ => {
         seat = id
         seat_version = v
       },
     }
+    make_text_input()!
+  } else ()
+  ok(())
+}
+
+/// The seat's text input, once both the seat and the manager are bound.
+effect fn make_text_input() -> Result[Unit, String] = {
+  if seat != 0 and text_inputs != 0 and text_input == 0 then {
+    text_input = client.new_id()
+    client.send(text_inputs, 1, [text_input, seat], [])!
   } else ()
   ok(())
 }
 
 fn queue(kind: Int, x: Float, y: Float, dx: Float, dy: Float, code: Int) -> Unit = {
-  list.push(inputs, [int.to_float(kind), x, y, dx, dy, int.to_float(code)])
+  list.push(inputs, [int.to_float(kind), x, y, dx, dy, int.to_float(code), 0.0])
+  list.push(input_texts, "")
+}
+
+/// A COMPOSE input: `text` with `from ..< to` marked.
+fn queue_compose(text: String, from: Int, to: Int) -> Unit = {
+  list.push(inputs, [int.to_float(COMPOSE), cursor_x, cursor_y, 0.0, 0.0, int.to_float(from), int.to_float(to)])
+  list.push(input_texts, text)
 }
 
 /// Linux input button codes (BTN_LEFT ...) to the DOM's 0, 1, 2.
@@ -677,11 +716,14 @@ effect fn keyboard_event(e: wire.Event) -> Result[Unit, String] = {
 /// `event_*` accessors then describe it.
 fn next_event() -> Int = {
   if list.len(inputs) == 0 then {
-    current = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    current = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    current_text = ""
     NONE
   } else {
     current = inputs[0]
+    current_text = input_texts[0]
     inputs = list.drop(inputs, 1)
+    input_texts = list.drop(input_texts, 1)
     float.to_int(current[0])
   }
 }
@@ -700,3 +742,93 @@ fn event_dy() -> Float = current[4]
 
 /// Mouse button (0 left, 1 right, 2 middle), typed code point, or key code.
 fn event_code() -> Int = float.to_int(current[5])
+
+/// End of the marked part of the current COMPOSE, characters.
+fn event_end() -> Int = float.to_int(current[6])
+
+/// Text of the current COMPOSE.
+fn event_text() -> String = current_text
+
+// ── Input method (zwp_text_input_v3) ──
+
+/// Let the input method compose text in the window — Japanese, Chinese,
+/// Korean — or (`false`, the default) take keys as they are.
+effect fn set_ime(allowed: Bool) -> Result[Unit, String] = {
+  if allowed != ime_allowed then {
+    ime_allowed = allowed
+    if ime_focused then {
+      if allowed then enable_ime()! else disable_ime()!
+    } else ()
+  } else ()
+  ok(())
+}
+
+/// Tell the input method where the caret is, units, so its candidate window
+/// opens beside it. Call it whenever the caret moves.
+effect fn set_ime_area(x: Float, y: Float, w: Float, h: Float) -> Result[Unit, String] = {
+  let area = [float.to_int(x), float.to_int(y), int.max(1, float.to_int(w)), int.max(1, float.to_int(h))]
+  if area != ime_area then {
+    ime_area = area
+    if ime_focused and ime_allowed then {
+      client.send(text_input, 6, area |> list.map((v) => wire.int32(v)), [])!
+      client.send(text_input, 7, [], [])!
+    } else ()
+  } else ()
+  ok(())
+}
+
+/// enable, the caret, commit: the input method starts composing here.
+effect fn enable_ime() -> Result[Unit, String] = {
+  client.send(text_input, 1, [], [])!
+  client.send(text_input, 6, ime_area |> list.map((v) => wire.int32(v)), [])!
+  client.send(text_input, 7, [], [])!
+  ok(())
+}
+
+/// disable, commit — and any composition showing ends.
+effect fn disable_ime() -> Result[Unit, String] = {
+  client.send(text_input, 2, [], [])!
+  client.send(text_input, 7, [], [])!
+  end_composition()
+  ok(())
+}
+
+fn end_composition() -> Unit = {
+  if composing then {
+    queue_compose("", 0 - 1, 0 - 1)
+    composing = false
+  } else ()
+  ime_pending = ti.empty()
+}
+
+effect fn text_input_event(e: wire.Event) -> Result[Unit, String] = {
+  if e.op == 0 then {
+    // enter: the window has the input method's focus.
+    ime_focused = true
+    if ime_allowed then enable_ime()! else ()
+  } else if e.op == 1 then {
+    // leave
+    ime_focused = false
+    if ime_allowed then disable_ime()! else ()
+  } else if e.op == 2 then {
+    // preedit_string: text, cursor_begin, cursor_end (bytes)
+    let t = wire.string_at(e.args, 0)
+    ime_pending = { ...ime_pending, preedit: t.0, begin: wire.int_at(e.args, t.1), end: wire.int_at(e.args, t.1 + 4) }
+  } else if e.op == 3 then {
+    // commit_string: text
+    ime_pending = { ...ime_pending, commit: wire.string_at(e.args, 0).0 }
+  } else if e.op == 5 then {
+    // done: what was gathered takes effect — the old composition goes, the
+    // committed text is typed, the new composition shows.
+    let p = ime_pending
+    for c in string.chars(p.commit) {
+      queue(TEXT, cursor_x, cursor_y, 0.0, 0.0, string.codepoint(c) ?? 0)
+    }
+    if p.preedit != "" or composing then {
+      queue_compose(p.preedit, ti.char_index(p.preedit, p.begin), ti.char_index(p.preedit, p.end))
+    } else ()
+    composing = p.preedit != ""
+    ime_pending = ti.empty()
+  } else ()
+  ok(())
+}

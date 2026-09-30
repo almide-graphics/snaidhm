@@ -1,0 +1,19 @@
+import self.wayland.text_input as ti
+
+test "byte offsets become character indices" {
+  // "にほん": three characters of three bytes each.
+  assert_eq(ti.char_index("にほん", 0), 0)
+  assert_eq(ti.char_index("にほん", 3), 1)
+  assert_eq(ti.char_index("にほん", 9), 3)
+  assert_eq(ti.char_index("aに", 1), 1)
+  assert_eq(ti.char_index("aに", 4), 2)
+}
+
+test "no caret stays no caret" {
+  assert_eq(ti.char_index("にほん", 0 - 1), 0 - 1)
+}
+
+test "an offset inside a character counts it as before" {
+  assert_eq(ti.char_index("にほん", 4), 1)
+  assert_eq(ti.char_index("にほん", 8), 2)
+}

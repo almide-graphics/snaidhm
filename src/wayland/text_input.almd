@@ -1,0 +1,32 @@
+// zwp_text_input_v3's arithmetic: what an input method's events, gathered
+// until `done`, become — the text it commits and the composition it shows,
+// its marked part moved from the protocol's byte offsets to characters.
+
+/// An input method's events since the last `done`: the composition
+/// (preedit) and its marked part in bytes (-1: no caret), and the text it
+/// commits.
+type Pending = { preedit: String, begin: Int, end: Int, commit: String }
+
+fn empty() -> Pending = { preedit: "", begin: 0 - 1, end: 0 - 1, commit: "" }
+
+/// The character index of byte offset `byte` in `s` (-1 stays -1; an offset
+/// inside a character counts the character as before it).
+fn char_index(s: String, byte: Int) -> Int =
+  if byte < 0 then 0 - 1
+  else string.len(string.from_bytes(list.take(string.to_bytes(s), byte) |> strip_partial))
+
+/// `bs` without a trailing, incomplete UTF-8 sequence.
+fn strip_partial(bs: List[Int]) -> List[Int] = {
+  var n = list.len(bs)
+  // Back over continuation bytes to the lead byte of the last character.
+  var lead = n - 1
+  while lead >= 0 and bs[lead] >= 0x80 and bs[lead] < 0xC0 {
+    lead = lead - 1
+  }
+  if lead < 0 then bs
+  else {
+    let b = bs[lead]
+    let need = if b < 0x80 then 1 else if b < 0xE0 then 2 else if b < 0xF0 then 3 else 4
+    if n - lead >= need then bs else list.take(bs, lead)
+  }
+}
