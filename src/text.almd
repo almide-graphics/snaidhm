@@ -1,0 +1,264 @@
+// snaidhm text layer — UI text drawn from a glyph cache
+//
+// A glyph is rasterized once per pixel size (glyph.almd), packed into an
+// atlas texture, and drawn after that as a quad on whole pixels, sampled
+// nearest: what reaches the screen is exactly the rasterized coverage. Text
+// that scrolls only moves its quads; nothing is rasterized again.
+//
+// A layer is a value threaded through `add_run` calls, then uploaded:
+//
+//   var layer = text.clear(layer)
+//   layer = text.add_run(device, layer, chars, 13.0, x, baseline, r, g, b, a, 0.0, 0.0, w, h)
+//   layer = text.upload(device, layer, width, height)
+//
+// and drawn with `snaidhm.draw_frame_2d_text`.
+//
+// A layer draws with a list of fonts: each character comes from the first
+// that has a glyph for it — a Latin UI face first, a CJK face after it, say
+// — and line metrics from the first.
+//
+// Written as index loops over flat lists, for the wasm renderer (see
+// coarse.almd).
+
+import self.web.gpu as gpu
+import self.sfnt as sfnt
+import self.glyph as glyph
+
+/// Atlas edge in pixels.
+let ATLAS = 1024
+
+/// Empty pixels around every glyph, so a quad's edge never samples its
+/// neighbour.
+let PAD = 1
+
+/// Floats per vertex: position 2, atlas uv 2, colour 4.
+let VERTEX_FLOATS = 8
+
+type TextLayer = {
+  fonts: List[sfnt.Font],
+  texture: Int,
+  pipeline: Int,
+  bind_group: Int,
+  // Glyph cache: `key(font, glyph, pixel size)` -> slot; slot `s` is
+  // `rects[6s ..< 6s+6]` = atlas x, y, w, h, bitmap left, bitmap top.
+  keys: Map[Int, Int],
+  rects: List[Int],
+  // Shelf packer cursor.
+  pack_x: Int,
+  pack_y: Int,
+  row_h: Int,
+  // Quads of the current frame, VERTEX_FLOATS per vertex, in pixels until
+  // `upload` maps them to normal space.
+  verts: List[Float],
+  // The GPU vertex buffer, its capacity in vertices, and the vertices in it.
+  vtx: Int,
+  capacity: Int,
+  count: Int,
+}
+
+/// A text layer drawing with `fonts`, in order of preference (at least one).
+fn new_layer(device: Int, fonts: List[sfnt.Font]) -> TextLayer = {
+  let texture = gpu.create_texture(device, ATLAS, ATLAS)
+  let sampler = gpu.create_sampler(device, 0, 0)
+  let shader = gpu.create_shader(device, 2, 0)
+  let pipeline = gpu.create_text_pipeline(device, shader, gpu.get_preferred_format())
+  gpu.begin_bindings()
+  gpu.add_texture_binding(texture)
+  gpu.add_sampler_binding(sampler)
+  let bind_group = gpu.create_bound_group(device, pipeline, 0)
+  let keys: Map[Int, Int] = map.new()
+  let rects: List[Int] = []
+  let verts: List[Float] = []
+  {
+    fonts: fonts, texture: texture, pipeline: pipeline, bind_group: bind_group,
+    keys: keys, rects: rects, pack_x: PAD, pack_y: PAD, row_h: 0,
+    verts: verts, vtx: 0, capacity: 0, count: 0,
+  }
+}
+
+/// The layer with no text queued; the cache is kept.
+fn clear(layer: TextLayer) -> TextLayer = {
+  let none_yet: List[Float] = []
+  { ...layer, verts: none_yet }
+}
+
+/// The code points of `s`, as `add_run` and `measure` take text.
+fn code_points(s: String) -> List[Int] = {
+  let cs = string.chars(s)
+  let n = list.len(cs)
+  var out: List[Int] = []
+  for i in 0..<n { list.push(out, string.codepoint(cs[i]) ?? 0) }
+  out
+}
+
+/// Advance of glyph `gid` of font `fi`, px at `size` px per em.
+fn advance_px(layer: TextLayer, fi: Int, gid: Int, size: Float) -> Float = {
+  let f = layer.fonts[fi]
+  int.to_float(sfnt.advance(f, gid)) * size / int.to_float(f.units_per_em)
+}
+
+/// The cache key of glyph `gid` of font `fi` at `size_px`.
+fn key(fi: Int, gid: Int, size_px: Int) -> Int = (fi * 65536 + gid) * 1024 + size_px
+
+/// The width `chars` take at `size` px per em, to align or measure a run.
+fn measure(layer: TextLayer, chars: List[Int], size: Float) -> Float = {
+  var w = 0.0
+  let n = list.len(chars)
+  for i in 0..<n {
+    let p = sfnt.pick(layer.fonts, chars[i])
+    w = w + advance_px(layer, p.0, p.1, size)
+  }
+  w
+}
+
+/// Ascent and descent (positive, down) of a line at `size` px per em.
+fn ascent(layer: TextLayer, size: Float) -> Float = {
+  let f = layer.fonts[0]
+  int.to_float(f.ascent) * size / int.to_float(f.units_per_em)
+}
+
+fn descent(layer: TextLayer, size: Float) -> Float = {
+  let f = layer.fonts[0]
+  0.0 - int.to_float(f.descent) * size / int.to_float(f.units_per_em)
+}
+
+/// Rasterize glyph `gid` of font `fi` at `size_px` into the atlas if it is
+/// not there yet.
+fn cached(device: Int, layer: TextLayer, fi: Int, gid: Int, size_px: Int) -> TextLayer = {
+  let k = key(fi, gid, size_px)
+  match map.get(layer.keys, k) {
+    some(_) => layer,
+    none => place(device, layer, k, glyph.glyph_bitmap(layer.fonts[fi], gid, int.to_float(size_px))),
+  }
+}
+
+/// The cache key of the one fully covered texel rectangles are drawn with.
+let SOLID = -1
+
+/// `layer` with the fully covered texel in the atlas.
+fn solid(device: Int, layer: TextLayer) -> TextLayer =
+  match map.get(layer.keys, SOLID) {
+    some(_) => layer,
+    none => place(device, layer, SOLID, { w: 1, h: 1, left: 0, top: 0, coverage: [255] }),
+  }
+
+/// Pack bitmap `bm` into the atlas as the slot of key `k`.
+fn place(device: Int, layer: TextLayer, k: Int, bm: glyph.Bitmap) -> TextLayer = {
+  // Next shelf when this row is out of width; start over when the atlas
+  // is out of rows. A frame needing more than one atlas of glyphs would
+  // overwrite its own earlier glyphs — at UI sizes that is thousands.
+  let wrap = layer.pack_x + bm.w + PAD > ATLAS
+  let x = if wrap then PAD else layer.pack_x
+  let y0 = if wrap then layer.pack_y + layer.row_h + PAD else layer.pack_y
+  let full = y0 + bm.h + PAD > ATLAS
+  let y = if full then PAD else y0
+  let no_keys: Map[Int, Int] = map.new()
+  let no_rects: List[Int] = []
+  let base = if full then { ...layer, keys: no_keys, rects: no_rects } else layer
+  let row_h = if wrap or full then bm.h else int.max(layer.row_h, bm.h)
+  if bm.w > 0 and bm.h > 0 then {
+    gpu.begin_data()
+    let n = bm.w * bm.h
+    for i in 0..<n {
+      // White, with the coverage as alpha: r | g << 8 | b << 16 | a << 24.
+      gpu.push_u32(0x00FFFFFF + bm.coverage[i] * 16777216)
+    }
+    gpu.flush_to_texture(device, layer.texture, x, y, bm.w, bm.h)
+  } else ()
+  let slot = list.len(base.rects) / 6
+  {
+    ...base,
+    keys: map.set(base.keys, k, slot),
+    rects: base.rects + [x, y, bm.w, bm.h, bm.left, bm.top],
+    pack_x: x + bm.w + PAD, pack_y: y, row_h: row_h,
+  }
+}
+
+/// Queue `chars` at `size` px per em, the pen starting at `x` on the baseline
+/// `y` (pixels of the drawable, y down), in colour (`r`, `g`, `b`, `a`), and
+/// cut to the rectangle `clip_left ..< clip_right` x `clip_top ..< clip_bottom`
+/// — a label hides what overflows its box, a list what scrolls out of its
+/// frame.
+fn add_run(device: Int, layer: TextLayer, chars: List[Int], size: Float, x: Float, y: Float,
+           r: Float, g: Float, b: Float, a: Float,
+           clip_left: Float, clip_top: Float, clip_right: Float, clip_bottom: Float) -> TextLayer = {
+  let size_px = int.max(1, float.to_int(float.round(size)))
+  let baseline = float.round(y)
+  var cur = layer
+  var verts = layer.verts
+  var pen = x
+  let n = list.len(chars)
+  for i in 0..<n {
+    let p = sfnt.pick(cur.fonts, chars[i])
+    cur = cached(device, cur, p.0, p.1, size_px)
+    let slot = map.get(cur.keys, key(p.0, p.1, size_px)) ?? 0
+    let ax = cur.rects[slot * 6]
+    let ay = cur.rects[slot * 6 + 1]
+    let w = cur.rects[slot * 6 + 2]
+    let h = cur.rects[slot * 6 + 3]
+    if w > 0 and h > 0 then {
+      let left = float.round(pen) + int.to_float(cur.rects[slot * 6 + 4])
+      let top = baseline - int.to_float(cur.rects[slot * 6 + 5])
+      // Cut to the clip rectangle, moving the atlas texels with the quad's
+      // edges so what stays is exactly what was there.
+      let x0 = float.max(left, clip_left)
+      let x1 = float.min(left + int.to_float(w), clip_right)
+      let y0 = float.max(top, clip_top)
+      let y1 = float.min(top + int.to_float(h), clip_bottom)
+      if x1 > x0 and y1 > y0 then {
+        let atlas = int.to_float(ATLAS)
+        let u0 = (int.to_float(ax) + x0 - left) / atlas
+        let u1 = (int.to_float(ax) + x1 - left) / atlas
+        let v0 = (int.to_float(ay) + y0 - top) / atlas
+        let v1 = (int.to_float(ay) + y1 - top) / atlas
+        verts = verts
+          + [x0, y0, u0, v0, r, g, b, a,  x1, y0, u1, v0, r, g, b, a,  x0, y1, u0, v1, r, g, b, a]
+          + [x0, y1, u0, v1, r, g, b, a,  x1, y0, u1, v0, r, g, b, a,  x1, y1, u1, v1, r, g, b, a]
+      } else ()
+    } else ()
+    pen = pen + advance_px(cur, p.0, p.1, size)
+  }
+  { ...cur, verts: verts }
+}
+
+/// Queue a rectangle, `x0 ..< x1` x `y0 ..< y1` (pixels of the drawable, y
+/// down), filled in colour (`r`, `g`, `b`, `a`) — an underline, a caret.
+fn add_rect(device: Int, layer: TextLayer, x0: Float, y0: Float, x1: Float, y1: Float,
+            r: Float, g: Float, b: Float, a: Float) -> TextLayer = {
+  let cur = solid(device, layer)
+  let slot = map.get(cur.keys, SOLID) ?? 0
+  // Every corner samples the texel's centre: nearest sampling gives full
+  // coverage across the whole quad.
+  let atlas = int.to_float(ATLAS)
+  let u = (int.to_float(cur.rects[slot * 6]) + 0.5) / atlas
+  let v = (int.to_float(cur.rects[slot * 6 + 1]) + 0.5) / atlas
+  if x1 > x0 and y1 > y0 then {
+    let verts = cur.verts
+      + [x0, y0, u, v, r, g, b, a,  x1, y0, u, v, r, g, b, a,  x0, y1, u, v, r, g, b, a]
+      + [x0, y1, u, v, r, g, b, a,  x1, y0, u, v, r, g, b, a,  x1, y1, u, v, r, g, b, a]
+    { ...cur, verts: verts }
+  } else cur
+}
+
+/// Send the queued quads to the GPU, mapped from the `width` x `height`
+/// drawable's pixels to normal space.
+fn upload(device: Int, layer: TextLayer, width: Int, height: Int) -> TextLayer = {
+  let count = list.len(layer.verts) / VERTEX_FLOATS
+  let grow = count > layer.capacity
+  let capacity = if grow then int.max(count, layer.capacity * 2) else layer.capacity
+  let vtx = if grow then gpu.create_buffer(device, int.max(1, capacity) * VERTEX_FLOATS * 4, int.bor(gpu.VERTEX, gpu.COPY_DST))
+            else layer.vtx
+  if count > 0 then {
+    let sx = 2.0 / int.to_float(width)
+    let sy = 2.0 / int.to_float(height)
+    gpu.begin_data()
+    for i in 0..<count {
+      let o = i * VERTEX_FLOATS
+      gpu.push_f32(layer.verts[o] * sx - 1.0)
+      gpu.push_f32(1.0 - layer.verts[o + 1] * sy)
+      for k in 2..<VERTEX_FLOATS { gpu.push_f32(layer.verts[o + k]) }
+    }
+    gpu.flush_to_buffer(device, vtx)
+  } else ()
+  { ...layer, vtx: vtx, capacity: capacity, count: count }
+}

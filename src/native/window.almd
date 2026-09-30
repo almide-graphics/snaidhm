@@ -1,0 +1,126 @@
+// snaidhm native window — @extern(rust) declarations
+//
+// The on-screen counterpart of the browser canvas. In the browser the page
+// owns the canvas and the frame loop; natively the program opens a window and
+// runs the loop itself:
+//
+//   if window.open("demo", 800, 600) then {
+//     var scene = build(window.width(), window.height())
+//     while window.pump() {
+//       if window.resized() then { scene = build(window.width(), window.height()) }
+//       snaidhm.draw_frame(scene, 0.0)
+//     }
+//   }
+//
+// Native only: there is no @extern(wasm) half, so a wasm build must not
+// import this module.
+
+/// Open the window, `width` x `height` in logical pixels, and make it the
+/// screen every later gpu render pass draws into. Call it before any gpu.*
+/// call — the GPU device is chosen for its ability to present to this window.
+/// `false` when no window can be opened; the reason is on stderr.
+@extern(rust, "crate::window", "open")
+fn open(title: String, width: Int, height: Int) -> Bool = _
+
+/// End the frame (show what its render passes drew) and process pending events
+/// without waiting. `false` once the window has been asked to close.
+@extern(rust, "crate::window", "pump")
+fn pump() -> Bool = _
+
+/// `pump`, but sleep until at least one event arrives. For a UI that only
+/// changes in response to input: an idle window costs no CPU.
+@extern(rust, "crate::window", "wait")
+fn wait() -> Bool = _
+
+/// `true` exactly once after each change of the window's size — the moment to
+/// rebuild anything sized to it.
+@extern(rust, "crate::window", "resized")
+fn resized() -> Bool = _
+
+/// Width of the drawable area in physical pixels, the size render targets are.
+@extern(rust, "crate::window", "width")
+fn width() -> Int = _
+
+/// Height of the drawable area in physical pixels.
+@extern(rust, "crate::window", "height")
+fn height() -> Int = _
+
+/// Physical pixels per logical pixel (2.0 on a typical Retina display).
+@extern(rust, "crate::window", "scale_factor")
+fn scale_factor() -> Float = _
+
+// ── Input ─────────────────────────────────────────────────────────────────
+//
+// Window input, queued in logical pixels and read one event at a time. Kinds
+// and key codes follow the DOM, so browser and native hosts hand a UI the
+// same events.
+
+let NONE = 0
+let MOUSE_MOVE = 1
+let MOUSE_DOWN = 2
+let MOUSE_UP = 3
+let WHEEL = 4
+/// A typed character; `event_code` is its code point.
+let TEXT = 5
+/// A key handled as a key; `event_code` is its DOM keyCode.
+let KEY = 6
+/// What the input method is composing (after `set_ime(true)`): `event_text`
+/// is the whole composition, empty once it ends, and `event_code` ..
+/// `event_end` the part it marks — the clause being converted, or an empty
+/// range at its caret — in characters, -1 when it shows no caret. What it
+/// commits arrives as TEXT events.
+let COMPOSE = 7
+
+let KEY_BACKSPACE = 8
+let KEY_TAB = 9
+let KEY_ENTER = 13
+let KEY_ESCAPE = 27
+let KEY_LEFT = 37
+let KEY_UP = 38
+let KEY_RIGHT = 39
+let KEY_DOWN = 40
+let KEY_DELETE = 46
+
+/// The kind of the next queued input (NONE once the queue is empty); the
+/// `event_*` accessors then describe it. Inputs queue across `pump` calls.
+@extern(rust, "crate::window", "next_event")
+fn next_event() -> Int = _
+
+/// Pointer position of the current input, logical pixels.
+@extern(rust, "crate::window", "event_x")
+fn event_x() -> Float = _
+
+@extern(rust, "crate::window", "event_y")
+fn event_y() -> Float = _
+
+/// Wheel distance of the current input, logical pixels; positive `dy`
+/// scrolls down, as the DOM's `deltaY`.
+@extern(rust, "crate::window", "event_dx")
+fn event_dx() -> Float = _
+
+@extern(rust, "crate::window", "event_dy")
+fn event_dy() -> Float = _
+
+/// Mouse button (0 left, 1 right, 2 middle), typed code point, or key code.
+@extern(rust, "crate::window", "event_code")
+fn event_code() -> Int = _
+
+/// End of the marked part of the current COMPOSE, characters.
+@extern(rust, "crate::window", "event_end")
+fn event_end() -> Int = _
+
+/// Text of the current COMPOSE.
+@extern(rust, "crate::window", "event_text")
+fn event_text() -> String = _
+
+// ── Input method ──────────────────────────────────────────────────────────
+
+/// Let the platform's input method compose text in the window — Japanese,
+/// Chinese, Korean — or (`false`, the default) take keys as they are.
+@extern(rust, "crate::window", "set_ime")
+fn set_ime(allowed: Bool) -> Unit = _
+
+/// Tell the input method where the caret is, logical pixels, so its
+/// candidate window opens beside it. Call it whenever the caret moves.
+@extern(rust, "crate::window", "set_ime_area")
+fn set_ime_area(x: Float, y: Float, w: Float, h: Float) -> Unit = _

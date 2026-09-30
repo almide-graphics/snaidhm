@@ -1,0 +1,40 @@
+// cff DICT operands: every number encoding a DICT holds. The outline paths
+// are covered by sfnt_test.almd against fontTools; DICT reals are not, since
+// no operand the reader uses is a real — these pin that one is still read
+// right, for the day one is.
+
+import self.cff as cff
+
+fn one(b: List[Int]) -> Float = {
+  let d = cff.dict(bytes.from_list(b + [17]), 0, list.len(b) + 1)
+  cff.operand(d, 17, 0, -1.0)
+}
+
+test "DICT integers: one, two, three and five bytes" {
+  assert_eq(one([139]), 0.0)
+  assert_eq(one([32]), -107.0)
+  assert_eq(one([246]), 107.0)
+  assert_eq(one([247, 0]), 108.0)
+  assert_eq(one([250, 255]), 1131.0)
+  assert_eq(one([251, 0]), -108.0)
+  assert_eq(one([254, 255]), -1131.0)
+  assert_eq(one([28, 0x80, 0x00]), -32768.0)
+  assert_eq(one([29, 0x00, 0x01, 0x86, 0xA0]), 100000.0)
+}
+
+test "DICT reals" {
+  assert_eq(one([30, 0x1A, 0x5F]), 1.5)
+  // -2.25E-3
+  assert_eq(one([30, 0xE2, 0xA2, 0x5C, 0x3F]), -0.00225)
+  // 3E2: an exponent, no point
+  assert_eq(one([30, 0x3B, 0x2F]), 300.0)
+}
+
+test "DICT operands, escaped operators and absent ones" {
+  // 1 2 ROS-ish (12 30), then 5 CharStrings (17)
+  let d = cff.dict(bytes.from_list([140, 141, 12, 30, 144, 17]), 0, 6)
+  assert_eq(cff.operand(d, 1230, 1, 0.0), 2.0)
+  assert_eq(cff.operand(d, 17, 0, 0.0), 5.0)
+  assert_eq(cff.operand(d, 18, 0, 7.0), 7.0)
+  assert_eq(cff.operand(d, 17, 1, 7.0), 7.0)
+}

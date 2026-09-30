@@ -1,0 +1,112 @@
+// A snaidhm scene in a native window.
+//
+// Run from the package root:
+//   almide run examples/window/main.almd              interactive
+//   almide run examples/window/main.almd -- out.png   draw one frame, save it, exit
+
+import env
+import self as snaidhm
+import self.web.gpu as gpu
+import self.native.window as window
+import self.native.frame as frame
+import self.native.fonts as fonts
+import self.sfnt as sfnt
+import self.text as text
+
+fn label(text: String, size: Float, x: Float, y: Float, color: List[Float]) -> snaidhm.TextSpec =
+  snaidhm.text_spec(snaidhm.str(text), size, x, y, snaidhm.ALIGN_CENTER, color)
+
+fn build(device: Int, width: Int, height: Int, faces: List[sfnt.Font]) -> snaidhm.SceneHandle = {
+  let dc = [0.5, 0.5, 0.5, 1.0]
+  let shape_cubics =
+    snaidhm.round_rect_cubics(-0.9, -0.9, 1.8, 1.8, 0.08, dc, 0)
+    + snaidhm.circle_cubics(-0.5, 0.0, 0.18, dc, 1)
+    + snaidhm.circle_cubics(0.0, 0.0, 0.18, dc, 2)
+    + snaidhm.circle_cubics(0.5, 0.0, 0.18, dc, 3)
+  let shape_paints = [
+    snaidhm.solid(1.0, 1.0, 1.0, 1.0),
+    snaidhm.radial_grad([1.0, 0.55, 0.5, 0.9], [0.82, 0.18, 0.12, 0.9], -0.5, 0.0, 0.18),
+    snaidhm.radial_grad([0.45, 0.92, 0.55, 0.9], [0.12, 0.62, 0.22, 0.9], 0.0, 0.0, 0.18),
+    snaidhm.radial_grad([0.5, 0.7, 1.0, 0.9], [0.15, 0.35, 0.82, 0.9], 0.5, 0.0, 0.18),
+  ]
+  // Sizes are physical pixels of the drawable, so scale logical sizes up.
+  let s = window.scale_factor()
+  let ink = [0.2, 0.22, 0.3, 1.0]
+  // The title is a path (vector, any size); the small text below comes from
+  // the glyph cache (see `labels`).
+  let no_paths: List[snaidhm.Cubic] = []
+  let no_paints: List[snaidhm.Paint] = []
+  let title = if list.len(faces) > 0 then
+      snaidhm.build_text_cubics(faces[0], [label("snaidhm", 40.0 * s, 0.0, 0.62, ink)], int.to_float(height))
+    else { cubics: no_paths, paints: no_paints }
+  // Text paths are numbered after the shapes'.
+  let offset = list.len(shape_paints)
+  let title_cubics = title.cubics |> list.map((c) =>
+    { a: c.a, b: c.b, c: c.c, d: c.d, color: c.color, path_id: c.path_id + offset })
+  let shadows = [
+    snaidhm.rect_shadow(-0.9, -0.9, 1.8, 1.8, 0.08, 0.01, -0.02, 0.08, [0.0, 0.0, 0.0, 0.2]),
+  ]
+  // The image layer is empty: in the browser the page supplies its buffers.
+  let img_vtx = gpu.create_buffer(device, 32, int.bor(gpu.VERTEX, gpu.COPY_DST))
+  let img_idx = gpu.create_buffer(device, 16, int.bor(gpu.INDEX, gpu.COPY_DST))
+  snaidhm.prepare_scene(device, width, height, width, height,
+    shape_cubics + title_cubics, shadows, shape_paints + title.paints,
+    img_vtx, img_idx, 0, 0, 0, 0, 0)
+}
+
+// Pixel x of normal-space x on a `width`-wide drawable.
+fn px(x: Float, width: Int) -> Float = (x + 1.0) * 0.5 * int.to_float(width)
+
+// A run centred on normal-space `x`, its baseline at pixel row `y`.
+fn centred(device: Int, layer: text.TextLayer, s: String, size: Float, x: Float, y: Float,
+           width: Int, height: Int, grey: Float) -> text.TextLayer = {
+  let chars = text.code_points(s)
+  let left = px(x, width) - text.measure(layer, chars, size) / 2.0
+  text.add_run(device, layer, chars, size, left, y, grey, grey, grey + 0.08, 1.0,
+    0.0, 0.0, int.to_float(width), int.to_float(height))
+}
+
+// Subtitle and labels, from the glyph cache.
+fn labels(device: Int, layer: text.TextLayer, width: Int, height: Int) -> text.TextLayer = {
+  let s = window.scale_factor()
+  let h = int.to_float(height)
+  var l = text.clear(layer)
+  // Without a font there is nothing to draw them with.
+  if list.len(l.fonts) == 0 then () else {
+    l = centred(device, l, "Almide > native > wgpu", 14.0 * s, 0.0, h * 0.26, width, height, 0.45)
+    l = centred(device, l, "Red", 13.0 * s, -0.5, h * 0.66, width, height, 0.2)
+    l = centred(device, l, "Green", 13.0 * s, 0.0, h * 0.66, width, height, 0.2)
+    l = centred(device, l, "Blue", 13.0 * s, 0.5, h * 0.66, width, height, 0.2)
+    l = centred(device, l, "glyph cache: each glyph rasterized once per size, then blitted", 11.0 * s, 0.0, h * 0.86, width, height, 0.5)
+    l = centred(device, l, "日本語も描けます — ひらがな、カタカナ、漢字", 15.0 * s, 0.0, h * 0.8, width, height, 0.25)
+  }
+  text.upload(device, l, width, height)
+}
+
+effect fn main() -> Unit = {
+  let capture = list.get(env.args(), 0)
+  if window.open("snaidhm", 640, 640) then {
+    let faces = fonts.system()!
+    let device = 1
+    var scene = build(device, window.width(), window.height(), faces)
+    if list.len(faces) == 0 then println("no font found; drawing shapes only") else ()
+    var layer = labels(device, text.new_layer(device, faces), window.width(), window.height())
+    match capture {
+      some(path) => {
+        snaidhm.draw_frame_2d_text(scene, layer, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        println(if frame.save_png(path) then "saved ${path}" else "capture failed")
+      },
+      none => {
+        while window.pump() {
+          if window.resized() then {
+            scene = build(device, window.width(), window.height(), faces)
+            layer = labels(device, layer, window.width(), window.height())
+          } else ()
+          snaidhm.draw_frame_2d_text(scene, layer, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        }
+      },
+    }
+  } else {
+    println("no window")
+  }
+}

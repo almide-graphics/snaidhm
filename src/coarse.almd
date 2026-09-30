@@ -1,0 +1,286 @@
+// snaidhm coarse raster — the per-tile command lists the fine pass reads
+//
+// The fine pass (raster.wgsl `fine`) computes a pixel's winding by casting a
+// ray to the RIGHT: every line wholly right of the pixel adds its signed
+// height over the pixel's row, a line crossing the pixel adds the covered
+// area. A tile therefore needs, for each path, the effect of everything to
+// its right — but listing every such line in every tile is what overflowed:
+// a row of shapes piled all of their lines into the leftmost tiles.
+//
+// Everything right of a tile is replaced by an equivalent that stays local.
+// A path is closed, so the part of it right of the tile's right edge X,
+// closed off along x = X, is a set of loops that no point left of X is
+// inside. Its effect on the tile's pixels therefore depends only on where
+// the path crosses x = X:
+//
+//   - the winding at the tile's top-left of that right part — one integer,
+//     the command's BACKDROP, counted where the path crosses the tile's top
+//     edge right of X;
+//   - a STEP for each crossing of x = X inside the tile's rows: a vertical
+//     line just right of X, from the crossing to the tile's bottom, carrying
+//     the change in winding that crossing makes.
+//
+// A tile's lines are then the pieces of the path inside its own column, its
+// steps and its backdrop — bounded by the geometry in and next to the tile,
+// never by what lies further right. The lists are packed, not fixed slots, so
+// there is no per-tile limit to overflow either.
+//
+// Coordinates are pixel space, y down, as the fine pass evaluates them.
+//
+// Written as index loops over lists and without capturing closures: this
+// module runs in the browser too, and the wasm renderer does not yet lower a
+// for-in over a list of records, nor a capturing closure handed to a list
+// combinator mid-expression (both wall rather than miscompile).
+
+let EPS = 0.0001
+
+// Shear applied to every point, y += SHEAR * x, so that no line is horizontal.
+// The argument above needs every change of winding right of x = X to happen
+// where the path crosses X: at any other vertex the two lines meeting there
+// cancel. A horizontal line breaks that — it has no height, so the vertex
+// where it meets a sloped line is a change nothing crosses X to carry. A
+// shear keeps the path closed and its shape intact while tilting every
+// horizontal line; it moves a point by at most SHEAR * width, 0.004px at 4K.
+let SHEAR = 0.000001
+
+/// A line in pixel space, y down.
+type Line = { x0: Float, y0: Float, x1: Float, y1: Float }
+
+/// One path's line: a `Line` with the path it belongs to. Flat rather than
+/// wrapping a `Line`, which the wasm renderer does not yet read out of a list.
+type PathLine = { path: Int, x0: Float, y0: Float, x1: Float, y1: Float }
+
+/// The fine pass's input. A tile `t` runs commands `index[2t] ..< index[2t] +
+/// index[2t+1]`; command `c` is `cmds[4c ..< 4c+4]` = path, backdrop, first
+/// slot in `line_ids`, line count.
+type Coarse = { lines: List[Line], index: List[Int], cmds: List[Int], line_ids: List[Int] }
+
+/// A tile's contribution from one path: a line (`line >= 0`) or a backdrop.
+type Entry = { key: Int, tile: Int, path: Int, backdrop: Int, line: Int }
+
+type Grid = { tile: Float, tiles_x: Int, tiles_y: Int, num_paths: Int }
+
+fn cell(v: Float, tile: Float) -> Int = float.to_int(float.floor(v / tile))
+
+fn x_at_y(l: Line, y: Float) -> Float =
+  l.x0 + (l.x1 - l.x0) * (y - l.y0) / (l.y1 - l.y0)
+
+fn y_at_x(l: Line, x: Float) -> Float =
+  l.y0 + (l.y1 - l.y0) * (x - l.x0) / (l.x1 - l.x0)
+
+/// Per row a line wholly right of a pixel covers, the winding it adds: the
+/// fine pass's `seg_area` of such a line is `y0 - y1` over the row.
+fn right_sign(l: Line) -> Int = if l.y1 > l.y0 then -1 else 1
+
+/// The part of `l` with `lo <= x <= hi`, if it has any height.
+fn clip_x(l: Line, lo: Float, hi: Float) -> Line? = {
+  let dx = l.x1 - l.x0
+  if float.abs(dx) < EPS then {
+    if l.x0 >= lo and l.x0 <= hi then some(l) else none
+  } else {
+    let ta = (lo - l.x0) / dx
+    let tb = (hi - l.x0) / dx
+    let t0 = float.max(0.0, float.min(ta, tb))
+    let t1 = float.min(1.0, float.max(ta, tb))
+    if t1 <= t0 then none
+    else {
+      let piece = {
+        x0: l.x0 + dx * t0, y0: l.y0 + (l.y1 - l.y0) * t0,
+        x1: l.x0 + dx * t1, y1: l.y0 + (l.y1 - l.y0) * t1,
+      }
+      if piece.y1 == piece.y0 then none else some(piece)
+    }
+  }
+}
+
+fn entry(g: Grid, tile: Int, path: Int, backdrop: Int, line: Int) -> Entry =
+  { key: tile * g.num_paths + path, tile: tile, path: path, backdrop: backdrop, line: line }
+
+/// Append to the output: `line` as the next line id, referenced by the tiles
+/// `tx` x `ty_lo ... ty_hi` of `path`.
+type Out = { lines: List[Line], entries: List[Entry] }
+
+/// The pieces of `l` in each tile column it spans, each entered into every
+/// tile of its column that the piece's rows touch.
+fn add_pieces(g: Grid, path: Int, l: Line, out: Out) -> Out = {
+  var lines = out.lines
+  var entries = out.entries
+  // One column further left: a line exactly on a tile's right edge belongs to
+  // that tile too, which `cell` alone would miss. `clip_x` drops what is empty.
+  let lo = int.max(0, cell(float.min(l.x0, l.x1), g.tile) - 1)
+  let hi = int.min(g.tiles_x - 1, cell(float.max(l.x0, l.x1), g.tile))
+  for tx in lo...hi {
+    let x_lo = int.to_float(tx) * g.tile
+    match clip_x(l, x_lo, x_lo + g.tile) {
+      some(piece) => {
+        let id = list.len(lines)
+        list.push(lines, piece)
+        let ry_lo = int.max(0, cell(float.min(piece.y0, piece.y1), g.tile))
+        let ry_hi = int.min(g.tiles_y - 1, cell(float.max(piece.y0, piece.y1), g.tile))
+        for ty in ry_lo...ry_hi { list.push(entries, entry(g, ty * g.tiles_x + tx, path, 0, id)) }
+      },
+      none => (),
+    }
+  }
+  { lines: lines, entries: entries }
+}
+
+/// A step for each tile edge x = X where `l` has a part right of X that
+/// starts or ends: `x_min <= X < x_max`, so a line leaving a vertex that sits
+/// exactly on X counts, and one arriving there does not. A step on a row's top
+/// edge spans the whole row; the backdrop only counts crossings strictly right
+/// of X, so the two never count one crossing twice.
+fn add_steps(g: Grid, path: Int, l: Line, out: Out) -> Out = {
+  var lines = out.lines
+  var entries = out.entries
+  let x_min = float.min(l.x0, l.x1)
+  let x_max = float.max(l.x0, l.x1)
+  let lo = int.max(0, cell(x_min, g.tile) - 1)
+  let hi = int.min(g.tiles_x - 1, cell(x_max, g.tile))
+  for tx in lo...hi {
+    let edge = int.to_float(tx + 1) * g.tile
+    if x_min <= edge and edge < x_max then {
+      let yc = y_at_x(l, edge)
+      let ty = cell(yc, g.tile)
+      if ty >= 0 and ty < g.tiles_y then {
+        // The part right of the edge runs from the crossing toward the
+        // endpoint with the larger x. Below the crossing it adds its sign to
+        // the winding; above it, it takes it away.
+        let y_right = if l.x1 > l.x0 then l.y1 else l.y0
+        let delta = if y_right > yc then right_sign(l) else 0 - right_sign(l)
+        let bottom = int.to_float(ty + 1) * g.tile
+        let x = edge + 1.0
+        let step = if delta < 0 then { x0: x, y0: yc, x1: x, y1: bottom }
+                   else { x0: x, y0: bottom, x1: x, y1: yc }
+        let id = list.len(lines)
+        list.push(lines, step)
+        list.push(entries, entry(g, ty * g.tiles_x + tx, path, 0, id))
+      } else ()
+    } else ()
+  }
+  { lines: lines, entries: entries }
+}
+
+/// Backdrops of one path: for each tile, the winding its right-hand part has
+/// at the tile's top edge. A line crossing row `ty`'s top edge at x adds its
+/// sign to every tile of that row whose right edge is left of x; tiles left
+/// of the whole path sum to zero, the path being closed, so only its own
+/// columns are counted.
+fn add_backdrops(g: Grid, path: Int, ls: List[Line], out: Out) -> Out = {
+  var entries = out.entries
+  let n = list.len(ls)
+  var x_lo = ls[0].x0
+  var x_hi = ls[0].x0
+  var y_lo = ls[0].y0
+  var y_hi = ls[0].y0
+  for i in 0..<n {
+    x_lo = float.min(x_lo, float.min(ls[i].x0, ls[i].x1))
+    x_hi = float.max(x_hi, float.max(ls[i].x0, ls[i].x1))
+    y_lo = float.min(y_lo, float.min(ls[i].y0, ls[i].y1))
+    y_hi = float.max(y_hi, float.max(ls[i].y0, ls[i].y1))
+  }
+  // One column left of the leftmost point: a path touching a tile's right edge
+  // is not wholly right of that tile.
+  let c_lo = int.clamp(cell(x_lo, g.tile) - 1, 0, g.tiles_x - 1)
+  let c_hi = int.clamp(cell(x_hi, g.tile), 0, g.tiles_x - 1)
+  let r_lo = int.clamp(cell(y_lo, g.tile), 0, g.tiles_y - 1)
+  let r_hi = int.clamp(cell(y_hi, g.tile), 0, g.tiles_y - 1)
+  let cols = c_hi - c_lo + 1
+  // add[row][k]: the sign sum of lines whose reach ends before column c_lo+k.
+  var add: List[Int] = list.repeat(0, (r_hi - r_lo + 1) * (cols + 1))
+  for i in 0..<n {
+    let l = ls[i]
+    let y_min = float.min(l.y0, l.y1)
+    let y_max = float.max(l.y0, l.y1)
+    let first = int.max(r_lo, float.to_int(float.ceil(y_min / g.tile)))
+    for ty in first...r_hi {
+      let top = int.to_float(ty) * g.tile
+      if top >= y_min and top < y_max then {
+        // Tiles 0 ..< reach have their right edge left of the crossing.
+        let reach = float.to_int(float.ceil(x_at_y(l, top) / g.tile)) - 1
+        let k = int.clamp(reach, c_lo, c_hi + 1) - c_lo
+        let at = (ty - r_lo) * (cols + 1) + k
+        add[at] = add[at] + right_sign(l)
+      } else ()
+    }
+  }
+  for ty in r_lo...r_hi {
+    let row = (ty - r_lo) * (cols + 1)
+    var acc = 0
+    for j in 0..<cols {
+      let k = cols - 1 - j
+      acc = acc + add[row + k + 1]
+      if acc != 0 then list.push(entries, entry(g, ty * g.tiles_x + c_lo + k, path, acc, 0 - 1)) else ()
+    }
+  }
+  { lines: out.lines, entries: entries }
+}
+
+/// One path's lines as the coarse raster reads them. A near-vertical line is
+/// made exactly vertical, so clipping, steps and backdrops all see one x for
+/// it (otherwise a line within EPS of a tile edge could be clipped as vertical
+/// and also stepped as crossing it). Then the shear (see SHEAR), after which a
+/// line of no height carries nothing and is dropped.
+fn prepared(lines: List[PathLine], path: Int) -> List[Line] = {
+  var out: List[Line] = []
+  let n = list.len(lines)
+  for i in 0..<n {
+    let l = lines[i]
+    if l.path == path then {
+      let x1 = if float.abs(l.x1 - l.x0) < EPS then l.x0 else l.x1
+      let y0 = l.y0 + SHEAR * l.x0
+      let y1 = l.y1 + SHEAR * x1
+      if y1 != y0 then list.push(out, { x0: l.x0, y0: y0, x1: x1, y1: y1 }) else ()
+    } else ()
+  }
+  out
+}
+
+/// Build the fine pass's command lists for `lines` on a `tiles_x` x `tiles_y`
+/// grid of `tile`-pixel tiles. Commands in a tile run in path order, so later
+/// paths paint over earlier ones.
+fn build(lines: List[PathLine], tile: Int, tiles_x: Int, tiles_y: Int, num_paths: Int) -> Coarse = {
+  let g = { tile: int.to_float(tile), tiles_x: tiles_x, tiles_y: tiles_y, num_paths: int.max(1, num_paths) }
+  var out: Out = { lines: [], entries: [] }
+  for path in 0..<num_paths {
+    let ls = prepared(lines, path)
+    let n = list.len(ls)
+    if n > 0 then {
+      for i in 0..<n {
+        out = add_pieces(g, path, ls[i], out)
+        out = add_steps(g, path, ls[i], out)
+      }
+      out = add_backdrops(g, path, ls, out)
+    } else ()
+  }
+  pack(g, out.lines, list.sort_by(out.entries, (e) => e.key))
+}
+
+/// Fold entries sorted by (tile, path) into packed commands.
+fn pack(g: Grid, lines: List[Line], sorted: List[Entry]) -> Coarse = {
+  var index: List[Int] = list.repeat(0, g.tiles_x * g.tiles_y * 2)
+  var cmds: List[Int] = []
+  var line_ids: List[Int] = []
+  var cur = 0 - 1
+  let n = list.len(sorted)
+  for i in 0..<n {
+    let e = sorted[i]
+    if e.key != cur then {
+      cur = e.key
+      if index[e.tile * 2 + 1] == 0 then { index[e.tile * 2] = list.len(cmds) / 4 } else ()
+      index[e.tile * 2 + 1] = index[e.tile * 2 + 1] + 1
+      list.push(cmds, e.path)
+      list.push(cmds, 0)
+      list.push(cmds, list.len(line_ids))
+      list.push(cmds, 0)
+    } else ()
+    let c = list.len(cmds) - 4
+    if e.line >= 0 then {
+      list.push(line_ids, e.line)
+      cmds[c + 3] = cmds[c + 3] + 1
+    } else {
+      cmds[c + 1] = cmds[c + 1] + e.backdrop
+    }
+  }
+  { lines: lines, index: index, cmds: cmds, line_ids: line_ids }
+}

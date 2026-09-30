@@ -2,7 +2,10 @@
 //
 // Almide Int = i64 = BigInt in JS. B() wraps returns, N() unwraps args.
 
-// TTF parsing moved to Almide (src/ttf.almd) — JS only provides raw byte access
+// Fonts are read by Almide (src/sfnt.almd) from a file this page hands over
+// through WASI (wasi.js, snaidhm's host/wasi.js).
+
+import { createWasi } from "./wasi.js";
 
 const handles = [null];
 function h(obj) { handles.push(obj); return handles.length - 1; }
@@ -298,8 +301,6 @@ function initImageResources(device) {
   };
 }
 
-// Font data buffer (raw bytes for Almide TTF parser)
-let _fontBuffer = null;
 
 export async function init(wasmUrl, canvas) {
   if (!navigator.gpu) throw new Error("WebGPU not supported");
@@ -314,32 +315,17 @@ export async function init(wasmUrl, canvas) {
   ]);
   SHADERS = [rasterCode, rasterCode, rasterCode, imageCode];
 
-  // Load font data (raw bytes for Almide TTF parser)
-  _fontBuffer = await fetch("font.ttf").then(r => r.arrayBuffer());
+  // The font `render` reads as /font.ttf.
+  const fontBytes = await fetch("font.ttf").then(r => r.arrayBuffer());
 
   const _imageResources = initImageResources(_device);
 
-  const wasi = new Proxy({}, { get(_, n) {
-    if (n === "proc_exit") return () => {};
-    if (n === "fd_prestat_get") return () => 8;
-    return () => 0;
-  }});
-
-  // Font data byte-level access (Almide TTF parser reads raw bytes)
-  const fontDataView = new DataView(_fontBuffer);
-  const fontDataImports = {
-    len: () => B(_fontBuffer.byteLength),
-    u8: (offset) => B(fontDataView.getUint8(N(offset))),
-    u16be: (offset) => B(fontDataView.getUint16(N(offset))),
-    i16be: (offset) => B(fontDataView.getInt16(N(offset))),
-    u32be: (offset) => B(fontDataView.getUint32(N(offset))),
-    i8: (offset) => B(fontDataView.getInt8(N(offset))),
-  };
-
-  const imports = { wasi_snapshot_preview1: wasi, font_data: fontDataImports, ...createImports(canvas) };
+  const wasi = createWasi({ files: { "/font.ttf": fontBytes } });
+  const imports = { wasi_snapshot_preview1: wasi.imports, ...createImports(canvas) };
   const { instance } = await WebAssembly.instantiate(
     await fetch(wasmUrl).then(r => r.arrayBuffer()), imports);
   _wasmMemory = instance.exports.memory;
+  wasi.setMemory(_wasmMemory);
 
   if (instance.exports._start) try { instance.exports._start(); } catch (_) {}
   if (instance.exports.render) {

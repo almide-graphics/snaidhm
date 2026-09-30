@@ -1,0 +1,96 @@
+// A window on a Wayland desktop, with no Rust underneath: the protocol, the
+// shared-memory buffers, the fonts and the pixels are all Almide
+// (snaidhm.wayland, snaidhm.cpu.canvas, snaidhm.sfnt).
+//
+//   almide run examples/wayland/main.almd            until the window is closed
+//   almide run examples/wayland/main.almd -- 3000    close itself after 3 s
+
+import env
+import self.wayland.window as window
+import self.cpu.canvas as canvas
+import self.native.fonts as fonts
+import self.sfnt as sfnt
+
+fn cp(s: String) -> List[Int] = {
+  let cs = string.chars(s)
+  let n = list.len(cs)
+  var out: List[Int] = []
+  for i in 0..<n { list.push(out, string.codepoint(cs[i]) ?? 0) }
+  out
+}
+
+type Ui = { hover: Bool, clicks: Int, wheel: Float, keys: Int, keymap: Int, typed: String }
+
+// The card the pointer can hover and click.
+let CARD_X0 = 40.0
+let CARD_Y0 = 150.0
+let CARD_H = 120.0
+
+fn in_card(x: Float, y: Float, w: Float) -> Bool =
+  x >= CARD_X0 and x < w - CARD_X0 and y >= CARD_Y0 and y < CARD_Y0 + CARD_H
+
+/// A frame for the window: its pixels, drawn on in units.
+fn frame() -> canvas.Canvas = canvas.scaled(window.width(), window.height(), window.scale())
+
+fn draw(faces: List[sfnt.Font], ui: Ui, frame: canvas.Canvas) -> Bytes = {
+  var c = frame
+  let w = canvas.width(c)
+  let h = canvas.height(c)
+  c = canvas.clear(c, 0.07, 0.08, 0.11)
+  c = canvas.draw_text(c, faces, cp("Almide on Wayland"), 30.0, 40.0, 70.0, 0.95, 0.96, 1.0, 1.0)
+  c = canvas.draw_text(c, faces, cp("Rust なし — プロトコルも共有メモリも描画も Almide"), 17.0, 40.0, 110.0, 0.7, 0.74, 0.85, 1.0)
+  let lift = if ui.hover then 0.08 else 0.0
+  c = canvas.rect(c, CARD_X0, CARD_Y0, w - CARD_X0, CARD_Y0 + CARD_H, 14.0,
+    0.16 + lift, 0.19 + lift, 0.27 + lift, 1.0)
+  c = canvas.draw_text(c, faces, cp(if ui.hover then "ポインタが乗っています" else "カードにポインタを乗せてください"),
+    18.0, CARD_X0 + 24.0, CARD_Y0 + 48.0, 1.0, 1.0, 1.0, 1.0)
+  c = canvas.draw_text(c, faces, cp("clicks ${int.to_string(ui.clicks)}   wheel ${float.to_string(ui.wheel)}   keys ${int.to_string(ui.keys)}"),
+    15.0, CARD_X0 + 24.0, CARD_Y0 + 84.0, 0.75, 0.8, 0.9, 1.0)
+  c = canvas.rect(c, 40.0, 310.0, w - 40.0, 350.0, 8.0, 0.12, 0.13, 0.18, 1.0)
+  c = canvas.draw_text(c, faces, cp(if ui.typed == "" then "type here" else ui.typed), 17.0, 56.0, 336.0,
+    if ui.typed == "" then 0.45 else 0.95, if ui.typed == "" then 0.48 else 0.96, if ui.typed == "" then 0.55 else 1.0, 1.0)
+  c = canvas.draw_text(c, faces, cp("keymap: ${int.to_string(ui.keymap)} bytes, received as a file descriptor"),
+    14.0, 40.0, h - 40.0, 0.55, 0.6, 0.7, 1.0)
+  c.px
+}
+
+effect fn main() -> Unit = {
+  let limit = match list.get(env.args(), 0) { some(s) => int.parse(s) ?? 0, none => 0 }
+  if window.open("Almide on Wayland", 720, 400)! then {
+    let faces = fonts.system()!
+    let start = env.millis()
+    var ui: Ui = { hover: false, clicks: 0, wheel: 0.0, keys: 0, keymap: 0, typed: "" }
+    window.present(draw(faces, ui, frame()))!
+    var going = true
+    while going {
+      going = window.pump(16)! and (limit == 0 or env.millis() - start < limit)
+      let keymap = string.len(window.keymap_text())
+      var dirty = window.resized() or keymap != ui.keymap
+      ui = { ...ui, keymap: keymap }
+      var kind = window.next_event()
+      while kind != window.NONE {
+        let before = ui
+        if kind == window.MOUSE_MOVE then {
+          ui = { ...ui, hover: in_card(window.event_x(), window.event_y(), window.extent().0) }
+        } else if kind == window.MOUSE_DOWN then {
+          ui = { ...ui, clicks: ui.clicks + 1 }
+        } else if kind == window.WHEEL then {
+          ui = { ...ui, wheel: ui.wheel + window.event_dy() }
+        } else if kind == window.TEXT then {
+          ui = { ...ui, typed: ui.typed + string.from_codepoint(window.event_code()) }
+        } else if kind == window.KEY then {
+          ui = { ...ui, keys: ui.keys + 1 }
+          if window.event_code() == window.KEY_ESCAPE then { going = false } else ()
+        } else ()
+        dirty = dirty or ui != before
+        kind = window.next_event()
+      }
+      if dirty and going then { window.present(draw(faces, ui, frame()))! } else ()
+    }
+    // One last frame for whoever captures the screen.
+    window.present(draw(faces, ui, frame()))!
+    println("done")
+  } else {
+    println("no Wayland window")
+  }
+}

@@ -1,0 +1,308 @@
+// snaidhm sfnt — OpenType / TrueType / TrueType Collection fonts, from bytes
+//
+// Pure Almide over the font file's bytes: no host holds the font and no
+// target-specific reader is involved, so a font loads the same natively and
+// in the browser. Reads what drawing text needs — metrics, the character
+// map, advances and glyph outlines — and hands the outlines out in one form
+// whichever format stores them:
+//
+//   - glyf (TrueType quadratics), converted to cubics (truetype.almd);
+//   - CFF (Type 2 charstrings, CID-keyed or not) — the outlines of most CJK
+//     fonts, Hiragino and Noto Sans CJK among them (cff.almd).
+//
+// Character maps: format 12 (all of Unicode — the only one Hiragino has) and
+// format 4 (the BMP).
+//
+// Written as index loops without capturing closures, for the wasm renderer
+// (see coarse.almd).
+
+import self.cff as cff
+import self.truetype as truetype
+
+// Outline commands. A glyph outline is `cmds` with their points in `pts`,
+// font units, y up: MOVE and LINE take one point, CUBIC three (two controls
+// and the end), CLOSE none — it ends the contour without drawing back to its
+// start. The same steps a pen receives: moveTo, lineTo, curveTo, closePath.
+let MOVE = 0
+let LINE = 1
+let CUBIC = 2
+let CLOSE = 3
+
+type Outline = { cmds: List[Int], pts: List[Float] }
+
+let OUTLINE_GLYF = 0
+let OUTLINE_CFF = 1
+
+type Font = {
+  data: Bytes,
+  units_per_em: Int,
+  // hhea line metrics, font units, y up: baseline to the top of the tallest
+  // glyph, to the bottom of the lowest (negative), and the extra line gap.
+  ascent: Int,
+  descent: Int,
+  line_gap: Int,
+  num_glyphs: Int,
+  hmtx: Int,
+  num_h_metrics: Int,
+  // The character map in use: its format (12, 4, or 0 for none) and where
+  // its subtable starts.
+  cmap_format: Int,
+  cmap_at: Int,
+  outlines: Int,
+  loca: Int,
+  glyf: Int,
+  long_loca: Bool,
+  cff: cff.Cff,
+}
+
+fn tag(s: String) -> Int = {
+  let b = string.to_bytes(s)
+  ((b[0] * 256 + b[1]) * 256 + b[2]) * 256 + b[3]
+}
+
+/// Where the table `tag` of the face whose table directory starts at `dir`
+/// begins, or -1.
+fn table(data: Bytes, dir: Int, t: Int) -> Int = {
+  let n = bytes.read_u16_be(data, dir + 4)
+  var at = 0 - 1
+  for i in 0..<n {
+    let entry = dir + 12 + i * 16
+    if bytes.read_u32_be(data, entry) == t then { at = bytes.read_u32_be(data, entry + 8) } else ()
+  }
+  at
+}
+
+/// The number of faces in `data`: a collection's count, 1 for a single font.
+fn face_count(data: Bytes) -> Int =
+  if bytes.len(data) >= 12 and bytes.read_u32_be(data, 0) == tag("ttcf") then bytes.read_u32_be(data, 8)
+  else 1
+
+/// The best Unicode subtable: format 12 before format 4, the full-repertoire
+/// encodings before the BMP ones. (format, subtable offset), or (0, 0).
+fn pick_cmap(data: Bytes, cmap: Int) -> (Int, Int) = {
+  let n = bytes.read_u16_be(data, cmap + 2)
+  var best_rank = 0
+  var best_format = 0
+  var best_at = 0
+  for i in 0..<n {
+    let entry = cmap + 4 + i * 8
+    let platform = bytes.read_u16_be(data, entry)
+    let encoding = bytes.read_u16_be(data, entry + 2)
+    let at = cmap + bytes.read_u32_be(data, entry + 4)
+    let format = bytes.read_u16_be(data, at)
+    let unicode = platform == 0 or (platform == 3 and (encoding == 1 or encoding == 10))
+    let rank = if not unicode then 0
+      else if format == 12 and (platform == 0 or encoding == 10) then 4
+      else if format == 12 then 3
+      else if format == 4 and platform == 3 then 2
+      else if format == 4 then 1
+      else 0
+    if rank > best_rank then {
+      best_rank = rank
+      best_format = format
+      best_at = at
+    } else ()
+  }
+  (best_format, best_at)
+}
+
+/// Face `face` of the font file `data` (0 for a single font).
+fn load(data: Bytes, face: Int) -> Result[Font, String] = {
+  let size = bytes.len(data)
+  if size < 12 then err("not a font: ${int.to_string(size)} bytes")
+  else {
+    let collection = bytes.read_u32_be(data, 0) == tag("ttcf")
+    let faces = face_count(data)
+    if face < 0 or face >= faces then err("no face ${int.to_string(face)}: the file has ${int.to_string(faces)}")
+    else {
+      let dir = if collection then bytes.read_u32_be(data, 12 + face * 4) else 0
+      let head = table(data, dir, tag("head"))
+      let hhea = table(data, dir, tag("hhea"))
+      let maxp = table(data, dir, tag("maxp"))
+      let hmtx = table(data, dir, tag("hmtx"))
+      let cmap = table(data, dir, tag("cmap"))
+      let glyf = table(data, dir, tag("glyf"))
+      let loca = table(data, dir, tag("loca"))
+      let cff_at = table(data, dir, tag("CFF "))
+      if head < 0 or hhea < 0 or maxp < 0 or cmap < 0 then err("missing a required table (head, hhea, maxp, cmap)")
+      else if glyf < 0 and cff_at < 0 then err("no outlines: neither glyf nor CFF (CFF2 is not read)")
+      else {
+        let picked = pick_cmap(data, cmap)
+        let parsed = if cff_at >= 0 then cff.parse(data, cff_at) else ok(cff.absent())
+        match parsed {
+          err(e) => err("CFF: " + e),
+          ok(c) => ok({
+            data: data,
+            units_per_em: bytes.read_u16_be(data, head + 18),
+            ascent: bytes.read_i16_be(data, hhea + 4),
+            descent: bytes.read_i16_be(data, hhea + 6),
+            line_gap: bytes.read_i16_be(data, hhea + 8),
+            num_glyphs: bytes.read_u16_be(data, maxp + 4),
+            hmtx: hmtx,
+            num_h_metrics: bytes.read_u16_be(data, hhea + 34),
+            cmap_format: picked.0,
+            cmap_at: picked.1,
+            outlines: if glyf >= 0 then OUTLINE_GLYF else OUTLINE_CFF,
+            loca: loca,
+            glyf: glyf,
+            long_loca: bytes.read_i16_be(data, head + 50) == 1,
+            cff: c,
+          }),
+        }
+      }
+    }
+  }
+}
+
+// ── Character map ──
+
+/// The glyph for code point `code`, 0 (.notdef) when the font has none.
+fn glyph_id(font: Font, code: Int) -> Int =
+  if font.cmap_format == 12 then cmap12(font.data, font.cmap_at, code)
+  else if font.cmap_format == 4 then cmap4(font.data, font.cmap_at, code)
+  else 0
+
+/// Format 12: sequential groups (start, end, first glyph), sorted by start.
+fn cmap12(data: Bytes, at: Int, code: Int) -> Int = {
+  let groups = bytes.read_u32_be(data, at + 12)
+  var lo = 0
+  var hi = groups - 1
+  var gid = 0
+  while lo <= hi {
+    let mid = (lo + hi) / 2
+    let g = at + 16 + mid * 12
+    let start = bytes.read_u32_be(data, g)
+    let stop = bytes.read_u32_be(data, g + 4)
+    if code < start then { hi = mid - 1 }
+    else if code > stop then { lo = mid + 1 }
+    else {
+      gid = bytes.read_u32_be(data, g + 8) + code - start
+      lo = hi + 1
+    }
+  }
+  gid
+}
+
+/// Format 4: segments sorted by end code, each mapping by delta or through
+/// the glyph index array.
+fn cmap4(data: Bytes, at: Int, code: Int) -> Int = {
+  if code > 0xFFFF then 0
+  else {
+    let segs = bytes.read_u16_be(data, at + 6) / 2
+    let ends = at + 14
+    let starts = ends + segs * 2 + 2
+    let deltas = starts + segs * 2
+    let ranges = deltas + segs * 2
+    // The first segment whose end code is >= code.
+    var lo = 0
+    var hi = segs - 1
+    while lo < hi {
+      let mid = (lo + hi) / 2
+      if bytes.read_u16_be(data, ends + mid * 2) < code then { lo = mid + 1 } else { hi = mid }
+    }
+    let start = bytes.read_u16_be(data, starts + lo * 2)
+    if segs == 0 or code < start or code > bytes.read_u16_be(data, ends + lo * 2) then 0
+    else {
+      let delta = bytes.read_u16_be(data, deltas + lo * 2)
+      let range = bytes.read_u16_be(data, ranges + lo * 2)
+      if range == 0 then (code + delta) % 65536
+      else {
+        let g = bytes.read_u16_be(data, ranges + lo * 2 + range + (code - start) * 2)
+        if g == 0 then 0 else (g + delta) % 65536
+      }
+    }
+  }
+}
+
+/// The font drawing code point `code` — the first of `fonts` with a glyph
+/// for it, else the first — and the glyph: (font index, glyph).
+fn pick(fonts: List[Font], code: Int) -> (Int, Int) = {
+  var found = 0 - 1
+  var gid = 0
+  let n = list.len(fonts)
+  for i in 0..<n {
+    if found < 0 then {
+      let g = glyph_id(fonts[i], code)
+      if g != 0 then {
+        found = i
+        gid = g
+      } else ()
+    } else ()
+  }
+  if found < 0 then (0, 0) else (found, gid)
+}
+
+// ── Metrics ──
+
+/// Advance width of glyph `gid`, font units.
+fn advance(font: Font, gid: Int) -> Int =
+  if font.hmtx < 0 or font.num_h_metrics == 0 then font.units_per_em
+  else bytes.read_u16_be(font.data, font.hmtx + int.min(gid, font.num_h_metrics - 1) * 4)
+
+/// Left side bearing of glyph `gid`, font units.
+fn lsb(font: Font, gid: Int) -> Int =
+  if font.hmtx < 0 or font.num_h_metrics == 0 then 0
+  else if gid < font.num_h_metrics then bytes.read_i16_be(font.data, font.hmtx + gid * 4 + 2)
+  else bytes.read_i16_be(font.data, font.hmtx + font.num_h_metrics * 4 + (gid - font.num_h_metrics) * 2)
+
+// ── Outlines ──
+
+/// The outline of glyph `gid`, font units, y up. Empty for a glyph with no
+/// contours (a space) or out of range.
+fn outline(font: Font, gid: Int) -> Outline =
+  if gid < 0 or gid >= font.num_glyphs then { cmds: [], pts: [] }
+  else if font.outlines == OUTLINE_CFF then {
+    let o = cff.outline(font.data, font.cff, gid)
+    { cmds: o.cmds, pts: o.pts }
+  } else {
+    let o = truetype.outline(font.data, font.loca, font.glyf, font.long_loca, gid, lsb(font, gid))
+    { cmds: o.cmds, pts: o.pts }
+  }
+
+/// Outline `o` as closed cubics, 8 floats each (start, two controls, end),
+/// every coordinate mapped to (x * scale + ox, y * scale + oy): lines become
+/// cubics with their controls at the thirds, and each contour gets the line
+/// back to its start that CLOSE leaves implicit — what a fill needs.
+fn closed_cubics(o: Outline, scale: Float, ox: Float, oy: Float) -> List[Float] = {
+  var out: List[Float] = []
+  var p = 0
+  var sx = 0.0
+  var sy = 0.0
+  var cx = 0.0
+  var cy = 0.0
+  let n = list.len(o.cmds)
+  for i in 0..<n {
+    let c = o.cmds[i]
+    if c == MOVE then {
+      sx = o.pts[p] * scale + ox
+      sy = o.pts[p + 1] * scale + oy
+      cx = sx
+      cy = sy
+      p = p + 2
+    } else if c == LINE then {
+      let x = o.pts[p] * scale + ox
+      let y = o.pts[p + 1] * scale + oy
+      out = out + line_cubic(cx, cy, x, y)
+      cx = x
+      cy = y
+      p = p + 2
+    } else if c == CUBIC then {
+      let x = o.pts[p + 4] * scale + ox
+      let y = o.pts[p + 5] * scale + oy
+      out = out + [cx, cy, o.pts[p] * scale + ox, o.pts[p + 1] * scale + oy,
+                   o.pts[p + 2] * scale + ox, o.pts[p + 3] * scale + oy, x, y]
+      cx = x
+      cy = y
+      p = p + 6
+    } else {
+      if cx != sx or cy != sy then { out = out + line_cubic(cx, cy, sx, sy) } else ()
+      cx = sx
+      cy = sy
+    }
+  }
+  out
+}
+
+fn line_cubic(x0: Float, y0: Float, x1: Float, y1: Float) -> List[Float] =
+  [x0, y0, x0 + (x1 - x0) / 3.0, y0 + (y1 - y0) / 3.0,
+   x0 + 2.0 * (x1 - x0) / 3.0, y0 + 2.0 * (y1 - y0) / 3.0, x1, y1]

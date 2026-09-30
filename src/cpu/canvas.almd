@@ -1,0 +1,165 @@
+// snaidhm cpu canvas — pixels drawn on the CPU, in the layout wl_shm takes
+//
+// A canvas is `w` x `h` pixels of 4 bytes — B, G, R, A, premultiplied, rows
+// top to bottom: Wayland's ARGB8888 in memory — so a frame goes to the
+// compositor as it is. Rectangles are filled directly; text is blended from
+// the same exact-coverage glyph bitmaps the GPU text layer caches
+// (glyph.almd), each rasterized once per font, glyph and size.
+//
+// Everything is drawn in units, not pixels: a canvas made for a screen of
+// scale 2 (or 1.6) is that many pixels per unit, and the same drawing comes
+// out the same size there, only sharper. Code that draws never multiplies by
+// the scale — it cannot forget to.
+
+import self.sfnt as sfnt
+import self.glyph as glyph
+
+/// `w` x `h` pixels, `scale` pixels per unit; drawing lands only inside the
+/// clip, `clip_x0 ..< clip_x1` x `clip_y0 ..< clip_y1` in pixels (the whole
+/// canvas until `clip` narrows it).
+type Canvas = { w: Int, h: Int, scale: Float, px: Bytes, clip_x0: Int, clip_y0: Int, clip_x1: Int, clip_y1: Int }
+
+// Rasterized glyphs: (font * 65536 + glyph) * 1024 + pixel size -> bitmap.
+var glyphs: Map[Int, glyph.Bitmap] = map.new()
+
+/// A `w` x `h` pixel canvas, one pixel per unit, transparent black.
+fn new(w: Int, h: Int) -> Canvas = scaled(w, h, 1.0)
+
+/// A `w` x `h` pixel canvas of `scale` pixels per unit — a window's
+/// `width()`, `height()` and `scale()` — transparent black.
+fn scaled(w: Int, h: Int, scale: Float) -> Canvas =
+  { w: w, h: h, scale: scale, px: bytes.new(w * h * 4), clip_x0: 0, clip_y0: 0, clip_x1: w, clip_y1: h }
+
+/// Draw only inside `x0 ..< x1` x `y0 ..< y1` (units) from now on — a list's
+/// frame its scrolled rows must not leave.
+fn clip(c: Canvas, x0: Float, y0: Float, x1: Float, y1: Float) -> Canvas = {
+  ...c,
+  clip_x0: int.clamp(float.to_int(float.floor(x0 * c.scale)), 0, c.w),
+  clip_y0: int.clamp(float.to_int(float.floor(y0 * c.scale)), 0, c.h),
+  clip_x1: int.clamp(float.to_int(float.ceil(x1 * c.scale)), 0, c.w),
+  clip_y1: int.clamp(float.to_int(float.ceil(y1 * c.scale)), 0, c.h),
+}
+
+/// Draw anywhere on the canvas again.
+fn unclip(c: Canvas) -> Canvas = { ...c, clip_x0: 0, clip_y0: 0, clip_x1: c.w, clip_y1: c.h }
+
+/// The canvas's width in units.
+fn width(c: Canvas) -> Float = int.to_float(c.w) / c.scale
+
+/// The canvas's height in units.
+fn height(c: Canvas) -> Float = int.to_float(c.h) / c.scale
+
+fn channel(v: Float) -> Int = float.to_int(float.round(float.clamp(v, 0.0, 1.0) * 255.0))
+
+/// Blend colour (`r`, `g`, `b`) at opacity `a` over pixel `i`.
+fn blend(mut px: Bytes, i: Int, r: Float, g: Float, b: Float, a: Float) -> Unit = {
+  let o = i * 4
+  let keep = 1.0 - a
+  bytes.set_at(px, o, channel(b * a + int.to_float(bytes.read_u8(px, o)) / 255.0 * keep))
+  bytes.set_at(px, o + 1, channel(g * a + int.to_float(bytes.read_u8(px, o + 1)) / 255.0 * keep))
+  bytes.set_at(px, o + 2, channel(r * a + int.to_float(bytes.read_u8(px, o + 2)) / 255.0 * keep))
+  bytes.set_at(px, o + 3, channel(a + int.to_float(bytes.read_u8(px, o + 3)) / 255.0 * keep))
+}
+
+/// Fill the whole canvas with an opaque colour.
+fn clear(c: Canvas, r: Float, g: Float, b: Float) -> Canvas = {
+  var px = c.px
+  let n = c.w * c.h
+  let br = channel(b)
+  let gr = channel(g)
+  let rr = channel(r)
+  for i in 0..<n {
+    bytes.set_at(px, i * 4, br)
+    bytes.set_at(px, i * 4 + 1, gr)
+    bytes.set_at(px, i * 4 + 2, rr)
+    bytes.set_at(px, i * 4 + 3, 255)
+  }
+  { ...c, px: px }
+}
+
+/// Blend a rectangle, `x0 ..< x1` x `y0 ..< y1` in units, with rounded
+/// corners of radius `radius` (0: square), anti-aliased at its edges.
+fn rect(c: Canvas, ux0: Float, uy0: Float, ux1: Float, uy1: Float, radius: Float,
+        r: Float, g: Float, b: Float, a: Float) -> Canvas = {
+  var px = c.px
+  let x0 = ux0 * c.scale
+  let y0 = uy0 * c.scale
+  let x1 = ux1 * c.scale
+  let y1 = uy1 * c.scale
+  let lo_x = int.max(c.clip_x0, float.to_int(float.floor(x0)))
+  let hi_x = int.min(c.clip_x1, float.to_int(float.ceil(x1)))
+  let lo_y = int.max(c.clip_y0, float.to_int(float.floor(y0)))
+  let hi_y = int.min(c.clip_y1, float.to_int(float.ceil(y1)))
+  let rad = float.min(radius * c.scale, float.min(x1 - x0, y1 - y0) / 2.0)
+  for y in lo_y..<hi_y {
+    for x in lo_x..<hi_x {
+      let cov = coverage(int.to_float(x) + 0.5, int.to_float(y) + 0.5, x0, y0, x1, y1, rad)
+      if cov > 0.0 then blend(px, y * c.w + x, r, g, b, a * cov) else ()
+    }
+  }
+  { ...c, px: px }
+}
+
+/// How much of the pixel centred at (`px`, `py`) the rounded rectangle
+/// covers, from the signed distance to its edge.
+fn coverage(px: Float, py: Float, x0: Float, y0: Float, x1: Float, y1: Float, rad: Float) -> Float = {
+  let cx = (x0 + x1) / 2.0
+  let cy = (y0 + y1) / 2.0
+  let qx = float.abs(px - cx) - ((x1 - x0) / 2.0 - rad)
+  let qy = float.abs(py - cy) - ((y1 - y0) / 2.0 - rad)
+  let ox = float.max(qx, 0.0)
+  let oy = float.max(qy, 0.0)
+  let dist = math.sqrt(ox * ox + oy * oy) + float.min(float.max(qx, qy), 0.0) - rad
+  float.clamp(0.5 - dist, 0.0, 1.0)
+}
+
+/// Draw `chars` at `size` units per em, the pen starting at `x` on the
+/// baseline `y`, each character from the first of `fonts` that has it.
+fn draw_text(c: Canvas, fonts: List[sfnt.Font], chars: List[Int], usize: Float, x: Float, y: Float,
+             r: Float, g: Float, b: Float, a: Float) -> Canvas = {
+  var px = c.px
+  let size = usize * c.scale
+  let size_px = int.max(1, float.to_int(float.round(size)))
+  let baseline = float.to_int(float.round(y * c.scale))
+  var pen = x * c.scale
+  let n = list.len(chars)
+  for i in 0..<n {
+    let p = sfnt.pick(fonts, chars[i])
+    let font = fonts[p.0]
+    let k = (p.0 * 65536 + p.1) * 1024 + size_px
+    let bm = match map.get(glyphs, k) {
+      some(cached) => cached,
+      none => {
+        let made = glyph.glyph_bitmap(font, p.1, int.to_float(size_px))
+        glyphs = map.set(glyphs, k, made)
+        made
+      },
+    }
+    let left = float.to_int(float.round(pen)) + bm.left
+    let top = baseline - bm.top
+    for gy in 0..<bm.h {
+      let yy = top + gy
+      if yy >= c.clip_y0 and yy < c.clip_y1 then {
+        for gx in 0..<bm.w {
+          let xx = left + gx
+          let cov = bm.coverage[gy * bm.w + gx]
+          if xx >= c.clip_x0 and xx < c.clip_x1 and cov > 0 then blend(px, yy * c.w + xx, r, g, b, a * int.to_float(cov) / 255.0) else ()
+        }
+      } else ()
+    }
+    pen = pen + int.to_float(sfnt.advance(font, p.1)) * size / int.to_float(font.units_per_em)
+  }
+  { ...c, px: px }
+}
+
+/// The width `chars` take at `size`, in units, as `draw_text` sets them.
+fn measure(fonts: List[sfnt.Font], chars: List[Int], size: Float) -> Float = {
+  var w = 0.0
+  let n = list.len(chars)
+  for i in 0..<n {
+    let p = sfnt.pick(fonts, chars[i])
+    let font = fonts[p.0]
+    w = w + int.to_float(sfnt.advance(font, p.1)) * size / int.to_float(font.units_per_em)
+  }
+  w
+}

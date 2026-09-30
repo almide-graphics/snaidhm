@@ -132,6 +132,14 @@ fn push_u32(value: Int) -> Unit = _
 @extern(rust, "crate::gpu", "flush_to_buffer")
 fn flush_to_buffer(device: Int, buffer: Int) -> Unit = _
 
+/// Write the staged values into the `w` x `h` rectangle of `texture` at
+/// (`x`, `y`), one `push_u32` per pixel, row by row: RGBA8 packed as
+/// `r | g << 8 | b << 16 | a << 24`. The pointer-free way to fill a texture —
+/// a native build has no linear memory for `upload_encoded_image` to read.
+@extern(wasm, "gpu", "flush_to_texture")
+@extern(rust, "crate::gpu", "flush_to_texture")
+fn flush_to_texture(device: Int, texture: Int, x: Int, y: Int, w: Int, h: Int) -> Unit = _
+
 // ── Bind group: texture + sampler entries ──
 
 @extern(wasm, "gpu", "add_texture_binding")
@@ -201,11 +209,20 @@ fn log_str(ptr: Int, len: Int) -> Unit = _
 fn set_depth_size(device: Int, w: Int, h: Int) -> Unit = _
 
 /// Pipeline for the standard mesh vertex layout — pos(3) + normal(3) + uv(2),
-/// 32-byte stride — depth-tested with `less`, back faces culled, CCW front
-/// (glTF's winding). The caller supplies the shader module.
+/// 32-byte stride — depth-tested with `less`, CCW front (glTF's winding). The
+/// caller supplies the shader module.
+///
+/// `cull` selects which faces are discarded: 0 none, 1 back, 2 front. Front
+/// culling is what an inverted-hull outline needs — the same geometry drawn
+/// expanded along its normals, with only its far side visible.
+///
+/// `blend`: 0 opaque (alpha ignored), 1 straight alpha over the target.
+/// `depth_write`: 0 or 1. Transparent geometry tests depth but must NOT write
+/// it, or the nearest transparent surface hides every one behind it.
 @extern(wasm, "gpu", "create_mesh_pipeline")
 @extern(rust, "crate::gpu", "create_mesh_pipeline")
-fn create_mesh_pipeline(device: Int, shader: Int, format: Int) -> Int = _
+fn create_mesh_pipeline(device: Int, shader: Int, format: Int, cull: Int,
+                        blend: Int, depth_write: Int) -> Int = _
 
 /// Like `begin_render_pass`, with the depth attachment bound. `load` chooses
 /// whether the colour target is cleared (0) or preserved (1), so a 3D pass can
@@ -225,3 +242,35 @@ fn set_index_buffer_u16(pass: Int, buffer: Int) -> Unit = _
 @extern(wasm, "gpu", "write_buffer_at")
 @extern(rust, "crate::gpu", "write_buffer_at")
 fn write_buffer_at(device: Int, buffer: Int, dst_offset: Int, src_ptr: Int, len: Int) -> Unit = _
+
+// ── Textures, samplers, ranged draws ─────────────────────────────────────
+//
+// Creating a texture and filling it are SEPARATE because a decode is async in
+// the browser while a wasm call is not. The texture is created at its final
+// size up front — the caller reads that from the image header, which is file
+// parsing, not a GPU concern — so bind groups made against it stay valid when
+// the pixels arrive later. Swapping the texture object after a decode would
+// silently orphan every bind group already built from it.
+
+/// An empty RGBA8 texture, ready to be bound and filled.
+@extern(wasm, "gpu", "create_texture")
+@extern(rust, "crate::gpu", "create_texture")
+fn create_texture(device: Int, w: Int, h: Int) -> Int = _
+
+/// Decode an encoded image (PNG/JPEG) from linear memory into `texture`. The
+/// decode completes asynchronously; the texture reads as transparent until it
+/// does, never as garbage.
+@extern(wasm, "gpu", "upload_encoded_image")
+@extern(rust, "crate::gpu", "upload_encoded_image")
+fn upload_encoded_image(device: Int, texture: Int, ptr: Int, len: Int) -> Unit = _
+
+/// `filter`: 0 nearest, 1 linear. `wrap`: 0 clamp-to-edge, 1 repeat.
+@extern(wasm, "gpu", "create_sampler")
+@extern(rust, "crate::gpu", "create_sampler")
+fn create_sampler(device: Int, filter: Int, wrap: Int) -> Int = _
+
+/// Draw a RANGE of the bound index buffer. One draw per material needs this —
+/// `draw_indexed` can only start at zero.
+@extern(wasm, "gpu", "draw_indexed_from")
+@extern(rust, "crate::gpu", "draw_indexed_from")
+fn draw_indexed_from(pass: Int, first_index: Int, index_count: Int) -> Unit = _
