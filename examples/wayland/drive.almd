@@ -1,0 +1,84 @@
+// Drive a pointer on a wlroots compositor (sway, Hyprland ...) for testing:
+// one virtual pointer (zwlr_virtual_pointer_v1) that lives for the whole
+// script, written with the same Almide Wayland client the window uses.
+//
+//   almide run examples/wayland/drive.almd -- move 300 220  click  scroll 3  sleep 500
+//
+// `move X Y` goes to layout pixel (X, Y) of a WIDTHxHEIGHT layout (default
+// 1280x720, or `extent W H` first); `click` presses and releases the left
+// button; `scroll N` turns the wheel N steps down; `sleep MS` waits.
+
+import env
+import self.wayland.client as client
+import self.wayland.wire as wire
+
+var manager = 0
+var seat = 0
+
+effect fn main() -> Unit = {
+  client.connect()!
+  let registry = client.new_id()
+  client.send(client.DISPLAY, 1, [registry], [])!
+  let globals = client.roundtrip()!
+  for e in globals {
+    if e.obj == registry and e.op == 0 then {
+      let name = wire.uint_at(e.args, 0)
+      let iface = wire.string_at(e.args, 4)
+      if iface.0 == "zwlr_virtual_pointer_manager_v1" or iface.0 == "wl_seat" then {
+        let id = client.new_id()
+        client.send(registry, 0, [name] + wire.string(iface.0) + [1, id], [])!
+        if iface.0 == "wl_seat" then { seat = id } else { manager = id }
+      } else ()
+    } else ()
+  }
+  if manager == 0 then {
+    println("the compositor has no zwlr_virtual_pointer_manager_v1")
+  } else {
+    let ptr = client.new_id()
+    client.send(manager, 0, [seat, ptr], [])!
+    let _ = client.roundtrip()!
+    let args = env.args()
+    var w = 1280
+    var h = 720
+    var i = 0
+    let n = list.len(args)
+    let t = 0
+    while i < n {
+      let a = args[i]
+      if a == "extent" then {
+        w = int.parse(args[i + 1]) ?? w
+        h = int.parse(args[i + 2]) ?? h
+        i = i + 3
+      } else if a == "move" then {
+        let x = int.parse(args[i + 1]) ?? 0
+        let y = int.parse(args[i + 2]) ?? 0
+        client.send(ptr, 1, [t, x, y, w, h], [])!
+        client.send(ptr, 4, [], [])!
+        i = i + 3
+      } else if a == "click" then {
+        // BTN_LEFT, pressed then released.
+        client.send(ptr, 2, [t, 0x110, 1], [])!
+        client.send(ptr, 4, [], [])!
+        client.send(ptr, 2, [t, 0x110, 0], [])!
+        client.send(ptr, 4, [], [])!
+        i = i + 1
+      } else if a == "scroll" then {
+        let steps = int.parse(args[i + 1]) ?? 1
+        client.send(ptr, 3, [t, 0, wire.fixed(int.to_float(steps) * 15.0)], [])!
+        client.send(ptr, 4, [], [])!
+        i = i + 2
+      } else if a == "sleep" then {
+        let _ = client.roundtrip()!
+        env.sleep_ms(int.parse(args[i + 1]) ?? 0)
+        i = i + 2
+      } else {
+        println("unknown step: ${a}")
+        i = i + 1
+      }
+    }
+    let _ = client.roundtrip()!
+    client.send(ptr, 8, [], [])!
+    let _ = client.roundtrip()!
+    println("driven")
+  }
+}

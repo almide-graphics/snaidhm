@@ -101,3 +101,24 @@ wasi.setMemory(instance.exports.memory);
 every path of it (`test/font-oracle/make_fixture.py`), against outputs checked
 with fontTools. `python3 test/font-oracle/oracle.py FONT [FACE] [--codes all]`
 compares any installed font the same way.
+
+## Wayland, without Rust
+
+`snaidhm.wayland.window` is a desktop window over the Wayland protocol, written
+in Almide down to the socket: the wire format (`wayland/wire.almd`), the
+connection (`wayland/client.almd`, over `net`'s Unix-socket and shared-memory
+primitives), the registry, xdg-shell toplevel, double-buffered wl_shm pixels,
+pointer input, and the keyboard read through the XKB keymap the compositor
+hands over (`wayland/xkb.almd`). Pixels are drawn on the CPU by
+`snaidhm.cpu.canvas` — rectangles and text from the same glyph rasterizer the
+GPU text layer uses — so nothing under the program is Rust but the language
+runtime. `snaidhm.native.window` (winit + wgpu) stays the GPU path.
+
+```sh
+almide run examples/wayland/main.almd          # on a Wayland desktop
+WAYLAND_DEBUG=1 almide run examples/wayland/main.almd   # trace every message
+```
+
+`test/wayland/run.sh` runs it on a headless sway in Docker, types into it,
+drives a pointer over it (`examples/wayland/drive.almd`, a virtual pointer
+written with the same client) and saves a screenshot.

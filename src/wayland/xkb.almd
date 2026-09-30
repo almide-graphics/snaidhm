@@ -1,0 +1,195 @@
+// snaidhm wayland xkb — what a key means, from the keymap the compositor sends
+//
+// A Wayland key event carries a keycode, and a keycode means nothing by
+// itself: the keyboard's keymap (XKB text, handed over as a file descriptor
+// in wl_keyboard.keymap) says which key it is and what it types. A virtual
+// keyboard makes this plain — wtype numbers its keys from 1 in whatever order
+// it needs them. This reads the two parts of the keymap a text field needs:
+//
+//   xkb_keycodes { <AE01> = 10; ... }              key names to keycodes
+//   xkb_symbols  { key <AE01> { [ 1, exclam ] }; ... }  names to keysyms
+//
+// and turns a keysym into a character or one of the named keys a UI handles.
+// Levels 1 and 2 (unshifted and shifted) of the first group are read; other
+// groups, and the types and modifier maps, are not.
+
+/// Per keycode as a Wayland event gives it (the X keycode minus 8), its
+/// level-1 and level-2 keysym names ("" where the level is empty).
+type Keymap = { codes: List[Int], level1: List[String], level2: List[String] }
+
+fn empty() -> Keymap = {
+  let codes: List[Int] = []
+  let names: List[String] = []
+  { codes: codes, level1: names, level2: names }
+}
+
+/// The text between the first `{` after `section` and its matching `}`.
+fn block(text: String, section: String) -> String = {
+  match string.index_of(text, section) {
+    none => "",
+    some(at) => {
+      let rest = string.slice(text, at)
+      match string.index_of(rest, "{") {
+        none => "",
+        some(open) => {
+          let cs = string.chars(rest)
+          let n = list.len(cs)
+          var depth = 0
+          var close = n
+          var i = open
+          while i < n {
+            let c = cs[i]
+            if c == "{" then { depth = depth + 1 }
+            else if c == "}" then {
+              depth = depth - 1
+              if depth == 0 then {
+                close = i
+                i = n
+              } else ()
+            } else ()
+            i = i + 1
+          }
+          string.slice(rest, open + 1, close)
+        },
+      }
+    },
+  }
+}
+
+/// The name between `<` and `>` at the start of `s` (after spaces), or "".
+fn key_name(s: String) -> String = {
+  let t = string.trim(s)
+  if string.starts_with(t, "<") then {
+    match string.index_of(t, ">") {
+      some(end) => string.slice(t, 1, end),
+      none => "",
+    }
+  } else ""
+}
+
+/// Parse the keymap text.
+fn parse(text: String) -> Keymap = {
+  // xkb_keycodes: `<NAME> = N;` and `alias <A> = <B>;`
+  var names: List[String] = []
+  var numbers: List[Int] = []
+  var alias_from: List[String] = []
+  var alias_to: List[String] = []
+  let decls = string.split(block(text, "xkb_keycodes"), ";")
+  let nd = list.len(decls)
+  for i in 0..<nd {
+    let d = string.trim(decls[i])
+    let parts = string.split(d, "=")
+    if list.len(parts) == 2 then {
+      let lhs = string.trim(parts[0])
+      let rhs = string.trim(parts[1])
+      if string.starts_with(lhs, "alias") then {
+        list.push(alias_from, key_name(string.slice(lhs, 5)))
+        list.push(alias_to, key_name(rhs))
+      } else if string.starts_with(lhs, "<") then {
+        match int.parse(rhs) {
+          ok(code) => {
+            list.push(names, key_name(lhs))
+            list.push(numbers, code)
+          },
+          err(_) => (),
+        }
+      } else ()
+    } else ()
+  }
+  // xkb_symbols: `key <NAME> { ... [ sym1, sym2 ] ... };`
+  var codes: List[Int] = []
+  var level1: List[String] = []
+  var level2: List[String] = []
+  let syms = block(text, "xkb_symbols")
+  let keys = string.split(syms, "key ")
+  let nk = list.len(keys)
+  for i in 1..<nk {
+    let k = keys[i]
+    let name = resolve(key_name(k), alias_from, alias_to)
+    let code = code_of(name, names, numbers)
+    // `symbols[1]= [ q, Q ]`: the levels are the list after `]=`, not the
+    // group index before it.
+    let levels_at = if string.contains(k, "symbols[") then {
+      match string.index_of(k, "]=") { some(at) => string.slice(k, at + 2), none => k }
+    } else k
+    match string.index_of(levels_at, "[") {
+      some(open) => {
+        let after = string.slice(levels_at, open + 1)
+        let inside = match string.index_of(after, "]") { some(close) => string.slice(after, 0, close), none => "" }
+        let levels = string.split(inside, ",") |> list.map((l) => string.trim(l))
+        if code >= 8 and list.len(levels) > 0 then {
+          list.push(codes, code - 8)
+          list.push(level1, levels[0])
+          list.push(level2, if list.len(levels) > 1 then levels[1] else levels[0])
+        } else ()
+      },
+      none => (),
+    }
+  }
+  { codes: codes, level1: level1, level2: level2 }
+}
+
+fn resolve(name: String, from: List[String], to: List[String]) -> String = {
+  var out = name
+  let n = list.len(from)
+  for i in 0..<n {
+    if from[i] == name then { out = to[i] } else ()
+  }
+  out
+}
+
+fn code_of(name: String, names: List[String], numbers: List[Int]) -> Int = {
+  var out = 0 - 1
+  let n = list.len(names)
+  for i in 0..<n {
+    if names[i] == name then { out = numbers[i] } else ()
+  }
+  out
+}
+
+/// The keysym name keycode `code` (as Wayland gives it) has at `level` (1 or
+/// 2), or "" when the keymap does not say.
+fn keysym(km: Keymap, code: Int, level: Int) -> String = {
+  var out = ""
+  let n = list.len(km.codes)
+  for i in 0..<n {
+    if km.codes[i] == code then { out = if level == 2 then km.level2[i] else km.level1[i] } else ()
+  }
+  out
+}
+
+/// The character a keysym types, as a code point; 0 for a keysym that types
+/// none (a modifier, a function key, a named key).
+fn char_of(sym: String) -> Int = {
+  let cs = string.chars(sym)
+  if list.len(cs) == 1 then string.codepoint(sym) ?? 0
+  else if string.starts_with(sym, "U") and list.len(cs) >= 5 then int.from_hex(string.slice(sym, 1)) ?? 0
+  else match sym {
+    "space" => 32, "exclam" => 33, "quotedbl" => 34, "numbersign" => 35,
+    "dollar" => 36, "percent" => 37, "ampersand" => 38, "apostrophe" => 39,
+    "parenleft" => 40, "parenright" => 41, "asterisk" => 42, "plus" => 43,
+    "comma" => 44, "minus" => 45, "period" => 46, "slash" => 47,
+    "colon" => 58, "semicolon" => 59, "less" => 60, "equal" => 61,
+    "greater" => 62, "question" => 63, "at" => 64, "bracketleft" => 91,
+    "backslash" => 92, "bracketright" => 93, "asciicircum" => 94, "underscore" => 95,
+    "grave" => 96, "braceleft" => 123, "bar" => 124, "braceright" => 125,
+    "asciitilde" => 126, "yen" => 165,
+    _ => 0,
+  }
+}
+
+/// The DOM key code of a named key a UI handles as a key, else 0.
+fn named(sym: String) -> Int = match sym {
+  "BackSpace" => 8,
+  "Tab" => 9,
+  "ISO_Left_Tab" => 9,
+  "Return" => 13,
+  "KP_Enter" => 13,
+  "Escape" => 27,
+  "Left" => 37,
+  "Up" => 38,
+  "Right" => 39,
+  "Down" => 40,
+  "Delete" => 46,
+  _ => 0,
+}

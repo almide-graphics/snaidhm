@@ -91,24 +91,6 @@ fn code_points(s: String) -> List[Int] = {
   out
 }
 
-/// The font drawing code point `code` — the first of `fonts` with a glyph
-/// for it, else the first — and the glyph: (font index, glyph).
-fn pick(fonts: List[sfnt.Font], code: Int) -> (Int, Int) = {
-  var found = 0 - 1
-  var gid = 0
-  let n = list.len(fonts)
-  for i in 0..<n {
-    if found < 0 then {
-      let g = sfnt.glyph_id(fonts[i], code)
-      if g != 0 then {
-        found = i
-        gid = g
-      } else ()
-    } else ()
-  }
-  if found < 0 then (0, 0) else (found, gid)
-}
-
 /// Advance of glyph `gid` of font `fi`, px at `size` px per em.
 fn advance_px(layer: TextLayer, fi: Int, gid: Int, size: Float) -> Float = {
   let f = layer.fonts[fi]
@@ -123,7 +105,7 @@ fn measure(layer: TextLayer, chars: List[Int], size: Float) -> Float = {
   var w = 0.0
   let n = list.len(chars)
   for i in 0..<n {
-    let p = pick(layer.fonts, chars[i])
+    let p = sfnt.pick(layer.fonts, chars[i])
     w = w + advance_px(layer, p.0, p.1, size)
   }
   w
@@ -207,7 +189,7 @@ fn add_run(device: Int, layer: TextLayer, chars: List[Int], size: Float, x: Floa
   var pen = x
   let n = list.len(chars)
   for i in 0..<n {
-    let p = pick(cur.fonts, chars[i])
+    let p = sfnt.pick(cur.fonts, chars[i])
     cur = cached(device, cur, p.0, p.1, size_px)
     let slot = map.get(cur.keys, key(p.0, p.1, size_px)) ?? 0
     let ax = cur.rects[slot * 6]

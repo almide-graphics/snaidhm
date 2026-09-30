@@ -1,0 +1,86 @@
+// Keymaps as compositors send them: xkbcommon's full form (named keys,
+// aliases, `symbols[1]=` levels) and the minimal one a virtual keyboard
+// makes, whose keycodes mean nothing without it.
+
+import self.wayland.xkb as xkb
+
+let FULL = """
+  xkb_keymap {
+  xkb_keycodes "evdev+aliases(qwerty)" {
+      minimum = 8;
+      maximum = 255;
+      <ESC>                = 9;
+      <AE01>               = 10;
+      <TAB>                = 23;
+      <AD01>               = 24;
+      <RTRN>               = 36;
+      <SPCE>               = 65;
+      <AC11>               = 48;
+      alias <MENU>         = <COMP>;
+      alias <AC12>         = <BKSL>;
+      <BKSL>               = 51;
+  };
+  xkb_types "complete" { virtual_modifiers NumLock; };
+  xkb_symbols "pc+us+inet(evdev)" {
+      name[1]="English (US)";
+      key <ESC>                {	[          Escape ] };
+      key <AE01>               {	[               1,          exclam ] };
+      key <TAB>                {	[             Tab,    ISO_Left_Tab ] };
+      key <AD01>               {	type= "ALPHABETIC", symbols[1]= [ q, Q ] };
+      key <RTRN>               {	[          Return ] };
+      key <SPCE>               {	[           space ] };
+      key <AC11>               {	[      apostrophe,        quotedbl ] };
+      key <AC12>               {	[       backslash,             bar ] };
+  };
+  };
+  """
+
+let WTYPE = """
+  xkb_keymap {
+  xkb_keycodes "(unnamed)" {
+  minimum = 8;
+  maximum = 11;
+  <K1> = 9;
+  <K2> = 10;
+  <K3> = 11;
+  };
+  xkb_types "(unnamed)" { include "complete" };
+  xkb_compatibility "(unnamed)" { include "complete" };
+  xkb_symbols "(unnamed)" {
+  key <K1> {[ H ]};
+  key <K2> {[ U3042 ]};
+  key <K3> {[ Tab ]};
+  };
+  };
+  """
+
+test "keycodes come from the keymap: X code minus 8, via names and aliases" {
+  let km = xkb.parse(FULL)
+  assert_eq(xkb.keysym(km, 1, 1), "Escape")
+  assert_eq(xkb.keysym(km, 2, 1), "1")
+  assert_eq(xkb.keysym(km, 2, 2), "exclam")
+  assert_eq(xkb.keysym(km, 16, 2), "Q")
+  assert_eq(xkb.keysym(km, 43, 2), "bar")
+  assert_eq(xkb.keysym(km, 200, 1), "")
+}
+
+test "a virtual keyboard's own numbering" {
+  let km = xkb.parse(WTYPE)
+  // Keycode 1 is H here, not Escape.
+  assert_eq(xkb.keysym(km, 1, 1), "H")
+  assert_eq(xkb.char_of(xkb.keysym(km, 1, 1)), 72)
+  assert_eq(xkb.char_of(xkb.keysym(km, 2, 1)), 0x3042)
+  assert_eq(xkb.named(xkb.keysym(km, 3, 1)), 9)
+  // A key with one level types the same shifted.
+  assert_eq(xkb.keysym(km, 1, 2), "H")
+}
+
+test "keysyms to characters and named keys" {
+  assert_eq(xkb.char_of("space"), 32)
+  assert_eq(xkb.char_of("quotedbl"), 34)
+  assert_eq(xkb.char_of("a"), 97)
+  assert_eq(xkb.char_of("Shift_L"), 0)
+  assert_eq(xkb.named("Return"), 13)
+  assert_eq(xkb.named("ISO_Left_Tab"), 9)
+  assert_eq(xkb.named("a"), 0)
+}
