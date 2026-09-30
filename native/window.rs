@@ -50,7 +50,8 @@ use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -69,6 +70,12 @@ const TEXT: i64 = 5;
 const KEY: i64 = 6;
 const COMPOSE: i64 = 7;
 
+/// Modifier bits, as `event_mods` returns them.
+const MOD_SHIFT: i64 = 1;
+const MOD_CTRL: i64 = 2;
+const MOD_ALT: i64 = 4;
+const MOD_SUPER: i64 = 8;
+
 /// Pixels one wheel notch scrolls, for devices that report lines.
 const LINE_PX: f64 = 40.0;
 
@@ -79,10 +86,11 @@ const QUEUE_LIMIT: usize = 1024;
 /// typed code point, or the DOM key code, by kind. A composition carries its
 /// text, and in `code` .. `end` the part the input method marks (the clause
 /// being converted, or an empty range at its caret), in characters; -1 when
-/// it shows no caret.
+/// it shows no caret. `mods` are the modifiers held when it happened.
 #[derive(Clone, Default)]
 struct Input {
     kind: i64,
+    mods: i64,
     x: f64,
     y: f64,
     dx: f64,
@@ -104,6 +112,23 @@ fn key_code(key: &NamedKey) -> Option<i64> {
         NamedKey::ArrowRight => 39,
         NamedKey::ArrowDown => 40,
         NamedKey::Delete => 46,
+        NamedKey::PageUp => 33,
+        NamedKey::PageDown => 34,
+        NamedKey::End => 35,
+        NamedKey::Home => 36,
+        NamedKey::Insert => 45,
+        NamedKey::F1 => 112,
+        NamedKey::F2 => 113,
+        NamedKey::F3 => 114,
+        NamedKey::F4 => 115,
+        NamedKey::F5 => 116,
+        NamedKey::F6 => 117,
+        NamedKey::F7 => 118,
+        NamedKey::F8 => 119,
+        NamedKey::F9 => 120,
+        NamedKey::F10 => 121,
+        NamedKey::F11 => 122,
+        NamedKey::F12 => 123,
         _ => return None,
     })
 }
@@ -129,6 +154,17 @@ struct App {
     events: VecDeque<Input>,
     /// The event `next_event` last returned, read by the accessors.
     current: Input,
+    /// Modifiers held now, MOD_* bits.
+    mods: i64,
+}
+
+fn mod_bits(m: ModifiersState) -> i64 {
+    let mut bits = 0;
+    if m.shift_key() { bits |= MOD_SHIFT; }
+    if m.control_key() { bits |= MOD_CTRL; }
+    if m.alt_key() { bits |= MOD_ALT; }
+    if m.super_key() { bits |= MOD_SUPER; }
+    bits
 }
 
 impl App {
@@ -159,7 +195,7 @@ impl App {
     }
 
     fn at_cursor(&self, kind: i64, code: i64) -> Input {
-        Input { kind, x: self.cursor.0, y: self.cursor.1, code, ..Input::default() }
+        Input { kind, mods: self.mods, x: self.cursor.0, y: self.cursor.1, code, ..Input::default() }
     }
 }
 
@@ -231,6 +267,16 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
+                // With Ctrl, Alt or Super held the text is a control char,
+                // an Option-composed letter or nothing; a shortcut wants the
+                // key itself, with `event_mods` saying what was held.
+                if self.mods & (MOD_CTRL | MOD_ALT | MOD_SUPER) != 0 {
+                    if let Some(text) = event.key_without_modifiers().to_text() {
+                        let text = text.to_string();
+                        self.typed(&text);
+                    }
+                    return;
+                }
                 // Space arrives as `NamedKey::Space`, and on macOS without
                 // `text`; the key's own text covers it.
                 let text = event.text.as_deref().or_else(|| event.logical_key.to_text());
@@ -240,6 +286,7 @@ impl ApplicationHandler for App {
                 }
             }
             // Keys the input method takes arrive as these, not as keys.
+            WindowEvent::ModifiersChanged(m) => self.mods = mod_bits(m.state()),
             WindowEvent::Ime(Ime::Preedit(text, marked)) => self.compose(text, marked),
             WindowEvent::Ime(Ime::Commit(text)) => self.typed(&text),
             WindowEvent::Ime(Ime::Disabled) => self.compose(String::new(), None),
@@ -387,6 +434,12 @@ pub fn scale_factor() -> f64 {
 /// End of the marked part of the current composition, characters.
 pub fn event_end() -> i64 {
     with_host(0, |host| host.app.current.end)
+}
+
+/// Modifiers held when the current input happened: 1 Shift, 2 Ctrl, 4 Alt
+/// (Option), 8 Super (Command).
+pub fn event_mods() -> i64 {
+    with_host(0, |host| host.app.current.mods)
 }
 
 /// Text of the current composition.
