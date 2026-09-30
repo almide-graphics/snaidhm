@@ -1,0 +1,21 @@
+import self.cpu.canvas as canvas
+
+/// The alpha byte of pixel (`x`, `y`).
+fn alpha_at(c: canvas.Canvas, x: Int, y: Int) -> Int = bytes.read_u8(c.px, (y * c.w + x) * 4 + 3)
+
+test "a rectangle fills its pixels, in units" {
+  let c = canvas.rect(canvas.scaled(8, 8, 2.0), 1.0, 1.0, 3.0, 3.0, 0.0, 1.0, 1.0, 1.0, 1.0)
+  assert_eq(alpha_at(c, 2, 2), 255)
+  assert_eq(alpha_at(c, 5, 5), 255)
+  assert_eq(alpha_at(c, 1, 1), 0)
+  assert_eq(alpha_at(c, 6, 6), 0)
+}
+
+test "drawing stays inside the clip until unclip" {
+  let clipped = canvas.clip(canvas.new(8, 8), 0.0, 0.0, 8.0, 4.0)
+  let c = canvas.rect(clipped, 0.0, 0.0, 8.0, 8.0, 0.0, 1.0, 1.0, 1.0, 1.0)
+  assert_eq(alpha_at(c, 3, 3), 255)
+  assert_eq(alpha_at(c, 3, 4), 0)
+  let all = canvas.rect(canvas.unclip(c), 0.0, 0.0, 8.0, 8.0, 0.0, 1.0, 1.0, 1.0, 1.0)
+  assert_eq(alpha_at(all, 3, 6), 255)
+}

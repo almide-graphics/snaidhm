@@ -15,6 +15,7 @@
 
 import net
 import self.wayland.client as client
+import self.wayland.text_input as ti
 import self.wayland.wire as wire
 import self.wayland.xkb as xkb
 
@@ -27,6 +28,11 @@ let MOUSE_UP = 3
 let WHEEL = 4
 let TEXT = 5
 let KEY = 6
+/// What the input method is composing (after `set_ime(true)`): `event_text`
+/// is the whole composition, empty once it ends, and `event_code` ..
+/// `event_end` the part it marks, in characters, -1 when it shows no caret.
+/// What it commits arrives as TEXT events.
+let COMPOSE = 7
 
 let KEY_BACKSPACE = 8
 let KEY_TAB = 9
@@ -57,6 +63,10 @@ var fractional = 0
 var viewport = 0
 var surface_scale = 0
 var pointer = 0
+var cursor_shapes = 0
+var cursor_device = 0
+var text_inputs = 0
+var text_input = 0
 var keyboard = 0
 
 // The window: its size in surface units (what the compositor configures and
@@ -90,8 +100,29 @@ var retired: List[Int] = []
 // Input.
 var cursor_x = 0.0
 var cursor_y = 0.0
+// The wheel within the current pointer frame: the axis events' distances
+// and the discrete steps (notches) that came with them, per axis (x, y).
+var wheel_dist: List[Float] = [0.0, 0.0]
+var wheel_steps: List[Float] = [0.0, 0.0]
+// The seat's version as bound: pointer frames exist from 5.
+var seat_version = 0
+// The pointer's look over the window, and the serial of the enter that put
+// the pointer on it (-1 while it is elsewhere): a shape is set against it.
+var cursor: Cursor = Arrow
+var enter_serial = 0 - 1
+// Queued inputs: kind, x, y, dx, dy, code, end — and each one's text.
 var inputs: List[List[Float]] = []
-var current: List[Float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+var input_texts: List[String] = []
+var current: List[Float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+var current_text = ""
+// The input method: whether the program lets it compose, whether the window
+// has its focus, where the caret is (units), the events since its last
+// `done`, and whether a composition is showing.
+var ime_allowed = false
+var ime_focused = false
+var ime_area: List[Int] = [0, 0, 1, 1]
+var ime_pending: ti.Pending = ti.empty()
+var composing = false
 // The keyboard's keymap, as the compositor handed it over (XKB text), what
 // it says each key types, and the modifiers now held or locked.
 var keymap: Bytes = bytes.new(0)
@@ -99,16 +130,50 @@ var keys: xkb.Keymap = xkb.empty()
 var shift = false
 var caps = false
 
-// Layer-shell layers, bottom to top, and the edges a layer surface anchors
-// to (combine with int.bor).
-let LAYER_BACKGROUND = 0
-let LAYER_BOTTOM = 1
-let LAYER_TOP = 2
-let LAYER_OVERLAY = 3
-let ANCHOR_TOP = 1
-let ANCHOR_BOTTOM = 2
-let ANCHOR_LEFT = 4
-let ANCHOR_RIGHT = 8
+/// A layer-shell layer, bottom to top: under the windows (Background,
+/// Bottom) or over them (Top — a bar —, Overlay — a popup over everything).
+type Layer = | Background | Bottom | Top | Overlay
+
+/// An edge of the output a layer surface is anchored to.
+type Edge = | TopEdge | BottomEdge | LeftEdge | RightEdge
+
+/// Whether a layer surface takes the keyboard: never, exclusively while it is
+/// up (a launcher), or when clicked (a panel with a text field).
+type Keyboard = | NoKeyboard | ExclusiveKeyboard | OnDemandKeyboard
+
+/// What the pointer looks like over the window: the plain arrow, the hand
+/// over something to click, the I-beam over text to edit. The compositor
+/// draws it from the user's cursor theme.
+type Cursor = | Arrow | Hand | Text
+
+/// wp_cursor_shape_device_v1's shape number of `c`.
+fn shape_number(c: Cursor) -> Int = match c {
+  Arrow => 1,
+  Hand => 4,
+  Text => 9,
+}
+
+fn layer_number(l: Layer) -> Int = match l {
+  Background => 0,
+  Bottom => 1,
+  Top => 2,
+  Overlay => 3,
+}
+
+/// The protocol's bit set of `edges`.
+fn anchor_bits(edges: List[Edge]) -> Int =
+  edges |> list.fold(0, (bits, e) => int.bor(bits, match e {
+    TopEdge => 1,
+    BottomEdge => 2,
+    LeftEdge => 4,
+    RightEdge => 8,
+  }))
+
+fn keyboard_number(k: Keyboard) -> Int = match k {
+  NoKeyboard => 0,
+  ExclusiveKeyboard => 1,
+  OnDemandKeyboard => 2,
+}
 
 /// Connect and bind the globals; `false` (the reason on stderr) when there is
 /// no compositor or it lacks `need` ("xdg_wm_base" or "zwlr_layer_shell_v1").
@@ -197,28 +262,40 @@ effect fn open(title: String, width: Int, height: Int) -> Result[Bool, String] =
   } else ok(false)
 }
 
-/// Open a layer surface — a bar, a panel, an on-screen display — on `layer`,
-/// anchored to the `anchor` edges and `width` x `height` pixels, where 0
-/// along an axis anchored at both ends stretches across the output.
-/// `exclusive` pixels along the anchored edge are kept clear of windows (0:
-/// none, -1: not even other layers' zones). `keyboard` asks for key focus
-/// (0 none, 1 exclusive, 2 on demand). `margin` keeps it that many pixels
-/// off the edges it is anchored to. `namespace` names it to the compositor
-/// ("bar", "launcher").
-effect fn open_layer(namespace: String, layer: Int, anchor: Int, width: Int, height: Int,
-                     exclusive: Int, keyboard: Int, margin: Int) -> Result[Bool, String] = {
+/// Open a layer surface — a bar, a panel, an on-screen display — named
+/// `namespace` to the compositor ("bar", "launcher"). Every other setting is
+/// named at the call and has a default:
+///
+///   window.open_layer("bar", layer: window.Top,
+///     anchor: [window.TopEdge, window.LeftEdge, window.RightEdge],
+///     height: 30, exclusive: 30)!
+///
+/// - `layer`: which layer it is on (default Top, over the windows).
+/// - `anchor`: the edges it is attached to (default none: centred).
+/// - `width` x `height`: its size; 0 along an axis anchored at both ends
+///   stretches it across the output.
+/// - `exclusive`: that many pixels along its anchored edge are kept clear of
+///   windows (0: none; -1: not even of other layers' zones).
+/// - `keyboard`: whether it takes the keyboard (default NoKeyboard).
+/// - `margin`: pixels between it and each edge it is anchored to.
+///
+/// `false` (the reason on stderr) when there is no compositor or it lacks
+/// wlr-layer-shell.
+effect fn open_layer(namespace: String, layer: Layer = Top, anchor: List[Edge] = [], width: Int = 0,
+                     height: Int = 0, exclusive: Int = 0, keyboard: Keyboard = NoKeyboard,
+                     margin: Int = 0) -> Result[Bool, String] = {
   if connect("zwlr_layer_shell_v1")! then {
     want_w = width
     want_h = height
     layer_surface = client.new_id()
     // get_layer_surface(id, surface, output = null: the compositor's choice,
     // layer, namespace)
-    client.send(layer_shell, 0, [layer_surface, surface, 0, layer] + wire.string(namespace), [])!
+    client.send(layer_shell, 0, [layer_surface, surface, 0, layer_number(layer)] + wire.string(namespace), [])!
     client.send(layer_surface, 0, [width, height], [])!
-    client.send(layer_surface, 1, [anchor], [])!
+    client.send(layer_surface, 1, [anchor_bits(anchor)], [])!
     client.send(layer_surface, 2, [wire.int32(exclusive)], [])!
     client.send(layer_surface, 3, [margin, margin, margin, margin], [])!
-    client.send(layer_surface, 4, [keyboard], [])!
+    client.send(layer_surface, 4, [keyboard_number(keyboard)], [])!
     first_configure()
   } else ok(false)
 }
@@ -236,12 +313,12 @@ effect fn resize_layer(width: Int, height: Int) -> Result[Unit, String] = {
   ok(())
 }
 
-/// Anchor the layer surface to other edges (0: none, centred), from its
-/// next commit — `resize_layer`'s. Anchored to all four edges at size 0, a
-/// layer surface's first configure says how much room the output has, less
-/// the bars' exclusive zones: a popup sizes itself from that, then lets go.
-effect fn anchor_layer(anchor: Int) -> Result[Unit, String] =
-  client.send(layer_surface, 1, [anchor], [])
+/// Anchor the layer surface to other edges (none: centred), from its next
+/// commit — `resize_layer`'s. Anchored to all four edges at size 0, a layer
+/// surface's first configure says how much room the output has, less the
+/// bars' exclusive zones: a popup sizes itself from that, then lets go.
+effect fn anchor_layer(anchor: List[Edge]) -> Result[Unit, String] =
+  client.send(layer_surface, 1, [anchor_bits(anchor)], [])
 
 /// Take the surface off the screen — a notification popup with nothing to
 /// show — keeping the connection; `open_layer` (or `open`) shows a new one.
@@ -425,6 +502,9 @@ effect fn event(e: wire.Event) -> Result[Unit, String] = {
       pointer = client.new_id()
       client.send(seat, 0, [pointer], [])!
     } else if not has_pointer and pointer != 0 then {
+      if cursor_device != 0 then { client.send(cursor_device, 0, [], [])! } else ()
+      cursor_device = 0
+      enter_serial = 0 - 1
       client.send(pointer, 1, [], [])!
       pointer = 0
     } else ()
@@ -435,8 +515,9 @@ effect fn event(e: wire.Event) -> Result[Unit, String] = {
       client.send(keyboard, 0, [], [])!
       keyboard = 0
     } else ()
-  } else if e.obj == pointer then pointer_event(e)
+  } else if e.obj == pointer then pointer_event(e)!
   else if e.obj == keyboard then keyboard_event(e)!
+  else if e.obj == text_input and text_input != 0 then text_input_event(e)!
   else if e.op == 0 and list.contains(retired, e.obj) then {
     // wl_buffer.release of a buffer of an old size: now it can go.
     client.send(e.obj, 0, [], [])!
@@ -464,6 +545,8 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
     "wl_seat" => 5,
     "wp_viewporter" => 1,
     "wp_fractional_scale_manager_v1" => 1,
+    "wp_cursor_shape_manager_v1" => 1,
+    "zwp_text_input_manager_v3" => 1,
     _ => 0,
   }
   if want > 0 then {
@@ -477,14 +560,36 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
       "zwlr_layer_shell_v1" => { layer_shell = id },
       "wp_viewporter" => { viewporter = id },
       "wp_fractional_scale_manager_v1" => { fractional = id },
-      _ => { seat = id },
+      "wp_cursor_shape_manager_v1" => { cursor_shapes = id },
+      "zwp_text_input_manager_v3" => { text_inputs = id },
+      _ => {
+        seat = id
+        seat_version = v
+      },
     }
+    make_text_input()!
+  } else ()
+  ok(())
+}
+
+/// The seat's text input, once both the seat and the manager are bound.
+effect fn make_text_input() -> Result[Unit, String] = {
+  if seat != 0 and text_inputs != 0 and text_input == 0 then {
+    text_input = client.new_id()
+    client.send(text_inputs, 1, [text_input, seat], [])!
   } else ()
   ok(())
 }
 
 fn queue(kind: Int, x: Float, y: Float, dx: Float, dy: Float, code: Int) -> Unit = {
-  list.push(inputs, [int.to_float(kind), x, y, dx, dy, int.to_float(code)])
+  list.push(inputs, [int.to_float(kind), x, y, dx, dy, int.to_float(code), 0.0])
+  list.push(input_texts, "")
+}
+
+/// A COMPOSE input: `text` with `from ..< to` marked.
+fn queue_compose(text: String, from: Int, to: Int) -> Unit = {
+  list.push(inputs, [int.to_float(COMPOSE), cursor_x, cursor_y, 0.0, 0.0, int.to_float(from), int.to_float(to)])
+  list.push(input_texts, text)
 }
 
 /// Linux input button codes (BTN_LEFT ...) to the DOM's 0, 1, 2.
@@ -495,12 +600,31 @@ fn button(code: Int) -> Int = match code {
   _ => 0 - 1,
 }
 
-fn pointer_event(e: wire.Event) -> Unit = {
+/// The wheel input collected since the last frame, queued: its distance, or
+/// 15 per notch where it came without one.
+fn flush_wheel() -> Unit = {
+  let dx = if wheel_dist[1] != 0.0 then wheel_dist[1] else wheel_steps[1] * 15.0
+  let dy = if wheel_dist[0] != 0.0 then wheel_dist[0] else wheel_steps[0] * 15.0
+  if dx != 0.0 or dy != 0.0 then queue(WHEEL, cursor_x, cursor_y, dx, dy, 0) else ()
+  wheel_dist = [0.0, 0.0]
+  wheel_steps = [0.0, 0.0]
+}
+
+/// The wheel slot of Wayland axis `axis` (0 vertical, 1 horizontal).
+fn wheel_axis(axis: Int) -> Int = if axis == 0 then 0 else 1
+
+effect fn pointer_event(e: wire.Event) -> Result[Unit, String] = {
   if e.op == 0 then {
-    // enter: serial, surface, x, y
+    // enter: serial, surface, x, y. Until the window sets a cursor the
+    // pointer over it has none — most compositors draw nothing.
+    enter_serial = wire.uint_at(e.args, 0)
+    show_cursor()!
     cursor_x = wire.fixed_at(e.args, 8)
     cursor_y = wire.fixed_at(e.args, 12)
     queue(MOUSE_MOVE, cursor_x, cursor_y, 0.0, 0.0, 0)
+  } else if e.op == 1 then {
+    // leave
+    enter_serial = 0 - 1
   } else if e.op == 2 then {
     // motion: time, x, y
     cursor_x = wire.fixed_at(e.args, 4)
@@ -513,11 +637,43 @@ fn pointer_event(e: wire.Event) -> Unit = {
     if b >= 0 then queue(kind, cursor_x, cursor_y, 0.0, 0.0, b) else ()
   } else if e.op == 4 then {
     // axis: time, axis (0 vertical, 1 horizontal), value — positive scrolls
-    // down or right, as the DOM's deltas.
-    let v = wire.fixed_at(e.args, 8)
-    if wire.uint_at(e.args, 4) == 0 then queue(WHEEL, cursor_x, cursor_y, 0.0, v, 0)
-    else queue(WHEEL, cursor_x, cursor_y, v, 0.0, 0)
+    // down or right, as the DOM's deltas. Collected until the frame.
+    let i = wheel_axis(wire.uint_at(e.args, 4))
+    wheel_dist = list.set(wheel_dist, i, wheel_dist[i] + wire.fixed_at(e.args, 8))
+    // Before version 5 no frame comes: the axis event is the whole input.
+    if seat_version < 5 then flush_wheel() else ()
+  } else if e.op == 8 then {
+    // axis_discrete: axis, steps — a mouse wheel's notches, which some
+    // compositors send with a zero distance (a virtual pointer's wheel).
+    let i = wheel_axis(wire.uint_at(e.args, 0))
+    wheel_steps = list.set(wheel_steps, i, wheel_steps[i] + int.to_float(wire.int_at(e.args, 4)))
+  } else if e.op == 5 then {
+    // frame: the events since the last one are one input.
+    flush_wheel()
   } else ()
+  ok(())
+}
+
+/// Show `c` as the pointer over the window, from now on.
+effect fn set_cursor(c: Cursor) -> Result[Unit, String] = {
+  if c != cursor then {
+    cursor = c
+    show_cursor()!
+  } else ()
+  ok(())
+}
+
+/// The window's cursor on the pointer, while the pointer is over the window
+/// and the compositor draws cursor shapes.
+effect fn show_cursor() -> Result[Unit, String] = {
+  if enter_serial >= 0 and cursor_shapes != 0 and pointer != 0 then {
+    if cursor_device == 0 then {
+      cursor_device = client.new_id()
+      client.send(cursor_shapes, 1, [cursor_device, pointer], [])!
+    } else ()
+    client.send(cursor_device, 1, [enter_serial, shape_number(cursor)], [])!
+  } else ()
+  ok(())
 }
 
 effect fn keyboard_event(e: wire.Event) -> Result[Unit, String] = {
@@ -560,11 +716,14 @@ effect fn keyboard_event(e: wire.Event) -> Result[Unit, String] = {
 /// `event_*` accessors then describe it.
 fn next_event() -> Int = {
   if list.len(inputs) == 0 then {
-    current = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    current = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    current_text = ""
     NONE
   } else {
     current = inputs[0]
+    current_text = input_texts[0]
     inputs = list.drop(inputs, 1)
+    input_texts = list.drop(input_texts, 1)
     float.to_int(current[0])
   }
 }
@@ -583,3 +742,93 @@ fn event_dy() -> Float = current[4]
 
 /// Mouse button (0 left, 1 right, 2 middle), typed code point, or key code.
 fn event_code() -> Int = float.to_int(current[5])
+
+/// End of the marked part of the current COMPOSE, characters.
+fn event_end() -> Int = float.to_int(current[6])
+
+/// Text of the current COMPOSE.
+fn event_text() -> String = current_text
+
+// ── Input method (zwp_text_input_v3) ──
+
+/// Let the input method compose text in the window — Japanese, Chinese,
+/// Korean — or (`false`, the default) take keys as they are.
+effect fn set_ime(allowed: Bool) -> Result[Unit, String] = {
+  if allowed != ime_allowed then {
+    ime_allowed = allowed
+    if ime_focused then {
+      if allowed then enable_ime()! else disable_ime()!
+    } else ()
+  } else ()
+  ok(())
+}
+
+/// Tell the input method where the caret is, units, so its candidate window
+/// opens beside it. Call it whenever the caret moves.
+effect fn set_ime_area(x: Float, y: Float, w: Float, h: Float) -> Result[Unit, String] = {
+  let area = [float.to_int(x), float.to_int(y), int.max(1, float.to_int(w)), int.max(1, float.to_int(h))]
+  if area != ime_area then {
+    ime_area = area
+    if ime_focused and ime_allowed then {
+      client.send(text_input, 6, area |> list.map((v) => wire.int32(v)), [])!
+      client.send(text_input, 7, [], [])!
+    } else ()
+  } else ()
+  ok(())
+}
+
+/// enable, the caret, commit: the input method starts composing here.
+effect fn enable_ime() -> Result[Unit, String] = {
+  client.send(text_input, 1, [], [])!
+  client.send(text_input, 6, ime_area |> list.map((v) => wire.int32(v)), [])!
+  client.send(text_input, 7, [], [])!
+  ok(())
+}
+
+/// disable, commit — and any composition showing ends.
+effect fn disable_ime() -> Result[Unit, String] = {
+  client.send(text_input, 2, [], [])!
+  client.send(text_input, 7, [], [])!
+  end_composition()
+  ok(())
+}
+
+fn end_composition() -> Unit = {
+  if composing then {
+    queue_compose("", 0 - 1, 0 - 1)
+    composing = false
+  } else ()
+  ime_pending = ti.empty()
+}
+
+effect fn text_input_event(e: wire.Event) -> Result[Unit, String] = {
+  if e.op == 0 then {
+    // enter: the window has the input method's focus.
+    ime_focused = true
+    if ime_allowed then enable_ime()! else ()
+  } else if e.op == 1 then {
+    // leave
+    ime_focused = false
+    if ime_allowed then disable_ime()! else ()
+  } else if e.op == 2 then {
+    // preedit_string: text, cursor_begin, cursor_end (bytes)
+    let t = wire.string_at(e.args, 0)
+    ime_pending = { ...ime_pending, preedit: t.0, begin: wire.int_at(e.args, t.1), end: wire.int_at(e.args, t.1 + 4) }
+  } else if e.op == 3 then {
+    // commit_string: text
+    ime_pending = { ...ime_pending, commit: wire.string_at(e.args, 0).0 }
+  } else if e.op == 5 then {
+    // done: what was gathered takes effect — the old composition goes, the
+    // committed text is typed, the new composition shows.
+    let p = ime_pending
+    for c in string.chars(p.commit) {
+      queue(TEXT, cursor_x, cursor_y, 0.0, 0.0, string.codepoint(c) ?? 0)
+    }
+    if p.preedit != "" or composing then {
+      queue_compose(p.preedit, ti.char_index(p.preedit, p.begin), ti.char_index(p.preedit, p.end))
+    } else ()
+    composing = p.preedit != ""
+    ime_pending = ti.empty()
+  } else ()
+  ok(())
+}
