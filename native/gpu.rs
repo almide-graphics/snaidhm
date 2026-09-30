@@ -82,6 +82,23 @@ enum Pass {
 /// dropped to end the pass) while their handle is still live — taking the
 /// payload out also lets a method hold `&mut` on one slot and `&` on another
 /// without fighting the borrow checker.
+/// A buffer a program rewrites every frame, as a ring of `STREAM_COPIES`: each
+/// frame writes the next copy, directly through a mapping where the device
+/// allows it (unified memory: Apple silicon), once the GPU has finished the
+/// frame that last read it. No staging buffer is involved; `write_buffer`
+/// staged every frame's data in a fresh buffer, and Metal kept those pooled —
+/// about 40 MB for a terminal redrawing 100 x 30 cells while output streams.
+struct Stream {
+    copies: Vec<wgpu::Buffer>,
+    /// The submission that last read each copy.
+    last: Vec<Option<wgpu::SubmissionIndex>>,
+    current: usize,
+    /// Written through a mapping (else through `write_buffer`).
+    mapped: bool,
+}
+
+const STREAM_COPIES: usize = 3;
+
 enum Res {
     Null,
     /// Stand-in for the canvas context the JS host returns from
@@ -94,6 +111,8 @@ enum Res {
     PreferredFormat,
     Shader(wgpu::ShaderModule),
     Buffer(wgpu::Buffer),
+    /// A buffer rewritten every frame (see `create_stream_buffer`).
+    Stream(Stream),
     ComputePipeline(wgpu::ComputePipeline),
     RenderPipeline(wgpu::RenderPipeline),
     BindGroup(wgpu::BindGroup),
@@ -174,6 +193,10 @@ struct GpuState {
     /// `create_bound_group` over a texture binding could not be satisfied.
     fallback_texture: Option<wgpu::Texture>,
     fallback_sampler: Option<wgpu::Sampler>,
+
+    /// Stream buffers written since the last submit: the submit is what
+    /// their current copies wait on before they are written again.
+    streams_written: Vec<usize>,
 }
 
 fn state() -> &'static Mutex<GpuState> {
@@ -240,7 +263,9 @@ impl GpuState {
         // everything it has.
         let desc = wgpu::DeviceDescriptor {
             label: Some("snaidhm"),
-            required_features: wgpu::Features::empty(),
+            // Vertex buffers the CPU writes directly, for stream buffers,
+            // where memory is shared and the adapter says so.
+            required_features: adapter.features() & wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
             required_limits: adapter.limits(),
             memory_hints: wgpu::MemoryHints::default(),
         };
@@ -309,10 +334,24 @@ impl GpuState {
         self.index(handle).map(|i| &self.res[i])
     }
 
+    /// The buffer behind `handle`: a buffer, or a stream's current copy.
     fn buffer(&self, handle: i64) -> Option<&wgpu::Buffer> {
         match self.get(handle) {
             Some(Res::Buffer(b)) => Some(b),
+            Some(Res::Stream(st)) => st.copies.get(st.current),
             _ => None,
+        }
+    }
+
+    /// Submit `cmd`, and remember it as what the stream copies written for it
+    /// must wait on before their next write.
+    fn submit(&mut self, cmd: wgpu::CommandBuffer) {
+        let index = self.queue().submit(std::iter::once(cmd));
+        for i in std::mem::take(&mut self.streams_written) {
+            if let Some(Res::Stream(st)) = self.res.get_mut(i) {
+                let c = st.current;
+                st.last[c] = Some(index.clone());
+            }
         }
     }
 
@@ -619,13 +658,15 @@ pub fn destroy_buffer(_device: i64, buffer: i64) {
     with((), |s| {
         let Some(idx) = s.index(buffer) else { return };
         // Anything but a buffer is left alone.
-        if !matches!(s.res[idx], Res::Buffer(_)) {
+        if !matches!(s.res[idx], Res::Buffer(_) | Res::Stream(_)) {
             return;
         }
-        if let Res::Buffer(b) = std::mem::replace(&mut s.res[idx], Res::Null) {
-            b.destroy();
-            s.free_slots.push(idx);
+        match std::mem::replace(&mut s.res[idx], Res::Null) {
+            Res::Buffer(b) => b.destroy(),
+            Res::Stream(st) => st.copies.iter().for_each(|b| b.destroy()),
+            _ => {}
         }
+        s.free_slots.push(idx);
     })
 }
 
@@ -693,8 +734,81 @@ pub fn flush_to_texture(_device: i64, texture: i64, x: i64, y: i64, w: i64, h: i
     })
 }
 
+/// A buffer of `size` bytes for data rewritten every frame — vertices of a
+/// UI redrawn in full — written with `flush_to_buffer` and bound with
+/// `set_vertex_buffer` like any other. See `Stream`.
+pub fn create_stream_buffer(_device: i64, size: i64, usage: i64) -> i64 {
+    with(0, |s| {
+        let mapped = s.device().features().contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
+        let mut usage = wgpu::BufferUsages::from_bits_truncate(usage as u32);
+        if mapped {
+            usage = (usage - wgpu::BufferUsages::COPY_DST) | wgpu::BufferUsages::MAP_WRITE;
+        }
+        let copies = (0..STREAM_COPIES)
+            .map(|_| {
+                s.device().create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("snaidhm stream buffer"),
+                    size: size.max(4) as u64,
+                    usage,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        s.alloc(Res::Stream(Stream { copies, last: vec![None; STREAM_COPIES], current: 0, mapped }))
+    })
+}
+
+/// Write the staged data into the next copy of stream `idx`.
+fn write_stream(s: &mut GpuState, idx: usize) {
+    let data = std::mem::take(&mut s.data);
+    let bytes: &[u8] = bytemuck::cast_slice(&data);
+    let device = s.device.clone().expect("device checked by `with`");
+    let queue = s.queue.clone().expect("queue checked by `with`");
+    if let Some(Res::Stream(st)) = s.res.get_mut(idx) {
+        st.current = (st.current + 1) % st.copies.len();
+        let c = st.current;
+        let buf = &st.copies[c];
+        if !bytes.is_empty() && bytes.len() as u64 <= buf.size() {
+            if st.mapped {
+                // Wait for the frame that last read this copy, then write it
+                // in place.
+                if let Some(index) = st.last[c].take() {
+                    let _ = device.poll(wgpu::Maintain::WaitForSubmissionIndex(index));
+                }
+                let slice = buf.slice(..bytes.len() as u64);
+                let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = ready.clone();
+                slice.map_async(wgpu::MapMode::Write, move |r| flag.store(r.is_ok(), std::sync::atomic::Ordering::Release));
+                // The copy is idle, so the mapping resolves on the next poll;
+                // `Wait` would wait for every frame still in flight.
+                let mut polls = 0;
+                while !ready.load(std::sync::atomic::Ordering::Acquire) && polls < 64 {
+                    let _ = device.poll(wgpu::Maintain::Poll);
+                    polls += 1;
+                }
+                if !ready.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = device.poll(wgpu::Maintain::Wait);
+                }
+                if ready.load(std::sync::atomic::Ordering::Acquire) {
+                    slice.get_mapped_range_mut().copy_from_slice(bytes);
+                    buf.unmap();
+                }
+            } else {
+                queue.write_buffer(buf, 0, bytes);
+            }
+        }
+    }
+    s.streams_written.push(idx);
+    s.data = data;
+    s.data.clear();
+}
+
 pub fn flush_to_buffer(_device: i64, buffer: i64) {
     with((), |s| {
+        if let Some(idx) = s.index(buffer).filter(|&i| matches!(s.res[i], Res::Stream(_))) {
+            write_stream(s, idx);
+            return;
+        }
         if let Some(buf) = s.buffer(buffer) {
             s.queue().write_buffer(buf, 0, bytemuck::cast_slice(&s.data));
         }
@@ -1169,7 +1283,7 @@ pub fn end_pass(pass: i64) {
 pub fn finish_and_submit(_device: i64, encoder: i64) {
     with((), |s| {
         let Some(enc) = s.take_encoder(encoder) else { return };
-        s.queue().submit(std::iter::once(enc.finish()));
+        s.submit(enc.finish());
         s.release(encoder);
     })
 }
