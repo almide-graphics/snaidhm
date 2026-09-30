@@ -57,6 +57,8 @@ var fractional = 0
 var viewport = 0
 var surface_scale = 0
 var pointer = 0
+var cursor_shapes = 0
+var cursor_device = 0
 var keyboard = 0
 
 // The window: its size in surface units (what the compositor configures and
@@ -96,6 +98,10 @@ var wheel_dist: List[Float] = [0.0, 0.0]
 var wheel_steps: List[Float] = [0.0, 0.0]
 // The seat's version as bound: pointer frames exist from 5.
 var seat_version = 0
+// The pointer's look over the window, and the serial of the enter that put
+// the pointer on it (-1 while it is elsewhere): a shape is set against it.
+var cursor: Cursor = Arrow
+var enter_serial = 0 - 1
 var inputs: List[List[Float]] = []
 var current: List[Float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 // The keyboard's keymap, as the compositor handed it over (XKB text), what
@@ -115,6 +121,18 @@ type Edge = | TopEdge | BottomEdge | LeftEdge | RightEdge
 /// Whether a layer surface takes the keyboard: never, exclusively while it is
 /// up (a launcher), or when clicked (a panel with a text field).
 type Keyboard = | NoKeyboard | ExclusiveKeyboard | OnDemandKeyboard
+
+/// What the pointer looks like over the window: the plain arrow, the hand
+/// over something to click, the I-beam over text to edit. The compositor
+/// draws it from the user's cursor theme.
+type Cursor = | Arrow | Hand | Text
+
+/// wp_cursor_shape_device_v1's shape number of `c`.
+fn shape_number(c: Cursor) -> Int = match c {
+  Arrow => 1,
+  Hand => 4,
+  Text => 9,
+}
 
 fn layer_number(l: Layer) -> Int = match l {
   Background => 0,
@@ -465,6 +483,9 @@ effect fn event(e: wire.Event) -> Result[Unit, String] = {
       pointer = client.new_id()
       client.send(seat, 0, [pointer], [])!
     } else if not has_pointer and pointer != 0 then {
+      if cursor_device != 0 then { client.send(cursor_device, 0, [], [])! } else ()
+      cursor_device = 0
+      enter_serial = 0 - 1
       client.send(pointer, 1, [], [])!
       pointer = 0
     } else ()
@@ -475,7 +496,7 @@ effect fn event(e: wire.Event) -> Result[Unit, String] = {
       client.send(keyboard, 0, [], [])!
       keyboard = 0
     } else ()
-  } else if e.obj == pointer then pointer_event(e)
+  } else if e.obj == pointer then pointer_event(e)!
   else if e.obj == keyboard then keyboard_event(e)!
   else if e.op == 0 and list.contains(retired, e.obj) then {
     // wl_buffer.release of a buffer of an old size: now it can go.
@@ -504,6 +525,7 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
     "wl_seat" => 5,
     "wp_viewporter" => 1,
     "wp_fractional_scale_manager_v1" => 1,
+    "wp_cursor_shape_manager_v1" => 1,
     _ => 0,
   }
   if want > 0 then {
@@ -517,6 +539,7 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
       "zwlr_layer_shell_v1" => { layer_shell = id },
       "wp_viewporter" => { viewporter = id },
       "wp_fractional_scale_manager_v1" => { fractional = id },
+      "wp_cursor_shape_manager_v1" => { cursor_shapes = id },
       _ => {
         seat = id
         seat_version = v
@@ -551,12 +574,18 @@ fn flush_wheel() -> Unit = {
 /// The wheel slot of Wayland axis `axis` (0 vertical, 1 horizontal).
 fn wheel_axis(axis: Int) -> Int = if axis == 0 then 0 else 1
 
-fn pointer_event(e: wire.Event) -> Unit = {
+effect fn pointer_event(e: wire.Event) -> Result[Unit, String] = {
   if e.op == 0 then {
-    // enter: serial, surface, x, y
+    // enter: serial, surface, x, y. Until the window sets a cursor the
+    // pointer over it has none — most compositors draw nothing.
+    enter_serial = wire.uint_at(e.args, 0)
+    show_cursor()!
     cursor_x = wire.fixed_at(e.args, 8)
     cursor_y = wire.fixed_at(e.args, 12)
     queue(MOUSE_MOVE, cursor_x, cursor_y, 0.0, 0.0, 0)
+  } else if e.op == 1 then {
+    // leave
+    enter_serial = 0 - 1
   } else if e.op == 2 then {
     // motion: time, x, y
     cursor_x = wire.fixed_at(e.args, 4)
@@ -583,6 +612,29 @@ fn pointer_event(e: wire.Event) -> Unit = {
     // frame: the events since the last one are one input.
     flush_wheel()
   } else ()
+  ok(())
+}
+
+/// Show `c` as the pointer over the window, from now on.
+effect fn set_cursor(c: Cursor) -> Result[Unit, String] = {
+  if c != cursor then {
+    cursor = c
+    show_cursor()!
+  } else ()
+  ok(())
+}
+
+/// The window's cursor on the pointer, while the pointer is over the window
+/// and the compositor draws cursor shapes.
+effect fn show_cursor() -> Result[Unit, String] = {
+  if enter_serial >= 0 and cursor_shapes != 0 and pointer != 0 then {
+    if cursor_device == 0 then {
+      cursor_device = client.new_id()
+      client.send(cursor_shapes, 1, [cursor_device, pointer], [])!
+    } else ()
+    client.send(cursor_device, 1, [enter_serial, shape_number(cursor)], [])!
+  } else ()
+  ok(())
 }
 
 effect fn keyboard_event(e: wire.Event) -> Result[Unit, String] = {
