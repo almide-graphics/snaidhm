@@ -158,11 +158,26 @@ fn keysym(km: Keymap, code: Int, level: Int) -> String = {
   out
 }
 
+/// A keysym written as its number (`0x61`), as newer xkbcommon writes every
+/// keysym; -1 for one written as a name (`a`, `Return`).
+fn number(sym: String) -> Int =
+  if string.starts_with(sym, "0x") then int.from_hex(string.slice(sym, 2)) ?? (0 - 1)
+  else 0 - 1
+
+/// The character a numbered keysym types: Latin-1 keysyms are their code
+/// point, and 0x01000000 + c is Unicode code point c.
+fn char_of_number(v: Int) -> Int =
+  if (v >= 0x20 and v <= 0x7e) or (v >= 0xa0 and v <= 0xff) then v
+  else if v >= 0x01000000 and v <= 0x0110ffff then v - 0x01000000
+  else 0
+
 /// The character a keysym types, as a code point; 0 for a keysym that types
 /// none (a modifier, a function key, a named key).
 fn char_of(sym: String) -> Int = {
   let cs = string.chars(sym)
-  if list.len(cs) == 1 then string.codepoint(sym) ?? 0
+  let v = number(sym)
+  if v >= 0 then char_of_number(v)
+  else if list.len(cs) == 1 then string.codepoint(sym) ?? 0
   else if string.starts_with(sym, "U") and list.len(cs) >= 5 then int.from_hex(string.slice(sym, 1)) ?? 0
   else match sym {
     "space" => 32, "exclam" => 33, "quotedbl" => 34, "numbersign" => 35,
@@ -179,7 +194,27 @@ fn char_of(sym: String) -> Int = {
 }
 
 /// The DOM key code of a named key a UI handles as a key, else 0.
-fn named(sym: String) -> Int = match sym {
+fn named(sym: String) -> Int = {
+  let v = number(sym)
+  if v >= 0 then named_number(v) else named_name(sym)
+}
+
+fn named_number(v: Int) -> Int = match v {
+  0xff08 => 8,
+  0xff09 => 9,
+  0xfe20 => 9,
+  0xff0d => 13,
+  0xff8d => 13,
+  0xff1b => 27,
+  0xff51 => 37,
+  0xff52 => 38,
+  0xff53 => 39,
+  0xff54 => 40,
+  0xffff => 46,
+  _ => 0,
+}
+
+fn named_name(sym: String) -> Int = match sym {
   "BackSpace" => 8,
   "Tab" => 9,
   "ISO_Left_Tab" => 9,

@@ -84,3 +84,15 @@ test "keysyms to characters and named keys" {
   assert_eq(xkb.named("ISO_Left_Tab"), 9)
   assert_eq(xkb.named("a"), 0)
 }
+
+test "keysyms written as numbers, as newer xkbcommon writes them" {
+  let text = "xkb_keymap {\nxkb_keycodes \"evdev\" {\n\t<RTRN> = 36;\n\t<AC01> = 38;\n\t<AE01> = 10;\n};\nxkb_symbols \"pc_us\" {\n\tkey <RTRN> {\t[ 0xff0d ] };\n\tkey <AC01> {\t[ 0x61, 0x41 ] };\n\tkey <AE01> {\t[ 0x1003042 ] };\n};\n};\n"
+  let km = xkb.parse(text)
+  assert_eq(xkb.char_of(xkb.keysym(km, 30, 1)), 97)
+  assert_eq(xkb.char_of(xkb.keysym(km, 30, 2)), 65)
+  assert_eq(xkb.char_of(xkb.keysym(km, 2, 1)), 0x3042)
+  assert_eq(xkb.named(xkb.keysym(km, 28, 1)), 13)
+  assert_eq(xkb.char_of(xkb.keysym(km, 28, 1)), 0)
+  assert_eq(xkb.named("0xff1b"), 27)
+  assert_eq(xkb.char_of("0xe9"), 0xe9)
+}

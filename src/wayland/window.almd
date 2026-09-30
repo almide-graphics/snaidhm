@@ -3,7 +3,8 @@
 // The same shape as snaidhm.native.window — open, pump, the size, and input
 // read one event at a time with the same kinds and codes — but spoken to the
 // compositor directly: the globals bound from the registry, an xdg_toplevel
-// for the window, and its pixels in shared memory (wl_shm) that the program
+// for a window or a layer surface (wlr-layer-shell) for a bar, a panel or a
+// wallpaper, and its pixels in shared memory (wl_shm) that the program
 // fills on the CPU and `present`s. No libwayland, no winit, no GPU.
 //
 //   if window.open("demo", 640, 480)! then {
@@ -49,10 +50,22 @@ var seat = 0
 var surface = 0
 var xdg_surface = 0
 var toplevel = 0
+var layer_shell = 0
+var layer_surface = 0
+var viewporter = 0
+var fractional = 0
+var viewport = 0
+var surface_scale = 0
 var pointer = 0
 var keyboard = 0
 
-// The window: its size, what the compositor last asked for, and state.
+// The window: its size in surface units (what the compositor configures and
+// the pointer reports), what the compositor last asked for, and state. The
+// buffer is that size times the scale, in 120ths (wp_fractional_scale_v1's
+// unit) — 120 on a plain screen, 240 at 2x, 192 at 1.6x.
+var log_w = 0
+var log_h = 0
+var scale120 = 120
 var cur_w = 0
 var cur_h = 0
 var want_w = 0
@@ -86,10 +99,25 @@ var keys: xkb.Keymap = xkb.empty()
 var shift = false
 var caps = false
 
-/// Open a `width` x `height` window titled `title`. `false` (and the reason
-/// on stderr) when there is no compositor or it lacks what a window needs.
-effect fn open(title: String, width: Int, height: Int) -> Result[Bool, String] = {
-  match client.connect() {
+// Layer-shell layers, bottom to top, and the edges a layer surface anchors
+// to (combine with int.bor).
+let LAYER_BACKGROUND = 0
+let LAYER_BOTTOM = 1
+let LAYER_TOP = 2
+let LAYER_OVERLAY = 3
+let ANCHOR_TOP = 1
+let ANCHOR_BOTTOM = 2
+let ANCHOR_LEFT = 4
+let ANCHOR_RIGHT = 8
+
+/// Connect and bind the globals; `false` (the reason on stderr) when there is
+/// no compositor or it lacks `need` ("xdg_wm_base" or "zwlr_layer_shell_v1").
+effect fn connect(need: String) -> Result[Bool, String] = {
+  if registry != 0 then {
+    // Already connected (the surface was hidden): a new surface only.
+    make_surface()!
+    ok(true)
+  } else match client.connect() {
     err(e) => {
       eprintln("[snaidhm/wayland] ${e}")
       ok(false)
@@ -98,28 +126,163 @@ effect fn open(title: String, width: Int, height: Int) -> Result[Bool, String] =
       registry = client.new_id()
       client.send(client.DISPLAY, 1, [registry], [])!
       handle(client.roundtrip()!)!
-      if compositor == 0 or shm == 0 or wm_base == 0 then {
-        eprintln("[snaidhm/wayland] the compositor lacks wl_compositor, wl_shm or xdg_wm_base")
+      let role = if need == "xdg_wm_base" then wm_base else layer_shell
+      if compositor == 0 or shm == 0 or role == 0 then {
+        eprintln("[snaidhm/wayland] the compositor lacks wl_compositor, wl_shm or ${need}")
         ok(false)
       } else {
-        want_w = width
-        want_h = height
-        surface = client.new_id()
-        client.send(compositor, 0, [surface], [])!
-        xdg_surface = client.new_id()
-        client.send(wm_base, 2, [xdg_surface, surface], [])!
-        toplevel = client.new_id()
-        client.send(xdg_surface, 1, [toplevel], [])!
-        client.send(toplevel, 2, wire.string(title), [])!
-        client.send(toplevel, 3, wire.string("almide"), [])!
-        client.send(surface, 6, [], [])!
-        // The first configure says the window may be drawn.
-        while not configured and not closed { handle(client.read(0 - 1)!)! }
-        ok(not closed)
+        make_surface()!
+        ok(true)
       }
     },
   }
 }
+
+/// A surface, with what tells it the output's scale: wp_fractional_scale_v1
+/// (any scale, drawn through a wp_viewport) where the compositor has it,
+/// else wl_surface's own preferred_buffer_scale (whole numbers).
+effect fn make_surface() -> Result[Unit, String] = {
+  surface = client.new_id()
+  client.send(compositor, 0, [surface], [])!
+  if fractional != 0 and viewporter != 0 then {
+    viewport = client.new_id()
+    client.send(viewporter, 1, [viewport, surface], [])!
+    surface_scale = client.new_id()
+    client.send(fractional, 1, [surface_scale, surface], [])!
+  } else ()
+  ok(())
+}
+
+/// The compositor's size for the surface, in surface units: the buffer
+/// follows it at the current scale.
+fn set_size(w: Int, h: Int) -> Unit = {
+  log_w = w
+  log_h = h
+  rescale()
+}
+
+/// The buffer size for the surface size at the current scale — rounded, as
+/// wp_fractional_scale_v1 says — noting a change.
+fn rescale() -> Unit = {
+  let w = int.max(1, (log_w * scale120 + 60) / 120)
+  let h = int.max(1, (log_h * scale120 + 60) / 120)
+  if w != cur_w or h != cur_h then {
+    cur_w = w
+    cur_h = h
+    was_resized = true
+  } else ()
+}
+
+/// Commit the surface with its role set and wait for the first configure,
+/// which says it may be drawn.
+effect fn first_configure() -> Result[Bool, String] = {
+  client.send(surface, 6, [], [])!
+  while not configured and not closed { handle(client.read(0 - 1)!)! }
+  ok(not closed)
+}
+
+/// Open a `width` x `height` window titled `title`. `false` (and the reason
+/// on stderr) when there is no compositor or it lacks what a window needs.
+effect fn open(title: String, width: Int, height: Int) -> Result[Bool, String] = {
+  if connect("xdg_wm_base")! then {
+    want_w = width
+    want_h = height
+    xdg_surface = client.new_id()
+    client.send(wm_base, 2, [xdg_surface, surface], [])!
+    toplevel = client.new_id()
+    client.send(xdg_surface, 1, [toplevel], [])!
+    client.send(toplevel, 2, wire.string(title), [])!
+    client.send(toplevel, 3, wire.string("almide"), [])!
+    first_configure()
+  } else ok(false)
+}
+
+/// Open a layer surface — a bar, a panel, an on-screen display — on `layer`,
+/// anchored to the `anchor` edges and `width` x `height` pixels, where 0
+/// along an axis anchored at both ends stretches across the output.
+/// `exclusive` pixels along the anchored edge are kept clear of windows (0:
+/// none, -1: not even other layers' zones). `keyboard` asks for key focus
+/// (0 none, 1 exclusive, 2 on demand). `margin` keeps it that many pixels
+/// off the edges it is anchored to. `namespace` names it to the compositor
+/// ("bar", "launcher").
+effect fn open_layer(namespace: String, layer: Int, anchor: Int, width: Int, height: Int,
+                     exclusive: Int, keyboard: Int, margin: Int) -> Result[Bool, String] = {
+  if connect("zwlr_layer_shell_v1")! then {
+    want_w = width
+    want_h = height
+    layer_surface = client.new_id()
+    // get_layer_surface(id, surface, output = null: the compositor's choice,
+    // layer, namespace)
+    client.send(layer_shell, 0, [layer_surface, surface, 0, layer] + wire.string(namespace), [])!
+    client.send(layer_surface, 0, [width, height], [])!
+    client.send(layer_surface, 1, [anchor], [])!
+    client.send(layer_surface, 2, [wire.int32(exclusive)], [])!
+    client.send(layer_surface, 3, [margin, margin, margin, margin], [])!
+    client.send(layer_surface, 4, [keyboard], [])!
+    first_configure()
+  } else ok(false)
+}
+
+/// Ask for a new size of the layer surface (a notification column that grew)
+/// and wait until the compositor agrees; `width()` / `height()` then say what
+/// it gave.
+effect fn resize_layer(width: Int, height: Int) -> Result[Unit, String] = {
+  want_w = width
+  want_h = height
+  client.send(layer_surface, 0, [width, height], [])!
+  configured = false
+  client.send(surface, 6, [], [])!
+  while not configured and not closed { handle(client.read(0 - 1)!)! }
+  ok(())
+}
+
+/// Anchor the layer surface to other edges (0: none, centred), from its
+/// next commit — `resize_layer`'s. Anchored to all four edges at size 0, a
+/// layer surface's first configure says how much room the output has, less
+/// the bars' exclusive zones: a popup sizes itself from that, then lets go.
+effect fn anchor_layer(anchor: Int) -> Result[Unit, String] =
+  client.send(layer_surface, 1, [anchor], [])
+
+/// Take the surface off the screen — a notification popup with nothing to
+/// show — keeping the connection; `open_layer` (or `open`) shows a new one.
+effect fn hide() -> Result[Unit, String] = {
+  let n = list.len(buffers)
+  for i in 0..<n { client.send(buffers[i], 0, [], [])! }
+  for b in retired { client.send(b, 0, [], [])! }
+  if pool != 0 then { client.send(pool, 1, [], [])! } else ()
+  if pool_fd >= 0 then { net.unix_close(pool_fd)! } else ()
+  if viewport != 0 then { client.send(viewport, 0, [], [])! } else ()
+  if surface_scale != 0 then { client.send(surface_scale, 0, [], [])! } else ()
+  if layer_surface != 0 then { client.send(layer_surface, 7, [], [])! } else ()
+  if toplevel != 0 then { client.send(toplevel, 0, [], [])! } else ()
+  if xdg_surface != 0 then { client.send(xdg_surface, 0, [], [])! } else ()
+  client.send(surface, 0, [], [])!
+  let none_ids: List[Int] = []
+  let none_busy: List[Bool] = []
+  buffers = none_ids
+  busy = none_busy
+  retired = none_ids
+  pool = 0
+  pool_fd = 0 - 1
+  pool_w = 0
+  pool_h = 0
+  layer_surface = 0
+  toplevel = 0
+  xdg_surface = 0
+  surface = 0
+  viewport = 0
+  surface_scale = 0
+  configured = false
+  closed = false
+  cur_w = 0
+  cur_h = 0
+  log_w = 0
+  log_h = 0
+  ok(())
+}
+
+/// Whether a surface is shown (between an `open` and a `hide`).
+fn shown() -> Bool = surface != 0
 
 /// Handle what the compositor sent within `timeout_ms` (0: without waiting).
 /// `false` once the window has been asked to close.
@@ -128,6 +291,10 @@ effect fn pump(timeout_ms: Int) -> Result[Bool, String] = {
   ok(not closed)
 }
 
+/// The compositor connection's descriptor, to wait on beside others:
+/// `net.unix_wait([window.fd(), other], t)`, then `pump(0)`.
+fn fd() -> Int = client.fd()
+
 /// `true` exactly once after each change of the window's size.
 fn resized() -> Bool = {
   let r = was_resized
@@ -135,11 +302,22 @@ fn resized() -> Bool = {
   r
 }
 
-/// Width of the window in pixels, the width `present` takes.
+/// Width of the window in pixels, the width `present` takes: its size on the
+/// screen times `scale()`.
 fn width() -> Int = cur_w
 
 /// Height of the window in pixels.
 fn height() -> Int = cur_h
+
+/// The window's size in units — what the pointer's coordinates run over,
+/// and what a canvas made for it measures (`canvas.width`, `canvas.height`).
+fn extent() -> (Float, Float) = (int.to_float(log_w), int.to_float(log_h))
+
+/// Pixels per unit on the output the window is on (1.0 on a plain screen,
+/// 2.0 or 1.6 on a dense one). Draw on `canvas.scaled(width(), height(),
+/// scale())` in units and the UI keeps its size, sharp; `resized()` reports a
+/// change of scale too.
+fn scale() -> Float = int.to_float(scale120) / 120.0
 
 /// The XKB keymap the compositor gave for the keyboard (empty until then).
 fn keymap_text() -> String = bytes.to_string_lossy(keymap)
@@ -154,6 +332,10 @@ effect fn present(pixels: Bytes) -> Result[Unit, String] = {
   let size = cur_w * cur_h * 4
   net.shm_write(pool_fd, slot * size, pixels)!
   busy = list.set(busy, slot, true)
+  // The buffer covers the surface at the scale: through the viewport at any
+  // scale, or as a whole-number buffer scale.
+  if viewport != 0 then { client.send(viewport, 2, [log_w, log_h], [])! }
+  else { client.send(surface, 8, [scale120 / 120], [])! }
   client.send(surface, 1, [buffers[slot], 0, 0], [])!
   client.send(surface, 9, [0, 0, cur_w, cur_h], [])!
   client.send(surface, 6, [], [])!
@@ -201,13 +383,9 @@ effect fn event(e: wire.Event) -> Result[Unit, String] = {
     client.send(wm_base, 3, [wire.uint_at(e.args, 0)], [])!
   } else if e.obj == xdg_surface and e.op == 0 then {
     let serial = wire.uint_at(e.args, 0)
-    let w = if want_w > 0 then want_w else int.max(1, cur_w)
-    let h = if want_h > 0 then want_h else int.max(1, cur_h)
-    if w != cur_w or h != cur_h then {
-      cur_w = w
-      cur_h = h
-      was_resized = true
-    } else ()
+    let w = if want_w > 0 then want_w else int.max(1, log_w)
+    let h = if want_h > 0 then want_h else int.max(1, log_h)
+    set_size(w, h)
     client.send(xdg_surface, 4, [serial], [])!
     configured = true
   } else if e.obj == toplevel and e.op == 0 then {
@@ -218,6 +396,24 @@ effect fn event(e: wire.Event) -> Result[Unit, String] = {
     if h > 0 then { want_h = h } else ()
   } else if e.obj == toplevel and e.op == 1 then {
     closed = true
+  } else if e.obj == layer_surface and e.op == 0 then {
+    // configure: serial, width, height — 0 leaves that axis as asked.
+    let serial = wire.uint_at(e.args, 0)
+    let w = if wire.uint_at(e.args, 4) > 0 then wire.uint_at(e.args, 4) else int.max(1, want_w)
+    let h = if wire.uint_at(e.args, 8) > 0 then wire.uint_at(e.args, 8) else int.max(1, want_h)
+    set_size(w, h)
+    client.send(layer_surface, 6, [serial], [])!
+    configured = true
+  } else if e.obj == layer_surface and e.op == 1 then {
+    closed = true
+  } else if e.obj == surface_scale and e.op == 0 then {
+    // wp_fractional_scale_v1.preferred_scale: the scale times 120.
+    scale120 = int.max(120, wire.uint_at(e.args, 0))
+    rescale()
+  } else if e.obj == surface and e.op == 2 and viewport == 0 then {
+    // wl_surface.preferred_buffer_scale (v6): a whole-number scale.
+    scale120 = 120 * int.max(1, wire.int_at(e.args, 0))
+    rescale()
   } else if e.obj == seat and e.op == 0 then {
     // capabilities: devices come and go (a mouse unplugged, a virtual
     // keyboard added), and each change says what the seat has now — take
@@ -261,10 +457,13 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
   let iface = wire.string_at(args, 4)
   let version = wire.uint_at(args, iface.1)
   let want = match iface.0 {
-    "wl_compositor" => 4,
+    "wl_compositor" => 6,
     "wl_shm" => 1,
     "xdg_wm_base" => 1,
+    "zwlr_layer_shell_v1" => 4,
     "wl_seat" => 5,
+    "wp_viewporter" => 1,
+    "wp_fractional_scale_manager_v1" => 1,
     _ => 0,
   }
   if want > 0 then {
@@ -275,6 +474,9 @@ effect fn global(args: Bytes) -> Result[Unit, String] = {
       "wl_compositor" => { compositor = id },
       "wl_shm" => { shm = id },
       "xdg_wm_base" => { wm_base = id },
+      "zwlr_layer_shell_v1" => { layer_shell = id },
+      "wp_viewporter" => { viewporter = id },
+      "wp_fractional_scale_manager_v1" => { fractional = id },
       _ => { seat = id },
     }
   } else ()
@@ -333,7 +535,8 @@ effect fn keyboard_event(e: wire.Event) -> Result[Unit, String] = {
     // the keymap, never from the number: a named key, or a character.
     let code = wire.uint_at(e.args, 8)
     let plain = xkb.keysym(keys, code, 1)
-    let letter = string.len(plain) == 1 and string.to_upper(plain) != string.to_lower(plain)
+    let typed = string.from_codepoint(xkb.char_of(plain))
+    let letter = xkb.char_of(plain) > 0 and string.to_upper(typed) != string.to_lower(typed)
     let level = if shift != (caps and letter) then 2 else 1
     let sym = xkb.keysym(keys, code, level)
     let key = xkb.named(sym)
@@ -366,7 +569,9 @@ fn next_event() -> Int = {
   }
 }
 
-/// Pointer position of the current input, pixels.
+/// Pointer position of the current input, in units (pixels / `scale()`):
+/// the units a canvas made with `canvas.scaled(width(), height(), scale())`
+/// draws in.
 fn event_x() -> Float = current[1]
 
 fn event_y() -> Float = current[2]

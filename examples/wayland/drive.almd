@@ -6,7 +6,9 @@
 //
 // `move X Y` goes to layout pixel (X, Y) of a WIDTHxHEIGHT layout (default
 // 1280x720, or `extent W H` first); `click` presses and releases the left
-// button; `scroll N` turns the wheel N steps down; `sleep MS` waits.
+// button, `rclick` the right one; `scroll N` turns the wheel N steps down (up
+// when negative), as a mouse wheel does — source, discrete steps, distance;
+// `sleep MS` waits.
 
 import env
 import self.wayland.client as client
@@ -55,16 +57,19 @@ effect fn main() -> Unit = {
         client.send(ptr, 1, [t, x, y, w, h], [])!
         client.send(ptr, 4, [], [])!
         i = i + 3
-      } else if a == "click" then {
-        // BTN_LEFT, pressed then released.
-        client.send(ptr, 2, [t, 0x110, 1], [])!
+      } else if a == "click" or a == "rclick" then {
+        // BTN_LEFT or BTN_RIGHT, pressed then released.
+        let b = if a == "click" then 0x110 else 0x111
+        client.send(ptr, 2, [t, b, 1], [])!
         client.send(ptr, 4, [], [])!
-        client.send(ptr, 2, [t, 0x110, 0], [])!
+        client.send(ptr, 2, [t, b, 0], [])!
         client.send(ptr, 4, [], [])!
         i = i + 1
       } else if a == "scroll" then {
         let steps = int.parse(args[i + 1]) ?? 1
-        client.send(ptr, 3, [t, 0, wire.fixed(int.to_float(steps) * 15.0)], [])!
+        // axis_source(wheel), then axis_discrete(time, vertical, distance, steps).
+        client.send(ptr, 5, [0], [])!
+        client.send(ptr, 7, [t, 0, wire.fixed(int.to_float(steps) * 15.0), wire.int32(steps)], [])!
         client.send(ptr, 4, [], [])!
         i = i + 2
       } else if a == "sleep" then {

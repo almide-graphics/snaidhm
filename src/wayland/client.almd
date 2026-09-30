@@ -40,6 +40,10 @@ effect fn connect() -> Result[Unit, String] = {
   }
 }
 
+/// The connection's socket: wait on it together with other descriptors
+/// (net.unix_wait), then `read(0)`.
+fn fd() -> Int = sock
+
 /// A fresh object id for a request that creates an object.
 fn new_id() -> Int = {
   let id = next_id
