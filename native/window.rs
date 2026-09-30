@@ -332,6 +332,15 @@ impl Host {
         if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(timeout, &mut self.app) {
             return false;
         }
+        // Once more without waiting, when the wait had one: on macOS winit
+        // can hold an input that arrived while it woke for something else (a
+        // PTY's output, the timeout) until the next event, and a key held down
+        // showed up in pairs, one repeat late.
+        if timeout != Some(Duration::ZERO) {
+            if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(Some(Duration::ZERO), &mut self.app) {
+                return false;
+            }
+        }
         !self.app.close_requested
     }
 }
@@ -401,9 +410,12 @@ pub fn wait() -> bool {
 /// sleeps through both at once, where polling each in turn would wake it
 /// every few milliseconds for nothing.
 pub fn wait_fds(fds: &[i64], timeout_ms: i64) -> bool {
-    #[cfg(unix)]
-    watch::arm(fds.iter().map(|&fd| fd as i32).collect());
     let timeout = if timeout_ms < 0 { None } else { Some(Duration::from_millis(timeout_ms as u64)) };
+    // The watcher also keeps the time: on macOS winit's pump outlasts its
+    // timeout until an event comes — a frame due in 10 ms waited for the next
+    // key, and held keys showed a key late.
+    #[cfg(unix)]
+    watch::arm(fds.iter().map(|&fd| fd as i32).collect(), timeout.map(|t| Instant::now() + t));
     let alive = with_host(false, |host| host.pump(timeout));
     #[cfg(unix)]
     watch::disarm();
@@ -414,14 +426,14 @@ pub fn wait_fds(fds: &[i64], timeout_ms: i64) -> bool {
 static PROXY: std::sync::OnceLock<EventLoopProxy<()>> = std::sync::OnceLock::new();
 
 /// The thread behind `wait_fds`: while armed it polls the fds, and when one is
-/// readable it wakes the event loop and disarms, so a file nobody has read
-/// yet can't keep it spinning. A pipe interrupts its poll when the set
-/// changes.
+/// readable or the deadline passes it wakes the event loop and disarms, so a
+/// file nobody has read yet can't keep it spinning. A pipe interrupts its poll
+/// when the set changes.
 #[cfg(unix)]
 mod watch {
     use std::sync::{Condvar, Mutex, OnceLock};
 
-    struct State { fds: Vec<i32>, armed: bool }
+    struct State { fds: Vec<i32>, deadline: Option<std::time::Instant>, armed: bool }
 
     struct Watch { state: Mutex<State>, changed: Condvar, pipe: (i32, i32) }
 
@@ -435,7 +447,7 @@ mod watch {
                 unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
             }
             let w: &'static Watch = Box::leak(Box::new(Watch {
-                state: Mutex::new(State { fds: Vec::new(), armed: false }),
+                state: Mutex::new(State { fds: Vec::new(), deadline: None, armed: false }),
                 changed: Condvar::new(),
                 pipe: (p[0], p[1]),
             }));
@@ -446,23 +458,32 @@ mod watch {
 
     fn run(w: &'static Watch) {
         loop {
-            let fds = {
+            let (fds, deadline) = {
                 let mut st = w.state.lock().unwrap();
                 while !st.armed {
                     st = w.changed.wait(st).unwrap();
                 }
-                st.fds.clone()
+                (st.fds.clone(), st.deadline)
             };
+            // Rounded up: waking a moment early would only arm it again.
+            let wait_ms = deadline.map_or(-1, |d| {
+                let left = d.saturating_duration_since(std::time::Instant::now());
+                left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32
+            });
             let mut pfds: Vec<libc::pollfd> = fds
                 .iter()
                 .map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 })
                 .collect();
             pfds.push(libc::pollfd { fd: w.pipe.0, events: libc::POLLIN, revents: 0 });
-            unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, -1) };
+            unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, wait_ms) };
             let mut buf = [0u8; 64];
             while unsafe { libc::read(w.pipe.0, buf.as_mut_ptr() as *mut _, buf.len()) } > 0 {}
             let ready = pfds[..fds.len()].iter().any(|p| p.revents != 0);
-            if ready {
+            let due = deadline.is_some_and(|d| std::time::Instant::now() >= d);
+            // Still armed for the same wait: a disarm or a new arm meanwhile
+            // changed the pipe's state and the loop goes round again.
+            let current = { let st = w.state.lock().unwrap(); st.armed && st.deadline == deadline };
+            if (ready || due) && current {
                 w.state.lock().unwrap().armed = false;
                 if let Some(proxy) = super::PROXY.get() {
                     let _ = proxy.send_event(());
@@ -471,10 +492,11 @@ mod watch {
         }
     }
 
-    pub fn arm(fds: Vec<i32>) {
+    pub fn arm(fds: Vec<i32>, deadline: Option<std::time::Instant>) {
         let w = get();
         let mut st = w.state.lock().unwrap();
         st.fds = fds;
+        st.deadline = deadline;
         st.armed = true;
         w.changed.notify_one();
         drop(st);
