@@ -32,6 +32,12 @@ fn pump() -> Bool = _
 @extern(rust, "crate::window", "wait")
 fn wait() -> Bool = _
 
+/// `wait`, but also waking when one of `fds` has something to read, and after
+/// at most `timeout_ms` (negative: no limit). For a program that waits on
+/// files too — a terminal on its PTYs — without polling them.
+@extern(rust, "crate::window", "wait_fds")
+fn wait_fds(fds: List[Int], timeout_ms: Int) -> Bool = _
+
 /// `true` exactly once after each change of the window's size — the moment to
 /// rebuild anything sized to it.
 @extern(rust, "crate::window", "resized")

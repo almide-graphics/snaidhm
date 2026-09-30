@@ -49,6 +49,13 @@ export function createGpuHost(canvas) {
     create_buffer(deviceId, size, usage) {
       return B(h(g(deviceId).createBuffer({ size: N(size), usage: N(usage) })));
     },
+    destroy_buffer(_deviceId, bufferId) {
+      const b = g(bufferId);
+      if (b && typeof b.destroy === "function" && b instanceof GPUBuffer) {
+        b.destroy();
+        handles[Number(bufferId)] = null;
+      }
+    },
     write_buffer(deviceId, bufferId, dataPtr, dataLen) {
       g(deviceId).queue.writeBuffer(g(bufferId), 0, new Uint8Array(_wasmMemory.buffer, N(dataPtr), N(dataLen)));
     },
