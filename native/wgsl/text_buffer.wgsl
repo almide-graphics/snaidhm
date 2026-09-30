@@ -17,8 +17,12 @@ struct VertexOutput {
 }
 
 @group(0) @binding(0) var<storage, read> atlas: array<u32>;
+// Colour images (emoji): 512 x 512 RGBA, straight alpha. A quad draws from
+// it when its u is 2 or more (u - 2 is then its place in this atlas).
+@group(0) @binding(1) var<storage, read> color_atlas: array<u32>;
 
 const ATLAS: f32 = 1024.0;
+const COLOR_ATLAS: f32 = 512.0;
 
 // Vertex data: pos (normal space) 2 + atlas uv 2 + colour 4 = 8 floats.
 @vertex
@@ -36,6 +40,11 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+  if (in.uv.x >= 2.0) {
+    let q = vec2<u32>(clamp(floor((in.uv - vec2<f32>(2.0, 0.0)) * COLOR_ATLAS), vec2<f32>(0.0), vec2<f32>(COLOR_ATLAS - 1.0)));
+    let c = unpack4x8unorm(color_atlas[q.y * u32(COLOR_ATLAS) + q.x]);
+    return vec4<f32>(c.rgb, c.a * in.color.a);
+  }
   let p = vec2<u32>(clamp(floor(in.uv * ATLAS), vec2<f32>(0.0), vec2<f32>(ATLAS - 1.0)));
   let i = p.y * u32(ATLAS) + p.x;
   let coverage = f32((atlas[i >> 2u] >> ((i & 3u) * 8u)) & 0xFFu) / 255.0;
