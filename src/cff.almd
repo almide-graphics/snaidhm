@@ -1,0 +1,446 @@
+// snaidhm cff — CFF outlines (Type 2 charstrings), CID-keyed or not
+//
+// The outline format of most CJK OpenType fonts. A glyph is a small stack
+// program: numbers are pushed, operators consume them to draw lines and
+// cubics relative to the current point, and subroutines — local to the font
+// (or, CID-keyed, to the glyph's font DICT) and global — let glyphs share
+// pieces. Hints are counted, never applied: the rasterizer is exact, and the
+// count is only needed to know how many bytes a hintmask takes. Nor is the
+// width a glyph may open with read: hmtx holds the advance.
+//
+// Reference: Adobe TN #5176 (CFF) and TN #5177 (Type 2 charstrings).
+//
+// Written as index loops over flat lists, for the wasm renderer (see
+// coarse.almd).
+
+type Outline = { cmds: List[Int], pts: List[Float] }
+
+// Command codes, as sfnt.almd defines them.
+let MOVE = 0
+let LINE = 1
+let CUBIC = 2
+let CLOSE = 3
+
+/// An INDEX: `count` items whose offsets (`off_size` bytes each, 1-based)
+/// start at `offsets`; item data is addressed from `data`, the byte before
+/// the first item.
+type Index = { count: Int, off_size: Int, offsets: Int, data: Int }
+
+type Cff = {
+  present: Bool,
+  charstrings: Index,
+  gsubrs: Index,
+  // Non-CID: the font's local subroutines.
+  lsubrs: Index,
+  // CID-keyed: which font DICT each glyph uses, and each one's subroutines.
+  cid: Bool,
+  fd_select: Int,
+  fd_lsubrs: List[Index],
+}
+
+fn empty_index() -> Index = { count: 0, off_size: 1, offsets: 0, data: 0 }
+
+fn absent() -> Cff = {
+  let fds: List[Index] = []
+  { present: false, charstrings: empty_index(), gsubrs: empty_index(), lsubrs: empty_index(),
+    cid: false, fd_select: 0, fd_lsubrs: fds }
+}
+
+// ── INDEX ──
+
+fn read_off(b: Bytes, at: Int, size: Int) -> Int = {
+  var v = 0
+  for i in 0..<size { v = v * 256 + bytes.read_u8(b, at + i) }
+  v
+}
+
+fn index_at(b: Bytes, at: Int) -> Index = {
+  let count = bytes.read_u16_be(b, at)
+  if count == 0 then { count: 0, off_size: 1, offsets: at + 2, data: at + 2 }
+  else {
+    let off_size = bytes.read_u8(b, at + 2)
+    let offsets = at + 3
+    { count: count, off_size: off_size, offsets: offsets, data: offsets + (count + 1) * off_size - 1 }
+  }
+}
+
+/// Where item `i` starts and ends.
+fn item(b: Bytes, idx: Index, i: Int) -> (Int, Int) =
+  (idx.data + read_off(b, idx.offsets + i * idx.off_size, idx.off_size),
+   idx.data + read_off(b, idx.offsets + (i + 1) * idx.off_size, idx.off_size))
+
+/// The first byte after the INDEX.
+fn index_end(b: Bytes, idx: Index) -> Int =
+  if idx.count == 0 then idx.offsets
+  else idx.data + read_off(b, idx.offsets + idx.count * idx.off_size, idx.off_size)
+
+// ── DICT ──
+
+/// A DICT as parallel lists: each operator (escaped ones as 1200 + op2) with
+/// the operands before it at `args[first ..< first + count]`.
+type Dict = { ops: List[Int], firsts: List[Int], counts: List[Int], args: List[Float] }
+
+fn real(b: Bytes, at: Int) -> (Float, Int) = {
+  // Nibbles: 0-9 digits, a '.', b 'E', c 'E-', e '-', f end.
+  var s = ""
+  var pos = at
+  var done = false
+  while not done {
+    let byte = bytes.read_u8(b, pos)
+    pos = pos + 1
+    for k in 0..<2 {
+      let nib = if k == 0 then byte / 16 else byte % 16
+      if not done then {
+        if nib <= 9 then { s = s + int.to_string(nib) }
+        else if nib == 0xa then { s = s + "." }
+        else if nib == 0xb then { s = s + "E" }
+        else if nib == 0xc then { s = s + "E-" }
+        else if nib == 0xe then { s = s + "-" }
+        else if nib == 0xf then { done = true }
+        else ()
+      } else ()
+    }
+  }
+  (float.parse(s) ?? 0.0, pos)
+}
+
+fn dict(b: Bytes, start: Int, stop: Int) -> Dict = {
+  var ops: List[Int] = []
+  var firsts: List[Int] = []
+  var counts: List[Int] = []
+  var args: List[Float] = []
+  var first = 0
+  var pos = start
+  while pos < stop {
+    let b0 = bytes.read_u8(b, pos)
+    if b0 <= 21 then {
+      let op = if b0 == 12 then 1200 + bytes.read_u8(b, pos + 1) else b0
+      pos = pos + (if b0 == 12 then 2 else 1)
+      list.push(ops, op)
+      list.push(firsts, first)
+      list.push(counts, list.len(args) - first)
+      first = list.len(args)
+    } else if b0 == 28 then {
+      list.push(args, int.to_float(bytes.read_i16_be(b, pos + 1)))
+      pos = pos + 3
+    } else if b0 == 29 then {
+      list.push(args, int.to_float(bytes.read_i32_be(b, pos + 1)))
+      pos = pos + 5
+    } else if b0 == 30 then {
+      let r = real(b, pos + 1)
+      list.push(args, r.0)
+      pos = r.1
+    } else if b0 >= 32 and b0 <= 246 then {
+      list.push(args, int.to_float(b0 - 139))
+      pos = pos + 1
+    } else if b0 >= 247 and b0 <= 250 then {
+      list.push(args, int.to_float((b0 - 247) * 256 + bytes.read_u8(b, pos + 1) + 108))
+      pos = pos + 2
+    } else if b0 >= 251 and b0 <= 254 then {
+      list.push(args, int.to_float(0 - (b0 - 251) * 256 - bytes.read_u8(b, pos + 1) - 108))
+      pos = pos + 2
+    } else {
+      pos = pos + 1
+    }
+  }
+  { ops: ops, firsts: firsts, counts: counts, args: args }
+}
+
+/// Operand `k` of operator `op`, or `fallback` when the DICT lacks it.
+fn operand(d: Dict, op: Int, k: Int, fallback: Float) -> Float = {
+  var v = fallback
+  let n = list.len(d.ops)
+  for i in 0..<n {
+    if d.ops[i] == op and k < d.counts[i] then { v = d.args[d.firsts[i] + k] } else ()
+  }
+  v
+}
+
+fn has(d: Dict, op: Int) -> Bool = list.contains(d.ops, op)
+
+/// The local subroutines of the Private DICT at `private_at` (`size` bytes).
+fn private_subrs(b: Bytes, private_at: Int, size: Int) -> Index = {
+  let pd = dict(b, private_at, private_at + size)
+  if has(pd, 19) then index_at(b, private_at + float.to_int(operand(pd, 19, 0, 0.0)))
+  else empty_index()
+}
+
+/// The CFF table at `at`.
+fn parse(b: Bytes, at: Int) -> Result[Cff, String] = {
+  let major = bytes.read_u8(b, at)
+  if major != 1 then err("CFF version ${int.to_string(major)} (only 1 is read)")
+  else {
+    let names = index_at(b, at + bytes.read_u8(b, at + 2))
+    let tops = index_at(b, index_end(b, names))
+    let strings = index_at(b, index_end(b, tops))
+    let gsubrs = index_at(b, index_end(b, strings))
+    if tops.count < 1 then err("no Top DICT")
+    else {
+      let span = item(b, tops, 0)
+      let top = dict(b, span.0, span.1)
+      if not has(top, 17) then err("no CharStrings")
+      else if float.to_int(operand(top, 1206, 0, 2.0)) != 2 then err("charstring type other than 2")
+      else {
+        let charstrings = index_at(b, at + float.to_int(operand(top, 17, 0, 0.0)))
+        let cid = has(top, 1230)
+        let lsubrs = if has(top, 18) then {
+          let size = float.to_int(operand(top, 18, 0, 0.0))
+          let off = float.to_int(operand(top, 18, 1, 0.0))
+          private_subrs(b, at + off, size)
+        } else empty_index()
+        var fd_lsubrs: List[Index] = []
+        if cid and has(top, 1236) then {
+          let fds = index_at(b, at + float.to_int(operand(top, 1236, 0, 0.0)))
+          for i in 0..<fds.count {
+            let fs = item(b, fds, i)
+            let fd = dict(b, fs.0, fs.1)
+            let sub = if has(fd, 18) then {
+              let size = float.to_int(operand(fd, 18, 0, 0.0))
+              let off = float.to_int(operand(fd, 18, 1, 0.0))
+              private_subrs(b, at + off, size)
+            } else empty_index()
+            list.push(fd_lsubrs, sub)
+          }
+        } else ()
+        let fd_select = if cid and has(top, 1237) then at + float.to_int(operand(top, 1237, 0, 0.0)) else 0
+        ok({ present: true, charstrings: charstrings, gsubrs: gsubrs, lsubrs: lsubrs,
+             cid: cid, fd_select: fd_select, fd_lsubrs: fd_lsubrs })
+      }
+    }
+  }
+}
+
+/// The font DICT glyph `gid` uses (CID-keyed fonts).
+fn fd_of(b: Bytes, c: Cff, gid: Int) -> Int = {
+  if c.fd_select == 0 then 0
+  else {
+    let format = bytes.read_u8(b, c.fd_select)
+    if format == 0 then bytes.read_u8(b, c.fd_select + 1 + gid)
+    else if format == 3 then {
+      // Ranges (first glyph, fd), sorted, then a sentinel.
+      let n = bytes.read_u16_be(b, c.fd_select + 1)
+      var fd = 0
+      for i in 0..<n {
+        let r = c.fd_select + 3 + i * 3
+        if gid >= bytes.read_u16_be(b, r) then { fd = bytes.read_u8(b, r + 2) } else ()
+      }
+      fd
+    } else 0
+  }
+}
+
+fn bias(n: Int) -> Int = if n < 1240 then 107 else if n < 33900 then 1131 else 32768
+
+// ── Charstring interpreter ──
+
+type State = {
+  stack: List[Float],
+  x: Float,
+  y: Float,
+  stems: Int,
+  open: Bool,
+  ended: Bool,
+  cmds: List[Int],
+  pts: List[Float],
+}
+
+/// Subroutine calls nest at most this deep (the spec's limit is 10).
+let MAX_CALLS = 10
+
+/// Glyph `gid`'s outline, font units, y up.
+fn outline(b: Bytes, c: Cff, gid: Int) -> Outline = {
+  if not c.present or gid < 0 or gid >= c.charstrings.count then { cmds: [], pts: [] }
+  else {
+    let lsubrs = if c.cid then {
+      let fd = fd_of(b, c, gid)
+      if fd < list.len(c.fd_lsubrs) then c.fd_lsubrs[fd] else empty_index()
+    } else c.lsubrs
+    let span = item(b, c.charstrings, gid)
+    let start: State = { stack: [], x: 0.0, y: 0.0, stems: 0, open: false,
+                         ended: false, cmds: [], pts: [] }
+    let st = run(b, c, lsubrs, span.0, span.1, start, 0)
+    let closed = if st.open then { ...st, cmds: st.cmds + [CLOSE] } else st
+    { cmds: closed.cmds, pts: closed.pts }
+  }
+}
+
+fn clear(st: State) -> State = {
+  let none_left: List[Float] = []
+  { ...st, stack: none_left }
+}
+
+fn move_to(st: State, dx: Float, dy: Float) -> State = {
+  let x = st.x + dx
+  let y = st.y + dy
+  let cmds = (if st.open then st.cmds + [CLOSE] else st.cmds) + [MOVE]
+  { ...st, x: x, y: y, open: true, cmds: cmds, pts: st.pts + [x, y] }
+}
+
+fn line_to(st: State, dx: Float, dy: Float) -> State = {
+  let x = st.x + dx
+  let y = st.y + dy
+  { ...st, x: x, y: y, cmds: st.cmds + [LINE], pts: st.pts + [x, y] }
+}
+
+fn curve_to(st: State, dxa: Float, dya: Float, dxb: Float, dyb: Float, dxc: Float, dyc: Float) -> State = {
+  let xa = st.x + dxa
+  let ya = st.y + dya
+  let xb = xa + dxb
+  let yb = ya + dyb
+  let xc = xb + dxc
+  let yc = yb + dyc
+  { ...st, x: xc, y: yc, cmds: st.cmds + [CUBIC], pts: st.pts + [xa, ya, xb, yb, xc, yc] }
+}
+
+/// Count stem hints (pairs on the stack) and clear. An odd count is a width
+/// below the pairs, which the halving drops.
+fn stems(st: State) -> State = {
+  clear({ ...st, stems: st.stems + list.len(st.stack) / 2 })
+}
+
+fn run(b: Bytes, c: Cff, lsubrs: Index, start: Int, stop: Int, st0: State, depth: Int) -> State = {
+  var st = st0
+  var pos = start
+  var returned = false
+  while pos < stop and not st.ended and not returned {
+    let b0 = bytes.read_u8(b, pos)
+    pos = pos + 1
+    if b0 >= 32 then {
+      // Numbers.
+      if b0 <= 246 then { st = { ...st, stack: st.stack + [int.to_float(b0 - 139)] } }
+      else if b0 <= 250 then {
+        st = { ...st, stack: st.stack + [int.to_float((b0 - 247) * 256 + bytes.read_u8(b, pos) + 108)] }
+        pos = pos + 1
+      } else if b0 <= 254 then {
+        st = { ...st, stack: st.stack + [int.to_float(0 - (b0 - 251) * 256 - bytes.read_u8(b, pos) - 108)] }
+        pos = pos + 1
+      } else {
+        // 16.16 fixed.
+        st = { ...st, stack: st.stack + [int.to_float(bytes.read_i32_be(b, pos)) / 65536.0] }
+        pos = pos + 4
+      }
+    } else if b0 == 28 then {
+      st = { ...st, stack: st.stack + [int.to_float(bytes.read_i16_be(b, pos))] }
+      pos = pos + 2
+    } else if b0 == 1 or b0 == 3 or b0 == 18 or b0 == 23 then {
+      st = stems(st)
+    } else if b0 == 19 or b0 == 20 then {
+      // hintmask / cntrmask: operands left on the stack are vstems.
+      st = stems(st)
+      pos = pos + (st.stems + 7) / 8
+    } else if b0 == 10 or b0 == 29 then {
+      // callsubr / callgsubr.
+      let subrs = if b0 == 10 then lsubrs else c.gsubrs
+      let n = list.len(st.stack)
+      let k = float.to_int(st.stack[n - 1]) + bias(subrs.count)
+      st = { ...st, stack: list.take(st.stack, n - 1) }
+      if k >= 0 and k < subrs.count and depth < MAX_CALLS then {
+        let span = item(b, subrs, k)
+        st = run(b, c, lsubrs, span.0, span.1, st, depth + 1)
+      } else ()
+    } else if b0 == 11 then {
+      returned = true
+    } else if b0 == 14 then {
+      // endchar (the seac form, four operands, is not supported).
+      st = { ...clear(st), ended: true }
+    } else if b0 == 12 then {
+      let b1 = bytes.read_u8(b, pos)
+      pos = pos + 1
+      st = clear(flex(st, b1))
+    } else {
+      st = clear(path_op(st, b0))
+    }
+  }
+  st
+}
+
+fn path_op(st: State, op: Int) -> State = {
+  let s = st.stack
+  let n = list.len(s)
+  var t = st
+  // A moveto takes its operands from the top: below them may sit the
+  // glyph's width, which the first stack-clearing operator carries.
+  if op == 21 then { t = move_to(t, s[n - 2], s[n - 1]) }
+  else if op == 22 then { t = move_to(t, s[n - 1], 0.0) }
+  else if op == 4 then { t = move_to(t, 0.0, s[n - 1]) }
+  else if op == 5 then {
+    for i in 0..<(n / 2) { t = line_to(t, s[i * 2], s[i * 2 + 1]) }
+  } else if op == 6 or op == 7 then {
+    // hlineto / vlineto: alternating.
+    for i in 0..<n {
+      let horizontal = (i % 2 == 0) == (op == 6)
+      t = if horizontal then line_to(t, s[i], 0.0) else line_to(t, 0.0, s[i])
+    }
+  } else if op == 8 then {
+    for i in 0..<(n / 6) { t = curve_to(t, s[i*6], s[i*6+1], s[i*6+2], s[i*6+3], s[i*6+4], s[i*6+5]) }
+  } else if op == 24 then {
+    // rcurveline: curves, then a line.
+    let curves = (n - 2) / 6
+    for i in 0..<curves { t = curve_to(t, s[i*6], s[i*6+1], s[i*6+2], s[i*6+3], s[i*6+4], s[i*6+5]) }
+    t = line_to(t, s[n - 2], s[n - 1])
+  } else if op == 25 then {
+    // rlinecurve: lines, then a curve.
+    let lines = (n - 6) / 2
+    for i in 0..<lines { t = line_to(t, s[i*2], s[i*2+1]) }
+    t = curve_to(t, s[n-6], s[n-5], s[n-4], s[n-3], s[n-2], s[n-1])
+  } else if op == 26 then {
+    // vvcurveto: {dx1?} {dya dxb dyb dyc}+
+    let lead = n % 4
+    var dx1 = if lead == 1 then s[0] else 0.0
+    let groups = (n - lead) / 4
+    for i in 0..<groups {
+      let k = lead + i * 4
+      t = curve_to(t, dx1, s[k], s[k+1], s[k+2], 0.0, s[k+3])
+      dx1 = 0.0
+    }
+  } else if op == 27 then {
+    // hhcurveto: {dy1?} {dxa dxb dyb dxc}+
+    let lead = n % 4
+    var dy1 = if lead == 1 then s[0] else 0.0
+    let groups = (n - lead) / 4
+    for i in 0..<groups {
+      let k = lead + i * 4
+      t = curve_to(t, s[k], dy1, s[k+1], s[k+2], s[k+3], 0.0)
+      dy1 = 0.0
+    }
+  } else if op == 30 or op == 31 then {
+    // vhcurveto / hvcurveto: curves alternating vertical and horizontal
+    // starts; the last may end with an extra off-axis delta.
+    let groups = n / 4
+    for i in 0..<groups {
+      let k = i * 4
+      let last = i == groups - 1
+      let extra = if last and n % 4 == 1 then s[n - 1] else 0.0
+      let vertical_start = (i % 2 == 0) == (op == 30)
+      t = if vertical_start then curve_to(t, 0.0, s[k], s[k+1], s[k+2], s[k+3], extra)
+          else curve_to(t, s[k], 0.0, s[k+1], s[k+2], extra, s[k+3])
+    }
+  } else ()
+  t
+}
+
+/// The flex operators (escape 12 34..37); any other escaped operator is an
+/// arithmetic or storage op this reader does not run, and is dropped.
+fn flex(st: State, op: Int) -> State = {
+  let s = st.stack
+  let n = list.len(s)
+  if op == 35 and n >= 13 then {
+    let t = curve_to(st, s[0], s[1], s[2], s[3], s[4], s[5])
+    curve_to(t, s[6], s[7], s[8], s[9], s[10], s[11])
+  } else if op == 34 and n >= 7 then {
+    // hflex: dx1 dx2 dy2 dx3 dx4 dx5 dx6 — returns to the starting y.
+    let t = curve_to(st, s[0], 0.0, s[1], s[2], s[3], 0.0)
+    curve_to(t, s[4], 0.0, s[5], 0.0 - s[2], s[6], 0.0)
+  } else if op == 36 and n >= 9 then {
+    // hflex1: dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6 — ends at the starting y.
+    let t = curve_to(st, s[0], s[1], s[2], s[3], s[4], 0.0)
+    curve_to(t, s[5], 0.0, s[6], s[7], s[8], 0.0 - (s[1] + s[3] + s[7]))
+  } else if op == 37 and n >= 11 then {
+    // flex1: the last point moves along whichever axis the curves moved more.
+    let dx = s[0] + s[2] + s[4] + s[6] + s[8]
+    let dy = s[1] + s[3] + s[5] + s[7] + s[9]
+    let t = curve_to(st, s[0], s[1], s[2], s[3], s[4], s[5])
+    if float.abs(dx) > float.abs(dy) then curve_to(t, s[6], s[7], s[8], s[9], s[10], 0.0 - dy)
+    else curve_to(t, s[6], s[7], s[8], s[9], 0.0 - dx, s[10])
+  } else st
+}

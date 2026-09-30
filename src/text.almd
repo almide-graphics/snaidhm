@@ -13,11 +13,15 @@
 //
 // and drawn with `snaidhm.draw_frame_2d_text`.
 //
+// A layer draws with a list of fonts: each character comes from the first
+// that has a glyph for it — a Latin UI face first, a CJK face after it, say
+// — and line metrics from the first.
+//
 // Written as index loops over flat lists, for the wasm renderer (see
 // coarse.almd).
 
 import self.web.gpu as gpu
-import self.ttf as ttf
+import self.sfnt as sfnt
 import self.glyph as glyph
 
 /// Atlas edge in pixels.
@@ -31,11 +35,11 @@ let PAD = 1
 let VERTEX_FLOATS = 8
 
 type TextLayer = {
-  font: ttf.Font,
+  fonts: List[sfnt.Font],
   texture: Int,
   pipeline: Int,
   bind_group: Int,
-  // Glyph cache: `key` (glyph * 1024 + pixel size) -> slot; slot `s` is
+  // Glyph cache: `key(font, glyph, pixel size)` -> slot; slot `s` is
   // `rects[6s ..< 6s+6]` = atlas x, y, w, h, bitmap left, bitmap top.
   keys: Map[Int, Int],
   rects: List[Int],
@@ -52,8 +56,8 @@ type TextLayer = {
   count: Int,
 }
 
-/// A text layer drawing with `font` (its bytes already given to the host).
-fn new_layer(device: Int, font: ttf.Font) -> TextLayer = {
+/// A text layer drawing with `fonts`, in order of preference (at least one).
+fn new_layer(device: Int, fonts: List[sfnt.Font]) -> TextLayer = {
   let texture = gpu.create_texture(device, ATLAS, ATLAS)
   let sampler = gpu.create_sampler(device, 0, 0)
   let shader = gpu.create_shader(device, 2, 0)
@@ -66,7 +70,7 @@ fn new_layer(device: Int, font: ttf.Font) -> TextLayer = {
   let rects: List[Int] = []
   let verts: List[Float] = []
   {
-    font: font, texture: texture, pipeline: pipeline, bind_group: bind_group,
+    fonts: fonts, texture: texture, pipeline: pipeline, bind_group: bind_group,
     keys: keys, rects: rects, pack_x: PAD, pack_y: PAD, row_h: 0,
     verts: verts, vtx: 0, capacity: 0, count: 0,
   }
@@ -78,31 +82,72 @@ fn clear(layer: TextLayer) -> TextLayer = {
   { ...layer, verts: none_yet }
 }
 
+/// The code points of `s`, as `add_run` and `measure` take text.
+fn code_points(s: String) -> List[Int] = {
+  let cs = string.chars(s)
+  let n = list.len(cs)
+  var out: List[Int] = []
+  for i in 0..<n { list.push(out, string.codepoint(cs[i]) ?? 0) }
+  out
+}
+
+/// The font drawing code point `code` — the first of `fonts` with a glyph
+/// for it, else the first — and the glyph: (font index, glyph).
+fn pick(fonts: List[sfnt.Font], code: Int) -> (Int, Int) = {
+  var found = 0 - 1
+  var gid = 0
+  let n = list.len(fonts)
+  for i in 0..<n {
+    if found < 0 then {
+      let g = sfnt.glyph_id(fonts[i], code)
+      if g != 0 then {
+        found = i
+        gid = g
+      } else ()
+    } else ()
+  }
+  if found < 0 then (0, 0) else (found, gid)
+}
+
+/// Advance of glyph `gid` of font `fi`, px at `size` px per em.
+fn advance_px(layer: TextLayer, fi: Int, gid: Int, size: Float) -> Float = {
+  let f = layer.fonts[fi]
+  int.to_float(sfnt.advance(f, gid)) * size / int.to_float(f.units_per_em)
+}
+
+/// The cache key of glyph `gid` of font `fi` at `size_px`.
+fn key(fi: Int, gid: Int, size_px: Int) -> Int = (fi * 65536 + gid) * 1024 + size_px
+
 /// The width `chars` take at `size` px per em, to align or measure a run.
 fn measure(layer: TextLayer, chars: List[Int], size: Float) -> Float = {
-  let scale = size / int.to_float(layer.font.units_per_em)
   var w = 0.0
   let n = list.len(chars)
   for i in 0..<n {
-    w = w + int.to_float(ttf.get_advance_width(layer.font, ttf.char_to_glyph_id(layer.font, chars[i]))) * scale
+    let p = pick(layer.fonts, chars[i])
+    w = w + advance_px(layer, p.0, p.1, size)
   }
   w
 }
 
 /// Ascent and descent (positive, down) of a line at `size` px per em.
-fn ascent(layer: TextLayer, size: Float) -> Float =
-  int.to_float(layer.font.ascent) * size / int.to_float(layer.font.units_per_em)
+fn ascent(layer: TextLayer, size: Float) -> Float = {
+  let f = layer.fonts[0]
+  int.to_float(f.ascent) * size / int.to_float(f.units_per_em)
+}
 
-fn descent(layer: TextLayer, size: Float) -> Float =
-  0.0 - int.to_float(layer.font.descent) * size / int.to_float(layer.font.units_per_em)
+fn descent(layer: TextLayer, size: Float) -> Float = {
+  let f = layer.fonts[0]
+  0.0 - int.to_float(f.descent) * size / int.to_float(f.units_per_em)
+}
 
-/// Rasterize glyph `gid` at `size_px` into the atlas if it is not there yet.
-fn cached(device: Int, layer: TextLayer, gid: Int, size_px: Int) -> TextLayer = {
-  let key = gid * 1024 + size_px
-  match map.get(layer.keys, key) {
+/// Rasterize glyph `gid` of font `fi` at `size_px` into the atlas if it is
+/// not there yet.
+fn cached(device: Int, layer: TextLayer, fi: Int, gid: Int, size_px: Int) -> TextLayer = {
+  let k = key(fi, gid, size_px)
+  match map.get(layer.keys, k) {
     some(_) => layer,
     none => {
-      let bm = glyph.glyph_bitmap(layer.font, gid, int.to_float(size_px))
+      let bm = glyph.glyph_bitmap(layer.fonts[fi], gid, int.to_float(size_px))
       // Next shelf when this row is out of width; start over when the atlas
       // is out of rows. A frame needing more than one atlas of glyphs would
       // overwrite its own earlier glyphs — at UI sizes that is thousands.
@@ -127,7 +172,7 @@ fn cached(device: Int, layer: TextLayer, gid: Int, size_px: Int) -> TextLayer = 
       let slot = list.len(base.rects) / 6
       {
         ...base,
-        keys: map.set(base.keys, key, slot),
+        keys: map.set(base.keys, k, slot),
         rects: base.rects + [x, y, bm.w, bm.h, bm.left, bm.top],
         pack_x: x + bm.w + PAD, pack_y: y, row_h: row_h,
       }
@@ -144,16 +189,15 @@ fn add_run(device: Int, layer: TextLayer, chars: List[Int], size: Float, x: Floa
            r: Float, g: Float, b: Float, a: Float,
            clip_left: Float, clip_top: Float, clip_right: Float, clip_bottom: Float) -> TextLayer = {
   let size_px = int.max(1, float.to_int(float.round(size)))
-  let scale = size / int.to_float(layer.font.units_per_em)
   let baseline = float.round(y)
   var cur = layer
   var verts = layer.verts
   var pen = x
   let n = list.len(chars)
   for i in 0..<n {
-    let gid = ttf.char_to_glyph_id(cur.font, chars[i])
-    cur = cached(device, cur, gid, size_px)
-    let slot = map.get(cur.keys, gid * 1024 + size_px) ?? 0
+    let p = pick(cur.fonts, chars[i])
+    cur = cached(device, cur, p.0, p.1, size_px)
+    let slot = map.get(cur.keys, key(p.0, p.1, size_px)) ?? 0
     let ax = cur.rects[slot * 6]
     let ay = cur.rects[slot * 6 + 1]
     let w = cur.rects[slot * 6 + 2]
@@ -178,7 +222,7 @@ fn add_run(device: Int, layer: TextLayer, chars: List[Int], size: Float, x: Floa
           + [x0, y1, u0, v1, r, g, b, a,  x1, y0, u1, v0, r, g, b, a,  x1, y1, u1, v1, r, g, b, a]
       } else ()
     } else ()
-    pen = pen + int.to_float(ttf.get_advance_width(cur.font, gid)) * scale
+    pen = pen + advance_px(cur, p.0, p.1, size)
   }
   { ...cur, verts: verts }
 }

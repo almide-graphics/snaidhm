@@ -1,0 +1,48 @@
+// snaidhm sfnt_describe — what sfnt.almd reads from a font, as text
+//
+// One line of font metrics, then per code point its glyph and advance and
+// the outline's commands. The form test/font-oracle compares with fontTools,
+// and sfnt_test.almd's golden outputs.
+//
+//   F units_per_em ascent descent line_gap num_glyphs
+//   G code glyph advance
+//   M x y | L x y | C x1 y1 x2 y2 x y | Z
+
+import self.sfnt as sfnt
+
+fn num(x: Float) -> String = float.to_string(x)
+
+fn header(font: sfnt.Font) -> String =
+  "F ${int.to_string(font.units_per_em)} ${int.to_string(font.ascent)} ${int.to_string(font.descent)} ${int.to_string(font.line_gap)} ${int.to_string(font.num_glyphs)}\n"
+
+fn glyph(font: sfnt.Font, code: Int) -> String = {
+  let gid = sfnt.glyph_id(font, code)
+  var out = "G ${int.to_string(code)} ${int.to_string(gid)} ${int.to_string(sfnt.advance(font, gid))}\n"
+  let o = sfnt.outline(font, gid)
+  var p = 0
+  let n = list.len(o.cmds)
+  for i in 0..<n {
+    let c = o.cmds[i]
+    if c == sfnt.MOVE then {
+      out = out + "M ${num(o.pts[p])} ${num(o.pts[p + 1])}\n"
+      p = p + 2
+    } else if c == sfnt.LINE then {
+      out = out + "L ${num(o.pts[p])} ${num(o.pts[p + 1])}\n"
+      p = p + 2
+    } else if c == sfnt.CUBIC then {
+      out = out + "C ${num(o.pts[p])} ${num(o.pts[p + 1])} ${num(o.pts[p + 2])} ${num(o.pts[p + 3])} ${num(o.pts[p + 4])} ${num(o.pts[p + 5])}\n"
+      p = p + 6
+    } else {
+      out = out + "Z\n"
+    }
+  }
+  out
+}
+
+/// The header, then every code point in `codes`.
+fn describe(font: sfnt.Font, codes: List[Int]) -> String = {
+  var out = header(font)
+  let n = list.len(codes)
+  for i in 0..<n { out = out + glyph(font, codes[i]) }
+  out
+}

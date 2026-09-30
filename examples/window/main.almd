@@ -9,22 +9,14 @@ import self as snaidhm
 import self.web.gpu as gpu
 import self.native.window as window
 import self.native.frame as frame
-import self.native.font as font
-import self.ttf as ttf
+import self.native.fonts as fonts
+import self.sfnt as sfnt
 import self.text as text
-
-// TrueType (glyf) fonts a desktop usually has; the first that loads is used.
-let FONTS = [
-  "/System/Library/Fonts/Supplemental/Arial.ttf",
-  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-  "/usr/share/fonts/TTF/DejaVuSans.ttf",
-  "C:/Windows/Fonts/arial.ttf",
-]
 
 fn label(text: String, size: Float, x: Float, y: Float, color: List[Float]) -> snaidhm.TextSpec =
   snaidhm.text_spec(snaidhm.str(text), size, x, y, snaidhm.ALIGN_CENTER, color)
 
-fn build(device: Int, width: Int, height: Int, has_font: Bool) -> snaidhm.SceneHandle = {
+fn build(device: Int, width: Int, height: Int, faces: List[sfnt.Font]) -> snaidhm.SceneHandle = {
   let dc = [0.5, 0.5, 0.5, 1.0]
   let shape_cubics =
     snaidhm.round_rect_cubics(-0.9, -0.9, 1.8, 1.8, 0.08, dc, 0)
@@ -42,8 +34,11 @@ fn build(device: Int, width: Int, height: Int, has_font: Bool) -> snaidhm.SceneH
   let ink = [0.2, 0.22, 0.3, 1.0]
   // The title is a path (vector, any size); the small text below comes from
   // the glyph cache (see `labels`).
-  let specs = if has_font then [label("snaidhm", 40.0 * s, 0.0, 0.62, ink)] else []
-  let title = snaidhm.build_text_cubics(specs, int.to_float(height))
+  let no_paths: List[snaidhm.Cubic] = []
+  let no_paints: List[snaidhm.Paint] = []
+  let title = if list.len(faces) > 0 then
+      snaidhm.build_text_cubics(faces[0], [label("snaidhm", 40.0 * s, 0.0, 0.62, ink)], int.to_float(height))
+    else { cubics: no_paths, paints: no_paints }
   // Text paths are numbered after the shapes'.
   let offset = list.len(shape_paints)
   let title_cubics = title.cubics |> list.map((c) =>
@@ -65,7 +60,7 @@ fn px(x: Float, width: Int) -> Float = (x + 1.0) * 0.5 * int.to_float(width)
 // A run centred on normal-space `x`, its baseline at pixel row `y`.
 fn centred(device: Int, layer: text.TextLayer, s: String, size: Float, x: Float, y: Float,
            width: Int, height: Int, grey: Float) -> text.TextLayer = {
-  let chars = string.to_bytes(s)
+  let chars = text.code_points(s)
   let left = px(x, width) - text.measure(layer, chars, size) / 2.0
   text.add_run(device, layer, chars, size, left, y, grey, grey, grey + 0.08, 1.0,
     0.0, 0.0, int.to_float(width), int.to_float(height))
@@ -76,22 +71,26 @@ fn labels(device: Int, layer: text.TextLayer, width: Int, height: Int) -> text.T
   let s = window.scale_factor()
   let h = int.to_float(height)
   var l = text.clear(layer)
-  l = centred(device, l, "Almide > native > wgpu", 14.0 * s, 0.0, h * 0.26, width, height, 0.45)
-  l = centred(device, l, "Red", 13.0 * s, -0.5, h * 0.66, width, height, 0.2)
-  l = centred(device, l, "Green", 13.0 * s, 0.0, h * 0.66, width, height, 0.2)
-  l = centred(device, l, "Blue", 13.0 * s, 0.5, h * 0.66, width, height, 0.2)
-  l = centred(device, l, "glyph cache: each glyph rasterized once per size, then blitted", 11.0 * s, 0.0, h * 0.86, width, height, 0.5)
+  // Without a font there is nothing to draw them with.
+  if list.len(l.fonts) == 0 then () else {
+    l = centred(device, l, "Almide > native > wgpu", 14.0 * s, 0.0, h * 0.26, width, height, 0.45)
+    l = centred(device, l, "Red", 13.0 * s, -0.5, h * 0.66, width, height, 0.2)
+    l = centred(device, l, "Green", 13.0 * s, 0.0, h * 0.66, width, height, 0.2)
+    l = centred(device, l, "Blue", 13.0 * s, 0.5, h * 0.66, width, height, 0.2)
+    l = centred(device, l, "glyph cache: each glyph rasterized once per size, then blitted", 11.0 * s, 0.0, h * 0.86, width, height, 0.5)
+    l = centred(device, l, "日本語も描けます — ひらがな、カタカナ、漢字", 15.0 * s, 0.0, h * 0.8, width, height, 0.25)
+  }
   text.upload(device, l, width, height)
 }
 
 effect fn main() -> Unit = {
   let capture = list.get(env.args(), 0)
   if window.open("snaidhm", 640, 640) then {
-    let has_font = FONTS |> list.any((path) => font.load(path))
-    if has_font then () else println("no TrueType font found; drawing shapes only")
+    let faces = fonts.system()!
     let device = 1
-    var scene = build(device, window.width(), window.height(), has_font)
-    var layer = labels(device, text.new_layer(device, ttf.parse_font()), window.width(), window.height())
+    var scene = build(device, window.width(), window.height(), faces)
+    if list.len(faces) == 0 then println("no font found; drawing shapes only") else ()
+    var layer = labels(device, text.new_layer(device, faces), window.width(), window.height())
     match capture {
       some(path) => {
         snaidhm.draw_frame_2d_text(scene, layer, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -100,7 +99,7 @@ effect fn main() -> Unit = {
       none => {
         while window.pump() {
           if window.resized() then {
-            scene = build(device, window.width(), window.height(), has_font)
+            scene = build(device, window.width(), window.height(), faces)
             layer = labels(device, layer, window.width(), window.height())
           } else ()
           snaidhm.draw_frame_2d_text(scene, layer, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)

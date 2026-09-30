@@ -1,0 +1,48 @@
+// snaidhm native fonts — the system's fonts, found by path and read as bytes
+//
+// Fonts are parsed in Almide (sfnt.almd); all a host does is read the file,
+// so this is plain `fs`. The browser hands its fonts over as WASI files
+// (host/wasi.js) and reads them the same way.
+
+import fs
+import self.sfnt as sfnt
+
+/// Latin UI faces a desktop usually has, in order of preference.
+let UI = [
+  "/System/Library/Fonts/Supplemental/Arial.ttf",
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+  "/usr/share/fonts/TTF/DejaVuSans.ttf",
+  "C:/Windows/Fonts/segoeui.ttf",
+  "C:/Windows/Fonts/arial.ttf",
+]
+
+/// Japanese faces (with the rest of CJK), in order of preference: Hiragino on
+/// macOS, Noto Sans CJK where Linux distributions put it, Yu Gothic and MS
+/// Gothic on Windows. Face 0 of each collection is the Japanese one.
+let CJK = [
+  "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+  "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+  "C:/Windows/Fonts/YuGothR.ttc",
+  "C:/Windows/Fonts/msgothic.ttc",
+]
+
+/// Face 0 of the first of `paths` that reads and parses, from `i` on.
+effect fn first(paths: List[String], i: Int) -> sfnt.Font? =
+  if i >= list.len(paths) then none
+  else match fs.read_bytes_raw(paths[i]) {
+    ok(data) => match sfnt.load(data, 0) {
+      ok(font) => some(font),
+      err(_) => first(paths, i + 1)!,
+    },
+    err(_) => first(paths, i + 1)!,
+  }
+
+/// The fonts a text layer draws UI text with: a Latin face, then a CJK face
+/// for what it lacks — whichever of the two this system has.
+effect fn system() -> List[sfnt.Font] = {
+  let ui: List[sfnt.Font] = match first(UI, 0)! { some(f) => [f], none => [] }
+  let cjk: List[sfnt.Font] = match first(CJK, 0)! { some(f) => [f], none => [] }
+  ui + cjk
+}

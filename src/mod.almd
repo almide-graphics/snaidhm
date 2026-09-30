@@ -3,8 +3,9 @@
 // Public types, shape/paint/shadow constructors, and render_scene().
 // Consumers (ceangal, standalone demo) import this module.
 
+import fs
 import self.web.gpu as gpu
-import self.ttf as ttf
+import self.sfnt as sfnt
 import self.coarse as coarse
 import self.text as text
 import math
@@ -193,12 +194,12 @@ fn str(s: String) -> List[Int] = string.to_bytes(s)
 fn text_spec(chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float]) -> TextSpec =
   { chars: chars, size: size, x: x, y: y, align: align, color: color }
 
-fn measure_text(font: ttf.Font, chars: List[Int], size: Float, viewport_h: Float) -> Float = {
-  let upm = int.to_float(font.units_per_em)
-  let scale = size * 2.0 / viewport_h / upm
-  list.fold(chars, 0.0, (acc, ch) =>
-    acc + int.to_float(ttf.get_advance_width(font, ttf.char_to_glyph_id(font, ch))) * scale
-  )
+fn measure_text(font: sfnt.Font, chars: List[Int], size: Float, viewport_h: Float) -> Float = {
+  let scale = size * 2.0 / viewport_h / int.to_float(font.units_per_em)
+  var w = 0.0
+  let n = list.len(chars)
+  for i in 0..<n { w = w + int.to_float(sfnt.advance(font, sfnt.glyph_id(font, chars[i]))) * scale }
+  w
 }
 
 // ── Upload helpers (internal) ──
@@ -601,29 +602,39 @@ fn render_scene(
   draw_frame(scene, scroll_y)
 }
 
-// ── Text rendering (pure Almide TTF parser) ──
+// ── Text as paths ──
 
-fn build_text_cubics(specs: List[TextSpec], viewport_h: Float) -> { cubics: List[Cubic], paints: List[Paint] } = {
-  let font = ttf.parse_font()
-  let h_f = viewport_h
+/// Every glyph of `specs` as filled paths, in normal space for a viewport
+/// `viewport_h` px tall. Each glyph is its own path (the winding rule is per
+/// path) with its own paint.
+fn build_text_cubics(font: sfnt.Font, specs: List[TextSpec], viewport_h: Float) -> { cubics: List[Cubic], paints: List[Paint] } = {
   var cubics: List[Cubic] = []
   var paints: List[Paint] = []
-  var path_id_offset = 0
-
-  for spec in specs {
-    let glyphs = ttf.layout_text(font, spec.chars, spec.size, spec.x, spec.y, spec.align, h_f)
-    // Each glyph gets its own path_id (winding rule requires separate paths)
-    for glyph in glyphs {
-      let pid = path_id_offset
-      for gc in glyph.cubics {
-        cubics = cubics + [{
-          a: {x: gc.ax, y: gc.ay}, b: {x: gc.bx, y: gc.by},
-          c: {x: gc.cx, y: gc.cy}, d: {x: gc.dx, y: gc.dy},
-          color: spec.color, path_id: pid
-        }]
-      }
-      paints = paints + [solid(spec.color[0], spec.color[1], spec.color[2], spec.color[3])]
-      path_id_offset = path_id_offset + 1
+  var pid = 0
+  let ns = list.len(specs)
+  for si in 0..<ns {
+    let spec = specs[si]
+    let scale = spec.size * 2.0 / viewport_h / int.to_float(font.units_per_em)
+    var pen = if spec.align == ALIGN_CENTER then spec.x - measure_text(font, spec.chars, spec.size, viewport_h) / 2.0
+              else spec.x
+    let nc = list.len(spec.chars)
+    for ci in 0..<nc {
+      let gid = sfnt.glyph_id(font, spec.chars[ci])
+      let flat = sfnt.closed_cubics(sfnt.outline(font, gid), scale, pen, spec.y)
+      let n = list.len(flat) / 8
+      if n > 0 then {
+        for k in 0..<n {
+          let o = k * 8
+          list.push(cubics, {
+            a: {x: flat[o], y: flat[o + 1]}, b: {x: flat[o + 2], y: flat[o + 3]},
+            c: {x: flat[o + 4], y: flat[o + 5]}, d: {x: flat[o + 6], y: flat[o + 7]},
+            color: spec.color, path_id: pid,
+          })
+        }
+        list.push(paints, solid(spec.color[0], spec.color[1], spec.color[2], spec.color[3]))
+        pid = pid + 1
+      } else ()
+      pen = pen + int.to_float(sfnt.advance(font, gid)) * scale
     }
   }
   { cubics: cubics, paints: paints }
@@ -631,8 +642,11 @@ fn build_text_cubics(specs: List[TextSpec], viewport_h: Float) -> { cubics: List
 
 // ── Standalone demo entry point ──
 
+/// The demo's font: a file the page hands over through WASI (host/wasi.js).
+let DEMO_FONT = "/font.ttf"
+
 @export(wasm, "render")
-fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: Int, img_sampler: Int) -> Unit = {
+effect fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: Int, img_sampler: Int) -> Unit = {
   let dc = [0.5, 0.5, 0.5, 1.0]
 
   let shape_cubics =
@@ -679,7 +693,8 @@ fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_texture: 
     { chars: str("all from Almide"), size: 16.0, x: 0.0, y: -0.78, align: ALIGN_CENTER, color: [0.5,0.5,0.6,1.0] },
   ]
 
-  let text = build_text_cubics(text_specs, 512.0)
+  let font = sfnt.load(fs.read_bytes_raw(DEMO_FONT)!, 0)!
+  let text = build_text_cubics(font, text_specs, 512.0)
 
   // Remap text path_ids to continue after shape paints
   let num_shape_paints = list.len(shape_paints)
