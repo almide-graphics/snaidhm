@@ -223,6 +223,10 @@ impl ApplicationHandler for App {
             self.failed = true;
             return;
         }
+        #[cfg(target_os = "macos")]
+        if let Some(view) = ns_view(&window) {
+            layer::pin(view);
+        }
         self.window = Some(window);
     }
 
@@ -507,6 +511,120 @@ mod watch {
         let w = get();
         w.state.lock().unwrap().armed = false;
         unsafe { libc::write(w.pipe.1, [1u8].as_ptr() as *const _, 1) };
+    }
+}
+
+/// Fill what a frame doesn't cover with this colour (0..1 each) — the edge a
+/// window being resized uncovers before the program draws for the new size.
+/// macOS only; elsewhere nothing happens.
+pub fn set_background(r: f64, g: f64, b: f64) {
+    #[cfg(target_os = "macos")]
+    with_host((), |host| {
+        if let Some(view) = host.app.window.as_ref().and_then(|w| ns_view(w)) {
+            layer::background(view, r, g, b);
+        }
+    });
+    #[cfg(not(target_os = "macos"))]
+    let _ = (r, g, b);
+}
+
+#[cfg(target_os = "macos")]
+fn ns_view(window: &Window) -> Option<*mut std::ffi::c_void> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::AppKit(h) => Some(h.ns_view.as_ptr()),
+        _ => None,
+    }
+}
+
+/// The Metal layer wgpu draws into, set up for resizing. macOS draws a
+/// window being resized itself while the program waits (the resize is a
+/// modal loop), with the last frame stretched to the new size by default:
+/// the text swells and shrinks as the edge moves. Pinned to the top left and
+/// unscaled, the frame stays as it was and the uncovered edge takes the
+/// background colour, until the program draws for the size it settles at.
+#[cfg(target_os = "macos")]
+mod layer {
+    use std::ffi::{c_void, CStr};
+
+    type Id = *mut c_void;
+
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_getClass(name: *const std::ffi::c_char) -> Id;
+        fn sel_registerName(name: *const std::ffi::c_char) -> Id;
+        fn objc_msgSend();
+    }
+    #[link(name = "QuartzCore", kind = "framework")]
+    extern "C" {
+        static kCAGravityTopLeft: Id;
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGColorCreateSRGB(r: f64, g: f64, b: f64, a: f64) -> Id;
+        fn CGColorRelease(color: Id);
+    }
+
+    unsafe fn sel(name: &CStr) -> Id {
+        unsafe { sel_registerName(name.as_ptr()) }
+    }
+    unsafe fn send(obj: Id, name: &CStr) -> Id {
+        let f: unsafe extern "C" fn(Id, Id) -> Id = unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { f(obj, sel(name)) }
+    }
+    unsafe fn send_id(obj: Id, name: &CStr, arg: Id) -> Id {
+        let f: unsafe extern "C" fn(Id, Id, Id) -> Id = unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { f(obj, sel(name), arg) }
+    }
+    unsafe fn send_index(obj: Id, name: &CStr, i: usize) -> Id {
+        let f: unsafe extern "C" fn(Id, Id, usize) -> Id = unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { f(obj, sel(name), i) }
+    }
+    unsafe fn count(obj: Id) -> usize {
+        let f: unsafe extern "C" fn(Id, Id) -> usize = unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { f(obj, sel(c"count")) }
+    }
+    unsafe fn is_kind(obj: Id, class: Id) -> bool {
+        let f: unsafe extern "C" fn(Id, Id, Id) -> bool = unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+        unsafe { f(obj, sel(c"isKindOfClass:"), class) }
+    }
+
+    /// The view's layer, then the Metal layers under it.
+    fn layers(view: Id) -> Vec<Id> {
+        unsafe {
+            let root = send(view, c"layer");
+            if root.is_null() {
+                return Vec::new();
+            }
+            let metal = objc_getClass(c"CAMetalLayer".as_ptr());
+            let subs = send(root, c"sublayers");
+            let mut out = vec![root];
+            if !subs.is_null() {
+                for i in 0..count(subs) {
+                    let l = send_index(subs, c"objectAtIndex:", i);
+                    if is_kind(l, metal) {
+                        out.push(l);
+                    }
+                }
+            }
+            out
+        }
+    }
+
+    pub fn pin(view: Id) {
+        for l in layers(view).into_iter().skip(1) {
+            unsafe { send_id(l, c"setContentsGravity:", kCAGravityTopLeft) };
+        }
+    }
+
+    pub fn background(view: Id, r: f64, g: f64, b: f64) {
+        unsafe {
+            let color = CGColorCreateSRGB(r, g, b, 1.0);
+            for l in layers(view) {
+                send_id(l, c"setBackgroundColor:", color);
+            }
+            CGColorRelease(color);
+        }
     }
 }
 
