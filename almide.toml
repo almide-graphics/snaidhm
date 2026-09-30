@@ -15,7 +15,10 @@ rust = true
 # and native/window.rs, the window it presents to. Versions match
 # ceangal-native, which native/gpu.rs is ported from.
 [native-deps]
-wgpu = "24"
+# wgpu 24.0.5 with one change: on an integrated GPU its internal zero buffer
+# is zeroed through a mapping, not by a GPU clear — on Metal the first
+# transfer command of a process holds ~46 MB of driver memory.
+wgpu = { git = "https://github.com/almide-graphics/wgpu.git", rev = "da6a54b2391cc1b9c0587ad43d0c43b7bad6caae" }
 winit = "0.30"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
