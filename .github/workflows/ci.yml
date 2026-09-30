@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # The compiler the code is checked against; advance it deliberately.
+  ALMIDE_VERSION: v0.66.0-rc1
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Almide ${{ env.ALMIDE_VERSION }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP"
+          gh release download "$ALMIDE_VERSION" -R almide/almide -p almide-linux-x86_64.tar.gz -p almide-checksums.sha256
+          grep ' almide-linux-x86_64.tar.gz$' almide-checksums.sha256 | sha256sum -c -
+          tar xzf almide-linux-x86_64.tar.gz
+          echo "$RUNNER_TEMP/almide-linux-x86_64" >> "$GITHUB_PATH"
+      - name: Test
+        run: almide test src/
+      # cube/ and particles/ are left out: sketches for a WGSL target
+      # (`--target wgsl`) the compiler does not have yet, not programs for it.
+      - name: Check the examples
+        run: |
+          for f in examples/triangle/main.almd examples/window/main.almd examples/wayland/main.almd examples/wayland/drive.almd; do
+            echo "== $f"; almide check "$f"
+          done
+      - name: Build the Wayland client (native, release)
+        run: |
+          almide build --release examples/wayland/main.almd -o "$RUNNER_TEMP/win"
+          almide build --release examples/wayland/drive.almd -o "$RUNNER_TEMP/drive"
