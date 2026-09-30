@@ -514,6 +514,12 @@ mod watch {
     }
 }
 
+/// Take back a close the user asked for (`pump` and the waits returned
+/// `false`): after asking whether to close and hearing no. The window stays.
+pub fn keep_open() {
+    with_host((), |host| host.app.close_requested = false)
+}
+
 /// Fill what a frame doesn't cover with this colour (0..1 each) — the edge a
 /// window being resized uncovers before the program draws for the new size.
 /// macOS only; elsewhere nothing happens.
