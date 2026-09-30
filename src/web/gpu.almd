@@ -153,6 +153,15 @@ fn flush_to_buffer(device: Int, buffer: Int) -> Unit = _
 @extern(rust, "crate::gpu", "flush_to_texture")
 fn flush_to_texture(device: Int, texture: Int, x: Int, y: Int, w: Int, h: Int) -> Unit = _
 
+/// Write the staged values into `buffer` seen as rows of `stride` 32-bit
+/// words: `h` rows of `w` values, one `push_u32` each, row by row, the first
+/// at word `x` of row `y`. For an image kept in a buffer rather than a
+/// texture. Natively the rectangles reach the GPU at the next submit, a
+/// frame's all in one write.
+@extern(wasm, "gpu", "flush_to_buffer_rect")
+@extern(rust, "crate::gpu", "flush_to_buffer_rect")
+fn flush_to_buffer_rect(device: Int, buffer: Int, stride: Int, x: Int, y: Int, w: Int, h: Int) -> Unit = _
+
 // ── Bind group: texture + sampler entries ──
 
 @extern(wasm, "gpu", "add_texture_binding")

@@ -174,6 +174,18 @@ export function createGpuHost(canvas) {
       }
       _dataChunks = []; _dataIsF32 = [];
     },
+    flush_to_buffer_rect(deviceId, bufferId, stride, x, y, w, rows) {
+      const s = N(stride), x0 = N(x), y0 = N(y), width = N(w), height = N(rows);
+      const words = new Uint32Array(_dataChunks.length);
+      for (let i = 0; i < _dataChunks.length; i++) words[i] = _dataChunks[i];
+      if (width > 0 && height > 0 && x0 + width <= s && words.length >= width * height) {
+        const queue = g(deviceId).queue, buf = g(bufferId);
+        for (let r = 0; r < height; r++) {
+          queue.writeBuffer(buf, ((y0 + r) * s + x0) * 4, words, r * width, width);
+        }
+      }
+      _dataChunks = []; _dataIsF32 = [];
+    },
     // ── Optional 3D pass ──
     //
     // ceangal's own pipeline is a fullscreen quad with no vertex buffers and no

@@ -61,6 +61,10 @@ use winit::window::{Window, WindowAttributes, WindowId};
 /// that never delivers it into an error instead of a hang.
 const OPEN_DEADLINE: Duration = Duration::from_secs(5);
 
+/// How long a window opened hidden waits for its first frame before it is
+/// shown anyway.
+const SHOW_DEADLINE: Duration = Duration::from_millis(500);
+
 /// Event kinds, as `next_event` returns them (0: none left).
 const MOUSE_MOVE: i64 = 1;
 const MOUSE_DOWN: i64 = 2;
@@ -136,6 +140,10 @@ fn key_code(key: &NamedKey) -> Option<i64> {
 struct Host {
     event_loop: EventLoop<()>,
     app: App,
+    /// When the window opened, until it is shown: it opens hidden and shows
+    /// with its first frame, rather than empty while the program gets its
+    /// GPU work ready.
+    hidden_since: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -312,7 +320,15 @@ impl Host {
     /// Process events, blocking for at most `timeout` (`None`: until one
     /// arrives). Returns whether the window is still wanted.
     fn pump(&mut self, timeout: Option<Duration>) -> bool {
-        crate::gpu::present_frame();
+        let presented = crate::gpu::present_frame();
+        if let Some(since) = self.hidden_since {
+            if presented || since.elapsed() >= SHOW_DEADLINE {
+                if let Some(w) = &self.app.window {
+                    w.set_visible(true);
+                }
+                self.hidden_since = None;
+            }
+        }
         if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(timeout, &mut self.app) {
             return false;
         }
@@ -344,9 +360,10 @@ pub fn open(title: &str, width: i64, height: i64) -> bool {
         };
         let attrs = Window::default_attributes()
             .with_title(title)
-            .with_inner_size(LogicalSize::new(width.max(1) as f64, height.max(1) as f64));
+            .with_inner_size(LogicalSize::new(width.max(1) as f64, height.max(1) as f64))
+            .with_visible(false);
         let _ = PROXY.set(event_loop.create_proxy());
-        let mut host = Host { event_loop, app: App { pending: Some(attrs), ..App::default() } };
+        let mut host = Host { event_loop, app: App { pending: Some(attrs), ..App::default() }, hidden_since: Some(Instant::now()) };
         let deadline = Instant::now() + OPEN_DEADLINE;
         while host.app.window.is_none() && !host.app.failed {
             if Instant::now() >= deadline {
