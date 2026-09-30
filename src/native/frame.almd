@@ -1,0 +1,11 @@
+// snaidhm frame capture — @extern(rust) declarations
+//
+// Reads the frame back from the GPU, for golden-image tests and for looking at
+// what a native build drew without a screen to look at. Native only.
+
+/// Write the current frame to `path` as a PNG: the image the next
+/// `window.pump()` would show, or the offscreen target when no window is open.
+/// Call it after drawing the frame. `false` when there is nothing to read or
+/// the file cannot be written; the reason is on stderr.
+@extern(rust, "crate::gpu", "save_png")
+fn save_png(path: String) -> Bool = _

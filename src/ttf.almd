@@ -4,8 +4,6 @@
 // Converts: quadratic beziers → cubic beziers for path renderer
 // NOT supported: CFF/CFF2, variable fonts, hinting, kern table
 
-import math
-
 // ── Byte-level access to font data (JS holds the buffer) ──
 
 @extern(wasm, "font_data", "len")
@@ -60,7 +58,7 @@ type CubicBez = { ax: Float, ay: Float, bx: Float, by: Float,
 fn find_table(tag0: Int, tag1: Int, tag2: Int, tag3: Int) -> { offset: Int, length: Int } = {
   let num_tables = data_u16be(4)
   var result = { offset: 0, length: 0 }
-  for i in 0..num_tables {
+  for i in 0..<num_tables {
     let entry = 12 + i * 16
     if data_u8(entry) == tag0 and data_u8(entry + 1) == tag1
        and data_u8(entry + 2) == tag2 and data_u8(entry + 3) == tag3 then {
@@ -116,7 +114,7 @@ fn parse_font() -> Font = {
 fn parse_cmap(table_offset: Int) -> CmapFormat4 = {
   let num_subtables = data_u16be(table_offset + 2)
   var format4_offset = -1
-  for i in 0..num_subtables {
+  for i in 0..<num_subtables {
     let entry = table_offset + 4 + i * 8
     let platform_id = data_u16be(entry)
     let encoding_id = data_u16be(entry + 2)
@@ -139,13 +137,13 @@ fn parse_cmap_format4(offset: Int) -> CmapFormat4 = {
   let seg_count = data_u16be(offset + 6) / 2
   let array_start = offset + 14
 
-  let end_codes = 0..seg_count |> list.map((i) => data_u16be(array_start + i * 2))
+  let end_codes = 0..<seg_count |> list.map((i) => data_u16be(array_start + i * 2))
   let start_offset = array_start + seg_count * 2 + 2
-  let start_codes = 0..seg_count |> list.map((i) => data_u16be(start_offset + i * 2))
+  let start_codes = 0..<seg_count |> list.map((i) => data_u16be(start_offset + i * 2))
   let delta_offset = start_offset + seg_count * 2
-  let id_deltas = 0..seg_count |> list.map((i) => data_i16be(delta_offset + i * 2))
+  let id_deltas = 0..<seg_count |> list.map((i) => data_i16be(delta_offset + i * 2))
   let range_offset = delta_offset + seg_count * 2
-  let id_range_offsets = 0..seg_count |> list.map((i) => data_u16be(range_offset + i * 2))
+  let id_range_offsets = 0..<seg_count |> list.map((i) => data_u16be(range_offset + i * 2))
 
   { seg_count: seg_count, end_codes: end_codes, start_codes: start_codes,
     id_deltas: id_deltas, id_range_offsets: id_range_offsets,
@@ -158,7 +156,7 @@ fn char_to_glyph_id(font: Font, char_code: Int) -> Int = {
   let cmap = font.cmap
   var result = 0
   var found = false
-  for i in 0..cmap.seg_count {
+  for i in 0..<cmap.seg_count {
     if not found and cmap.end_codes[i] >= char_code and cmap.start_codes[i] <= char_code then {
       if cmap.id_range_offsets[i] == 0 then {
         result = int.band(char_code + cmap.id_deltas[i], 0xFFFF)
@@ -199,7 +197,7 @@ fn parse_simple_glyph(offset: Int, num_contours: Int) -> List[List[GlyphPoint]] 
   var pos = offset + 10
 
   // End points of each contour
-  let end_points = 0..num_contours |> list.map((i) => {
+  let end_points = 0..<num_contours |> list.map((i) => {
     let ep = data_u16be(pos + i * 2)
     ep
   })
@@ -221,7 +219,7 @@ fn parse_simple_glyph(offset: Int, num_contours: Int) -> List[List[GlyphPoint]] 
     if int.band(flag, 0x08) != 0 then {
       let repeat = data_u8(fpos)
       fpos = fpos + 1
-      for _ in 0..repeat { flags = flags + [flag] }
+      for _ in 0..<repeat { flags = flags + [flag] }
     } else ()
   }
   pos = fpos
@@ -229,7 +227,7 @@ fn parse_simple_glyph(offset: Int, num_contours: Int) -> List[List[GlyphPoint]] 
   // Parse X coordinates
   var xs: List[Int] = []
   var x = 0
-  for i in 0..num_points {
+  for i in 0..<num_points {
     let flag = flags[i]
     if int.band(flag, 0x02) != 0 then {
       let dx = data_u8(pos)
@@ -245,7 +243,7 @@ fn parse_simple_glyph(offset: Int, num_contours: Int) -> List[List[GlyphPoint]] 
   // Parse Y coordinates
   var ys: List[Int] = []
   var y = 0
-  for i in 0..num_points {
+  for i in 0..<num_points {
     let flag = flags[i]
     if int.band(flag, 0x04) != 0 then {
       let dy = data_u8(pos)
@@ -261,9 +259,9 @@ fn parse_simple_glyph(offset: Int, num_contours: Int) -> List[List[GlyphPoint]] 
   // Build contours
   var contours: List[List[GlyphPoint]] = []
   var start_idx = 0
-  for c in 0..num_contours {
+  for c in 0..<num_contours {
     let end_idx = end_points[c]
-    let points = start_idx..=end_idx |> list.map((i) => {
+    let points = start_idx...end_idx |> list.map((i) => {
       { x: xs[i], y: ys[i], on_curve: int.band(flags[i], 0x01) != 0 }
     })
     contours = contours + [points]
@@ -320,7 +318,7 @@ fn get_glyph_contours(font: Font, glyph_id: Int) -> List[List[GlyphPoint]] = {
 fn expand_implied(contour: List[GlyphPoint]) -> List[GlyphPoint] = {
   var result: List[GlyphPoint] = []
   let n = list.len(contour)
-  for i in 0..n {
+  for i in 0..<n {
     let curr = contour[i]
     let next = contour[(i + 1) % n]
     result = result + [curr]
@@ -332,7 +330,7 @@ fn expand_implied(contour: List[GlyphPoint]) -> List[GlyphPoint] = {
   let n_res = list.len(result)
   var start = 0
   var found_start = false
-  for i in 0..n_res {
+  for i in 0..<n_res {
     if not found_start and result[i].on_curve then {
       start = i
       found_start = true
@@ -342,7 +340,7 @@ fn expand_implied(contour: List[GlyphPoint]) -> List[GlyphPoint] = {
   else {
     // Rotate: take [start..end] + [0..start]
     var rotated: List[GlyphPoint] = []
-    for i in 0..n_res {
+    for i in 0..<n_res {
       rotated = rotated + [result[(i + start) % n_res]]
     }
     rotated

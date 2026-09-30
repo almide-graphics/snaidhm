@@ -35,20 +35,46 @@ fn cubic_eval(a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) -> Vec2 = {
     y: uu*u*a.y + 3.0*uu*t*b.y + 3.0*u*tt*c.y + tt*t*d.y }
 }
 
+// Flattening tolerance in normal space: half a pixel at up to a 1024px viewport.
+let FLATTEN_TOL = 0.5 / 1024.0
+
 fn wang_n(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Int = {
   let d1x = c.x - 2.0*b.x + a.x
   let d1y = c.y - 2.0*b.y + a.y
   let d2x = d.x - 2.0*c.x + b.x
   let d2y = d.y - 2.0*c.y + b.y
   let dd = float.max(math.sqrt(d1x*d1x + d1y*d1y), math.sqrt(d2x*d2x + d2y*d2y))
-  let tol = 0.5 / 1024.0  // tolerance for up to 1024px viewport
-  int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
+  int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * FLATTEN_TOL))))))
 }
 
+// Whether `p` lies on the chord a→d, within tolerance and between its ends.
+fn on_chord(p: Vec2, a: Vec2, d: Vec2) -> Bool = {
+  let dx = d.x - a.x
+  let dy = d.y - a.y
+  let len2 = dx * dx + dy * dy
+  let px = p.x - a.x
+  let py = p.y - a.y
+  if len2 < FLATTEN_TOL * FLATTEN_TOL then px * px + py * py <= FLATTEN_TOL * FLATTEN_TOL
+  else {
+    let t = (px * dx + py * dy) / len2
+    let cross = px * dy - py * dx
+    t >= 0.0 and t <= 1.0 and cross * cross <= FLATTEN_TOL * FLATTEN_TOL * len2
+  }
+}
+
+// A cubic whose control points lie on its chord is a straight line, and
+// flattens to exactly one segment. Wang's bound measures how unevenly the
+// curve is parametrised, not how it bends: an edge written with its control
+// points on its endpoints (round_rect_cubics does) has a large second
+// difference and would be cut into ~50 collinear pieces — enough to overflow
+// the per-tile segment budget and silently drop the rest of the path.
+fn segment_count(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Int =
+  if on_chord(b, a, d) and on_chord(c, a, d) then 1 else wang_n(a, b, c, d)
+
 fn flatten_cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], pid: Int) -> List[Seg] = {
-  let n = wang_n(a, b, c, d)
+  let n = segment_count(a, b, c, d)
   let nf = int.to_float(n)
-  0..n |> list.map((i) => {
+  0..<n |> list.map((i) => {
     let t0 = int.to_float(i) / nf
     let t1 = int.to_float(i + 1) / nf
     { p0: cubic_eval(a, b, c, d, t0), p1: cubic_eval(a, b, c, d, t1), color: color, path_id: pid }
@@ -98,7 +124,7 @@ fn dda_tiles(p0: Vec2, p1: Vec2) -> List[Int] = {
   let x0 = xt0 * sign + (if is_pos then 0.0 else -1.0)
   var last_z = float.floor(b - a)
   var result: List[Int] = []
-  for i in 0..count {
+  for i in 0..<count {
     let zf = a * int.to_float(i) + b
     let z = float.floor(zf)
     let ty = float.to_int(y0 + int.to_float(i) - z)
@@ -178,7 +204,9 @@ fn measure_text(font: ttf.Font, chars: List[Int], size: Float, viewport_h: Float
 // ── Upload helpers (internal) ──
 
 fn upload_shadows(device: Int, shadows: List[Shadow]) -> Int = {
-  let buf = gpu.create_buffer(device, list.len(shadows) * 48, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  // At least one element: a zero-sized storage binding is a validation error,
+  // and a scene without shadows is ordinary.
+  let buf = gpu.create_buffer(device, int.max(1, list.len(shadows)) * 48, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
   for s in shadows {
     gpu.push_f32(s.cx) gpu.push_f32(s.cy) gpu.push_f32(s.hw) gpu.push_f32(s.hh)
@@ -190,7 +218,7 @@ fn upload_shadows(device: Int, shadows: List[Shadow]) -> Int = {
 }
 
 fn upload_paints(device: Int, paints: List[Paint]) -> Int = {
-  let buf = gpu.create_buffer(device, list.len(paints) * 64, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  let buf = gpu.create_buffer(device, int.max(1, list.len(paints)) * 64, int.bor(gpu.STORAGE, gpu.COPY_DST))
   gpu.begin_data()
   for p in paints {
     gpu.push_u32(p.kind) gpu.push_u32(0) gpu.push_u32(0) gpu.push_u32(0)
@@ -284,20 +312,20 @@ fn prepare_scene(
   // Group segments by path_id
   var path_starts: List[Int] = list.repeat(0, num_paths)
   var path_seg_counts: List[Int] = list.repeat(0, num_paths)
-  for si in 0..seg_count {
+  for si in 0..<seg_count {
     path_seg_counts[segments[si].path_id] = path_seg_counts[segments[si].path_id] + 1
   }
   var ps_acc = 0
-  for pid in 0..num_paths {
+  for pid in 0..<num_paths {
     path_starts[pid] = ps_acc
     ps_acc = ps_acc + path_seg_counts[pid]
   }
 
-  for pid in 0..num_paths {
+  for pid in 0..<num_paths {
     var seg_offsets: List[Int] = list.repeat(0, num_tiles)
-    for tid in 0..num_tiles { seg_offsets[tid] = tile_seg_counts[tid] }
+    for tid in 0..<num_tiles { seg_offsets[tid] = tile_seg_counts[tid] }
 
-    for si_off in 0..path_seg_counts[pid] {
+    for si_off in 0..<path_seg_counts[pid] {
       let si = path_starts[pid] + si_off
       let seg = segments[si]
       if float.abs(seg.p0.y - seg.p1.y) < 0.0001 then () else {
@@ -308,8 +336,8 @@ fn prepare_scene(
         // 1-tile margin for scroll: segments available in adjacent tiles
         let t_min_y = int.max(0, float.to_int(float.floor((1.0 - max_y) * 0.5 * h_f / tile_f)) - 1)
         let t_max_y = int.min(content_tiles_y - 1, float.to_int(float.floor((1.0 - min_y) * 0.5 * h_f / tile_f)) + 1)
-        for ty in t_min_y..=t_max_y {
-          for tx in 0..=t_max_x {
+        for ty in t_min_y...t_max_y {
+          for tx in 0...t_max_x {
             let tid = ty * content_tiles_x + tx
             let slot = tile_seg_counts[tid]
             if slot < MAX_SEGS then {
@@ -322,7 +350,7 @@ fn prepare_scene(
     }
 
     // Build commands (no backdrop — all-columns-left doesn't need it)
-    for tid in 0..num_tiles {
+    for tid in 0..<num_tiles {
       let sc = tile_seg_counts[tid] - seg_offsets[tid]
       if sc > 0 then {
         let ci = tile_cmd_counts[tid]
@@ -346,7 +374,7 @@ fn prepare_scene(
     gpu.push_f32(seg.color[0]) gpu.push_f32(seg.color[1]) gpu.push_f32(seg.color[2]) gpu.push_f32(seg.color[3])
     gpu.push_u32(seg.path_id) gpu.push_u32(0) gpu.push_u32(0) gpu.push_u32(0)
   }
-  if seg_count == 0 then { for _ in 0..12 { gpu.push_u32(0) } } else ()
+  if seg_count == 0 then { for _ in 0..<12 { gpu.push_u32(0) } } else ()
   gpu.flush_to_buffer(device, seg_buf)
 
   let tc_buf = gpu.create_buffer(device, num_tiles * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
@@ -501,7 +529,7 @@ fn upload_regions(scene: SceneHandle, count: Int,
                   parent: List[Int],
                   bar_opacity_y: List[Float], bar_opacity_x: List[Float]) -> Unit = {
   gpu.begin_data()
-  for i in 0..8 {
+  for i in 0..<8 {
     if i < count then {
       gpu.push_f32(bounds_x[i]) gpu.push_f32(bounds_y[i]) gpu.push_f32(bounds_w[i]) gpu.push_f32(bounds_h[i])
       gpu.push_f32(scroll_x[i]) gpu.push_f32(scroll_y[i])
@@ -509,7 +537,7 @@ fn upload_regions(scene: SceneHandle, count: Int,
       gpu.push_f32(int.to_float(parent[i])) gpu.push_f32(int.to_float(count))
       gpu.push_f32(bar_opacity_y[i]) gpu.push_f32(bar_opacity_x[i])
     } else {
-      for _ in 0..12 { gpu.push_f32(0.0) }
+      for _ in 0..<12 { gpu.push_f32(0.0) }
     }
   }
   gpu.flush_to_buffer(scene.device, scene.regions_buf)
@@ -523,14 +551,14 @@ fn upload_items(scene: SceneHandle, count: Int,
                 roundeds: List[Float], opacities: List[Float],
                 scrollables: List[Float]) -> Unit = {
   gpu.begin_data()
-  for i in 0..int.min(count, 256) {
+  for i in 0..<int.min(count, 256) {
     gpu.push_f32(xs[i]) gpu.push_f32(ys[i]) gpu.push_f32(ws[i]) gpu.push_f32(hs[i])
     gpu.push_f32(bg_rs[i]) gpu.push_f32(bg_gs[i]) gpu.push_f32(bg_bs[i]) gpu.push_f32(bg_as[i])
     gpu.push_f32(roundeds[i]) gpu.push_f32(opacities[i]) gpu.push_f32(scrollables[i]) gpu.push_f32(int.to_float(count))
   }
   // Pad remaining slots with zeros
-  for _ in count..256 {
-    for _ in 0..12 { gpu.push_f32(0.0) }
+  for _ in count..<256 {
+    for _ in 0..<12 { gpu.push_f32(0.0) }
   }
   gpu.flush_to_buffer(scene.device, scene.items_buf)
 }

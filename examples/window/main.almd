@@ -1,0 +1,56 @@
+// A snaidhm scene in a native window.
+//
+// Run from the package root:
+//   almide run examples/window/main.almd              interactive
+//   almide run examples/window/main.almd -- out.png   draw one frame, save it, exit
+
+import env
+import self as snaidhm
+import self.web.gpu as gpu
+import self.native.window as window
+import self.native.frame as frame
+
+fn build(device: Int, width: Int, height: Int) -> snaidhm.SceneHandle = {
+  let dc = [0.5, 0.5, 0.5, 1.0]
+  let cubics =
+    snaidhm.round_rect_cubics(-0.9, -0.9, 1.8, 1.8, 0.08, dc, 0)
+    + snaidhm.circle_cubics(-0.5, 0.0, 0.18, dc, 1)
+    + snaidhm.circle_cubics(0.0, 0.0, 0.18, dc, 2)
+    + snaidhm.circle_cubics(0.5, 0.0, 0.18, dc, 3)
+  let paints = [
+    snaidhm.solid(1.0, 1.0, 1.0, 1.0),
+    snaidhm.radial_grad([1.0, 0.55, 0.5, 0.9], [0.82, 0.18, 0.12, 0.9], -0.5, 0.0, 0.18),
+    snaidhm.radial_grad([0.45, 0.92, 0.55, 0.9], [0.12, 0.62, 0.22, 0.9], 0.0, 0.0, 0.18),
+    snaidhm.radial_grad([0.5, 0.7, 1.0, 0.9], [0.15, 0.35, 0.82, 0.9], 0.5, 0.0, 0.18),
+  ]
+  let shadows = [
+    snaidhm.rect_shadow(-0.9, -0.9, 1.8, 1.8, 0.08, 0.01, -0.02, 0.08, [0.0, 0.0, 0.0, 0.2]),
+  ]
+  // The image layer is empty: in the browser the page supplies its buffers.
+  let img_vtx = gpu.create_buffer(device, 32, int.bor(gpu.VERTEX, gpu.COPY_DST))
+  let img_idx = gpu.create_buffer(device, 16, int.bor(gpu.INDEX, gpu.COPY_DST))
+  snaidhm.prepare_scene(device, width, height, width, height, cubics, shadows, paints,
+    img_vtx, img_idx, 0, 0, 0, 0, 0)
+}
+
+effect fn main() -> Unit = {
+  let capture = list.get(env.args(), 0)
+  if window.open("snaidhm", 640, 640) then {
+    let device = 1
+    var scene = build(device, window.width(), window.height())
+    match capture {
+      some(path) => {
+        snaidhm.draw_frame(scene, 0.0)
+        println(if frame.save_png(path) then "saved ${path}" else "capture failed")
+      },
+      none => {
+        while window.pump() {
+          if window.resized() then { scene = build(device, window.width(), window.height()) }
+          snaidhm.draw_frame(scene, 0.0)
+        }
+      },
+    }
+  } else {
+    println("no window")
+  }
+}

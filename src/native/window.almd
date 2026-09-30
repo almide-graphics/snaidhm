@@ -1,0 +1,50 @@
+// snaidhm native window — @extern(rust) declarations
+//
+// The on-screen counterpart of the browser canvas. In the browser the page
+// owns the canvas and the frame loop; natively the program opens a window and
+// runs the loop itself:
+//
+//   if window.open("demo", 800, 600) then {
+//     var scene = build(window.width(), window.height())
+//     while window.pump() {
+//       if window.resized() then { scene = build(window.width(), window.height()) }
+//       snaidhm.draw_frame(scene, 0.0)
+//     }
+//   }
+//
+// Native only: there is no @extern(wasm) half, so a wasm build must not
+// import this module.
+
+/// Open the window, `width` x `height` in logical pixels, and make it the
+/// screen every later gpu render pass draws into. Call it before any gpu.*
+/// call — the GPU device is chosen for its ability to present to this window.
+/// `false` when no window can be opened; the reason is on stderr.
+@extern(rust, "crate::window", "open")
+fn open(title: String, width: Int, height: Int) -> Bool = _
+
+/// End the frame (show what its render passes drew) and process pending events
+/// without waiting. `false` once the window has been asked to close.
+@extern(rust, "crate::window", "pump")
+fn pump() -> Bool = _
+
+/// `pump`, but sleep until at least one event arrives. For a UI that only
+/// changes in response to input: an idle window costs no CPU.
+@extern(rust, "crate::window", "wait")
+fn wait() -> Bool = _
+
+/// `true` exactly once after each change of the window's size — the moment to
+/// rebuild anything sized to it.
+@extern(rust, "crate::window", "resized")
+fn resized() -> Bool = _
+
+/// Width of the drawable area in physical pixels, the size render targets are.
+@extern(rust, "crate::window", "width")
+fn width() -> Int = _
+
+/// Height of the drawable area in physical pixels.
+@extern(rust, "crate::window", "height")
+fn height() -> Int = _
+
+/// Physical pixels per logical pixel (2.0 on a typical Retina display).
+@extern(rust, "crate::window", "scale_factor")
+fn scale_factor() -> Float = _
