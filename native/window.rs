@@ -27,6 +27,16 @@
 //! with `next_event` and its accessors. The kinds and key codes follow the
 //! DOM, so a browser host and this one hand a UI the same events.
 //!
+//! ## IME
+//!
+//! With `set_ime(true)` the platform's input method composes text: what it
+//! is composing arrives as `COMPOSE` events (the whole composition each time,
+//! empty when it ends) and what it commits as `TEXT` events, one per
+//! character — the same events typing produces, so a field needs nothing
+//! else to take committed text. `set_ime_area` tells the platform where the
+//! caret is, for its candidate window. In the browser a DOM input element
+//! does all of this itself.
+//!
 //! ## State
 //!
 //! A winit event loop is `!Send`, so the window lives in a thread-local, not in
@@ -38,8 +48,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, NamedKey};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
@@ -57,6 +67,7 @@ const MOUSE_UP: i64 = 3;
 const WHEEL: i64 = 4;
 const TEXT: i64 = 5;
 const KEY: i64 = 6;
+const COMPOSE: i64 = 7;
 
 /// Pixels one wheel notch scrolls, for devices that report lines.
 const LINE_PX: f64 = 40.0;
@@ -65,8 +76,11 @@ const LINE_PX: f64 = 40.0;
 const QUEUE_LIMIT: usize = 1024;
 
 /// One queued input. `code` is the button (0 left, 1 right, 2 middle), the
-/// typed code point, or the DOM key code, by kind.
-#[derive(Clone, Copy, Default)]
+/// typed code point, or the DOM key code, by kind. A composition carries its
+/// text, and in `code` .. `end` the part the input method marks (the clause
+/// being converted, or an empty range at its caret), in characters; -1 when
+/// it shows no caret.
+#[derive(Clone, Default)]
 struct Input {
     kind: i64,
     x: f64,
@@ -74,6 +88,8 @@ struct Input {
     dx: f64,
     dy: f64,
     code: i64,
+    end: i64,
+    text: String,
 }
 
 /// The DOM `keyCode` of the keys a UI handles as keys rather than text.
@@ -125,6 +141,21 @@ impl App {
             self.events.pop_front();
         }
         self.events.push_back(input);
+    }
+
+    fn typed(&mut self, text: &str) {
+        for ch in text.chars().filter(|c| !c.is_control()) {
+            let input = self.at_cursor(TEXT, i64::from(u32::from(ch)));
+            self.push(input);
+        }
+    }
+
+    fn compose(&mut self, text: String, marked: Option<(usize, usize)>) {
+        // winit gives byte offsets; a UI counts characters.
+        let chars = |byte: usize| text.get(..byte).map_or(0, |s| s.chars().count()) as i64;
+        let (code, end) = marked.map_or((-1, -1), |(a, b)| (chars(a), chars(b)));
+        let input = Input { end, text, ..self.at_cursor(COMPOSE, code) };
+        self.push(input);
     }
 
     fn at_cursor(&self, kind: i64, code: i64) -> Input {
@@ -204,12 +235,15 @@ impl ApplicationHandler for App {
                 // `text`; the key's own text covers it.
                 let text = event.text.as_deref().or_else(|| event.logical_key.to_text());
                 if let Some(text) = text {
-                    for ch in text.chars().filter(|c| !c.is_control()) {
-                        let input = self.at_cursor(TEXT, i64::from(u32::from(ch)));
-                        self.push(input);
-                    }
+                    let text = text.to_string();
+                    self.typed(&text);
                 }
             }
+            // Keys the input method takes arrive as these, not as keys.
+            WindowEvent::Ime(Ime::Preedit(text, marked)) => self.compose(text, marked),
+            WindowEvent::Ime(Ime::Commit(text)) => self.typed(&text),
+            WindowEvent::Ime(Ime::Disabled) => self.compose(String::new(), None),
+            WindowEvent::Ime(Ime::Enabled) => {}
             _ => {}
         }
     }
@@ -316,8 +350,9 @@ pub fn height() -> i64 {
 pub fn next_event() -> i64 {
     with_host(0, |host| {
         let input = host.app.events.pop_front().unwrap_or_default();
+        let kind = input.kind;
         host.app.current = input;
-        input.kind
+        kind
     })
 }
 
@@ -347,4 +382,34 @@ pub fn event_code() -> i64 {
 /// Physical pixels per logical pixel (2.0 on a typical Retina display).
 pub fn scale_factor() -> f64 {
     with_host(1.0, |host| host.app.window.as_ref().map_or(1.0, |w| w.scale_factor()))
+}
+
+/// End of the marked part of the current composition, characters.
+pub fn event_end() -> i64 {
+    with_host(0, |host| host.app.current.end)
+}
+
+/// Text of the current composition.
+pub fn event_text() -> String {
+    with_host(String::new(), |host| host.app.current.text.clone())
+}
+
+/// Let the platform's input method compose text in this window (`true`), or
+/// take keys as they are (`false`, the default).
+pub fn set_ime(allowed: bool) {
+    with_host((), |host| {
+        if let Some(w) = &host.app.window {
+            w.set_ime_allowed(allowed);
+        }
+    })
+}
+
+/// Where the caret is — `x`, `y`, `w`, `h` in logical pixels — so the input
+/// method can put its candidate window beside it rather than over it.
+pub fn set_ime_area(x: f64, y: f64, w: f64, h: f64) {
+    with_host((), |host| {
+        if let Some(win) = &host.app.window {
+            win.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(w.max(1.0), h.max(1.0)));
+        }
+    })
 }
