@@ -41,6 +41,14 @@ type TextLayer = {
   // buffer, the other one 0.
   texture: Int,
   buffer: Int,
+  // Buffer layers: colour images — emoji — in a second atlas, RGBA, found by
+  // the caller's key; `color_rects[4s ..< 4s+4]` = x, y, w, h of slot `s`.
+  color_buffer: Int,
+  color_keys: Map[Int, Int],
+  color_rects: List[Int],
+  color_x: Int,
+  color_y: Int,
+  color_row_h: Int,
   pipeline: Int,
   bind_group: Int,
   // Glyph cache: `key(font, glyph, pixel size)` -> slot; slot `s` is
@@ -75,6 +83,7 @@ fn new_layer(device: Int, fonts: List[sfnt.Font]) -> TextLayer = {
   let verts: List[Float] = []
   {
     fonts: fonts, texture: texture, buffer: 0, pipeline: pipeline, bind_group: bind_group,
+    color_buffer: 0, color_keys: map.new(), color_rects: [], color_x: 0, color_y: 0, color_row_h: 0,
     keys: keys, rects: rects, pack_x: PAD, pack_y: PAD, row_h: 0,
     verts: verts, vtx: 0, capacity: 0, count: 0,
   }
@@ -88,18 +97,60 @@ fn new_layer(device: Int, fonts: List[sfnt.Font]) -> TextLayer = {
 /// natively; a browser host registers it after `image.wgsl`.
 fn new_buffer_layer(device: Int, fonts: List[sfnt.Font]) -> TextLayer = {
   let buffer = gpu.create_buffer(device, ATLAS * ATLAS, int.bor(gpu.STORAGE, gpu.COPY_DST))
+  let color_buffer = gpu.create_buffer(device, COLOR_ATLAS * COLOR_ATLAS * 4, int.bor(gpu.STORAGE, gpu.COPY_DST))
   let shader = gpu.create_shader(device, 4, 0)
   let pipeline = gpu.create_text_pipeline(device, shader, gpu.get_preferred_format())
   gpu.begin_bindings()
   gpu.add_buffer_binding(buffer)
+  gpu.add_buffer_binding(color_buffer)
   let bind_group = gpu.create_bound_group(device, pipeline, 0)
   let keys: Map[Int, Int] = map.new()
   let rects: List[Int] = []
   let verts: List[Float] = []
   {
     fonts: fonts, texture: 0, buffer: buffer, pipeline: pipeline, bind_group: bind_group,
+    color_buffer: color_buffer, color_keys: map.new(), color_rects: [], color_x: 0, color_y: 0, color_row_h: 0,
     keys: keys, rects: rects, pack_x: WORD, pack_y: PAD, row_h: 0,
     verts: verts, vtx: 0, capacity: 0, count: 0,
+  }
+}
+
+/// Edge of a buffer layer's colour atlas, pixels.
+let COLOR_ATLAS = 512
+
+/// The colour atlas slot of key `k`, -1 when it has none.
+fn color_slot(layer: TextLayer, k: Int) -> Int = map.get(layer.color_keys, k) ?? -1
+
+/// Put a `w` x `h` colour image — RGBA, straight alpha, from byte `off` of
+/// `rgba` — in the colour atlas as the slot of key `k`. A quad draws it with
+/// its u coordinates past 2 (see text_buffer.wgsl). When the atlas is out of
+/// room it starts over, and slots known before are gone.
+fn place_color(device: Int, layer: TextLayer, k: Int, rgba: Bytes, off: Int, w: Int, h: Int) -> TextLayer = {
+  guard layer.color_buffer != 0 and w > 0 and h > 0 and w <= COLOR_ATLAS and h <= COLOR_ATLAS else layer
+  let wrap = layer.color_x + w > COLOR_ATLAS
+  let x = if wrap then 0 else layer.color_x
+  let y0 = if wrap then layer.color_y + layer.color_row_h else layer.color_y
+  let full = y0 + h > COLOR_ATLAS
+  let y = if full then 0 else y0
+  let no_keys: Map[Int, Int] = map.new()
+  let no_rects: List[Int] = []
+  let base = if full then { ...layer, color_keys: no_keys, color_rects: no_rects } else layer
+  gpu.begin_data()
+  for row in 0..<h {
+    for col in 0..<w {
+      // r | g << 8 | b << 16 | a << 24: the bytes as they are.
+      gpu.push_u32(bytes.read_u32_le(rgba, off + (row * w + col) * 4))
+    }
+  }
+  gpu.flush_to_buffer_rect(device, layer.color_buffer, COLOR_ATLAS, x, y, w, h)
+  let slot = list.len(base.color_rects) / 4
+  {
+    ...base,
+    color_keys: map.set(base.color_keys, k, slot),
+    color_rects: base.color_rects + [x, y, w, h],
+    color_x: x + w,
+    color_y: y,
+    color_row_h: if wrap or full then h else int.max(layer.color_row_h, h),
   }
 }
 
