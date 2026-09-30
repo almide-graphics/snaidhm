@@ -144,6 +144,8 @@ struct Host {
     /// with its first frame, rather than empty while the program gets its
     /// GPU work ready.
     hidden_since: Option<Instant>,
+    /// Quitting asks the program first (see `layer::ask_before_quit`).
+    quit_routed: bool,
 }
 
 #[derive(Default)]
@@ -324,6 +326,10 @@ impl Host {
     /// Process events, blocking for at most `timeout` (`None`: until one
     /// arrives). Returns whether the window is still wanted.
     fn pump(&mut self, timeout: Option<Duration>) -> bool {
+        #[cfg(target_os = "macos")]
+        if !self.quit_routed {
+            self.quit_routed = layer::ask_before_quit();
+        }
         let presented = crate::gpu::present_frame();
         if let Some(since) = self.hidden_since {
             if presented || since.elapsed() >= SHOW_DEADLINE {
@@ -335,6 +341,10 @@ impl Host {
         }
         if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(timeout, &mut self.app) {
             return false;
+        }
+        #[cfg(target_os = "macos")]
+        if layer::QUIT_ASKED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            self.app.close_requested = true;
         }
         // Once more without waiting, when the wait had one: on macOS winit
         // can hold an input that arrived while it woke for something else (a
@@ -376,7 +386,7 @@ pub fn open(title: &str, width: i64, height: i64) -> bool {
             .with_inner_size(LogicalSize::new(width.max(1) as f64, height.max(1) as f64))
             .with_visible(false);
         let _ = PROXY.set(event_loop.create_proxy());
-        let mut host = Host { event_loop, app: App { pending: Some(attrs), ..App::default() }, hidden_since: Some(Instant::now()) };
+        let mut host = Host { event_loop, app: App { pending: Some(attrs), ..App::default() }, hidden_since: Some(Instant::now()), quit_routed: false };
         let deadline = Instant::now() + OPEN_DEADLINE;
         while host.app.window.is_none() && !host.app.failed {
             if Instant::now() >= deadline {
@@ -560,6 +570,8 @@ mod layer {
         fn objc_getClass(name: *const std::ffi::c_char) -> Id;
         fn sel_registerName(name: *const std::ffi::c_char) -> Id;
         fn objc_msgSend();
+        fn object_getClass(obj: Id) -> Id;
+        fn class_replaceMethod(class: Id, name: Id, imp: *const c_void, types: *const std::ffi::c_char) -> *const c_void;
     }
     #[link(name = "QuartzCore", kind = "framework")]
     extern "C" {
@@ -620,6 +632,40 @@ mod layer {
     pub fn pin(view: Id) {
         for l in layers(view).into_iter().skip(1) {
             unsafe { send_id(l, c"setContentsGravity:", kCAGravityTopLeft) };
+        }
+    }
+
+    /// Set when the app was asked to quit, for the next pump to report as a
+    /// close request.
+    pub static QUIT_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// NSTerminateCancel.
+    const TERMINATE_CANCEL: usize = 0;
+
+    unsafe extern "C" fn should_terminate(_this: Id, _cmd: Id, _sender: Id) -> usize {
+        QUIT_ASKED.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(proxy) = super::PROXY.get() {
+            let _ = proxy.send_event(());
+        }
+        TERMINATE_CANCEL
+    }
+
+    /// Make quitting — Cmd+Q, the Dock's Quit, a quit from another app —
+    /// a close request the program hears like the close button's: one it
+    /// can ask about and take back (`keep_open`), ending the program when it
+    /// lets the window close. The app's delegate is told to answer "not
+    /// now" to every quit and pass it on. `true` once done; the delegate is
+    /// there once the app has finished launching.
+    pub fn ask_before_quit() -> bool {
+        unsafe {
+            let app = send(objc_getClass(c"NSApplication".as_ptr()), c"sharedApplication");
+            let delegate = send(app, c"delegate");
+            if delegate.is_null() {
+                return false;
+            }
+            let imp: unsafe extern "C" fn(Id, Id, Id) -> usize = should_terminate;
+            class_replaceMethod(object_getClass(delegate), sel(c"applicationShouldTerminate:"), imp as *const c_void, c"Q@:@".as_ptr());
+            true
         }
     }
 
