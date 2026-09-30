@@ -753,7 +753,12 @@ pub fn set_depth_size(_device: i64, w: i64, h: i64) {
 
 /// Pipeline for the standard mesh vertex layout: pos(3) + normal(3) + uv(2),
 /// 32-byte stride, depth `less`, back faces culled, CCW front (glTF's winding).
-pub fn create_mesh_pipeline(_device: i64, shader: i64, _format: i64) -> i64 {
+pub fn create_mesh_pipeline(_device: i64, shader: i64, _format: i64, cull: i64) -> i64 {
+    let cull_mode = match cull {
+        0 => None,
+        2 => Some(wgpu::Face::Front),
+        _ => Some(wgpu::Face::Back),
+    };
     with(0, |s| {
         let Some(Res::Shader(module)) = s.get(shader) else { return 0 };
         let pipeline = s.device().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -782,7 +787,7 @@ pub fn create_mesh_pipeline(_device: i64, shader: i64, _format: i64) -> i64 {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
