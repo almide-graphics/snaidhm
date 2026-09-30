@@ -132,6 +132,14 @@ fn push_u32(value: Int) -> Unit = _
 @extern(rust, "crate::gpu", "flush_to_buffer")
 fn flush_to_buffer(device: Int, buffer: Int) -> Unit = _
 
+/// Write the staged values into the `w` x `h` rectangle of `texture` at
+/// (`x`, `y`), one `push_u32` per pixel, row by row: RGBA8 packed as
+/// `r | g << 8 | b << 16 | a << 24`. The pointer-free way to fill a texture —
+/// a native build has no linear memory for `upload_encoded_image` to read.
+@extern(wasm, "gpu", "flush_to_texture")
+@extern(rust, "crate::gpu", "flush_to_texture")
+fn flush_to_texture(device: Int, texture: Int, x: Int, y: Int, w: Int, h: Int) -> Unit = _
+
 // ── Bind group: texture + sampler entries ──
 
 @extern(wasm, "gpu", "add_texture_binding")

@@ -1,0 +1,168 @@
+// snaidhm glyph rasterizer — exact-coverage bitmaps of glyph outlines
+//
+// UI text is drawn from a glyph cache: each glyph is rasterized once, at the
+// pixel size it is shown at, and blitted as a textured quad after that. The
+// bitmap holds the exact area coverage of every pixel by the outline — the
+// same quantity the path renderer's fine pass computes — so cached text looks
+// like the path renderer's, and stays sharp at the 12–14px of a desktop bar.
+//
+// The rasterizer accumulates signed area (the method of font-rs and
+// stb_truetype v2): every line adds, to each pixel it passes through, the part
+// of the pixel's area it bounds to its right, and to the pixel after it the
+// rest of its height; one running sum along each row then yields the winding
+// coverage. Work is proportional to the outline's length plus the bitmap's
+// area.
+//
+// Written as index loops without capturing closures, for the wasm renderer
+// (see coarse.almd).
+
+import self.coarse as coarse
+import self.ttf as ttf
+
+/// A glyph's coverage bitmap and where it sits relative to the pen: its top
+/// left pixel is `left` px right of the pen and `top` px above the baseline.
+type Bitmap = { w: Int, h: Int, left: Int, top: Int, coverage: List[Int] }
+
+/// Flattening tolerance in pixels.
+let TOL = 0.1
+
+/// Coverage (0–255) of a `w` x `h` bitmap by the closed outline `lines`, given
+/// in bitmap pixels with y down. Nonzero winding.
+fn rasterize(lines: List[coarse.Line], w: Int, h: Int) -> List[Int] = {
+  var acc: List[Float] = list.repeat(0.0, w * h + 2)
+  let n = list.len(lines)
+  let hf = int.to_float(h)
+  for li in 0..<n {
+    let l = lines[li]
+    if l.y0 != l.y1 then {
+      // Walk top to bottom; `dir` keeps the winding sign of the original.
+      let dir = if l.y0 < l.y1 then 1.0 else 0.0 - 1.0
+      let ax = if l.y0 < l.y1 then l.x0 else l.x1
+      let ay = if l.y0 < l.y1 then l.y0 else l.y1
+      let bx = if l.y0 < l.y1 then l.x1 else l.x0
+      let by = if l.y0 < l.y1 then l.y1 else l.y0
+      let dxdy = (bx - ax) / (by - ay)
+      let y_start = int.max(0, float.to_int(float.floor(ay)))
+      let y_end = int.min(h, float.to_int(float.ceil(by)))
+      var x = ax + dxdy * (float.max(0.0, ay) - ay)
+      for y in y_start..<y_end {
+        let yf = int.to_float(y)
+        let row = y * w
+        let dy = float.min(yf + 1.0, float.min(by, hf)) - float.max(yf, ay)
+        let x_next = x + dxdy * dy
+        let d = dy * dir
+        // Clamped to the bitmap: the outline lies inside it, so this only
+        // absorbs rounding, and keeps every index below within the buffer.
+        let wf = int.to_float(w)
+        let x0 = float.clamp(float.min(x, x_next), 0.0, wf)
+        let x1 = float.clamp(float.max(x, x_next), 0.0, wf)
+        let x0_floor = float.floor(x0)
+        let x0i = float.to_int(x0_floor)
+        let x1_ceil = float.ceil(x1)
+        let x1i = float.to_int(x1_ceil)
+        if x1i <= x0i + 1 then {
+          // Within one pixel column: the pixel gets the area right of the
+          // line's mean x, the next pixel the rest.
+          let xmf = 0.5 * (x + x_next) - x0_floor
+          acc[row + x0i] = acc[row + x0i] + d - d * xmf
+          acc[row + x0i + 1] = acc[row + x0i + 1] + d * xmf
+        } else {
+          let s = 1.0 / (x1 - x0)
+          let x0f = x0 - x0_floor
+          let a0 = 0.5 * s * (1.0 - x0f) * (1.0 - x0f)
+          let x1f = x1 - x1_ceil + 1.0
+          let am = 0.5 * s * x1f * x1f
+          acc[row + x0i] = acc[row + x0i] + d * a0
+          if x1i == x0i + 2 then {
+            acc[row + x0i + 1] = acc[row + x0i + 1] + d * (1.0 - a0 - am)
+          } else {
+            let a1 = s * (1.5 - x0f)
+            acc[row + x0i + 1] = acc[row + x0i + 1] + d * (a1 - a0)
+            for xi in (x0i + 2)..<(x1i - 1) { acc[row + xi] = acc[row + xi] + d * s }
+            let a2 = a1 + int.to_float(x1i - x0i - 3) * s
+            acc[row + x1i - 1] = acc[row + x1i - 1] + d * (1.0 - a2 - am)
+          }
+          acc[row + x1i] = acc[row + x1i] + d * am
+        }
+        x = x_next
+      }
+    } else ()
+  }
+  // One running sum over the whole buffer: a closed outline returns every
+  // row's sum to zero, so the rows need no separate reset.
+  var out: List[Int] = list.repeat(0, w * h)
+  var sum = 0.0
+  for i in 0..<(w * h) {
+    sum = sum + acc[i]
+    let c = float.min(1.0, float.abs(sum))
+    out[i] = float.to_int(float.round(c * 255.0))
+  }
+  out
+}
+
+/// Line segments approximating a cubic, in the cubic's own coordinates.
+fn flatten(c: ttf.CubicBez) -> List[coarse.Line] = {
+  let d1x = c.cx - 2.0 * c.bx + c.ax
+  let d1y = c.cy - 2.0 * c.by + c.ay
+  let d2x = c.dx - 2.0 * c.cx + c.bx
+  let d2y = c.dy - 2.0 * c.cy + c.by
+  let dd = float.max(math.sqrt(d1x * d1x + d1y * d1y), math.sqrt(d2x * d2x + d2y * d2y))
+  let n = int.clamp(float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * TOL)))), 1, 64)
+  let nf = int.to_float(n)
+  var out: List[coarse.Line] = []
+  var px = c.ax
+  var py = c.ay
+  for i in 1...n {
+    let t = int.to_float(i) / nf
+    let u = 1.0 - t
+    let qx = u * u * u * c.ax + 3.0 * u * u * t * c.bx + 3.0 * u * t * t * c.cx + t * t * t * c.dx
+    let qy = u * u * u * c.ay + 3.0 * u * u * t * c.by + 3.0 * u * t * t * c.cy + t * t * t * c.dy
+    list.push(out, { x0: px, y0: py, x1: qx, y1: qy })
+    px = qx
+    py = qy
+  }
+  out
+}
+
+/// Glyph `glyph_id` of `font` rasterized at `size_px` pixels per em. A glyph
+/// with no outline (a space) is a 0 x 0 bitmap.
+fn glyph_bitmap(font: ttf.Font, glyph_id: Int, size_px: Float) -> Bitmap = {
+  let scale = size_px / int.to_float(font.units_per_em)
+  // Font units, y up, scaled to pixels with the pen at the origin.
+  let cubics = ttf.glyph_cubics(font, glyph_id, scale, 0.0, 0.0)
+  var lines: List[coarse.Line] = []
+  let nc = list.len(cubics)
+  for i in 0..<nc {
+    let flat = flatten(cubics[i])
+    let nf = list.len(flat)
+    for k in 0..<nf { list.push(lines, flat[k]) }
+  }
+  let n = list.len(lines)
+  if n == 0 then { w: 0, h: 0, left: 0, top: 0, coverage: [] }
+  else {
+    var x_lo = lines[0].x0
+    var x_hi = lines[0].x0
+    var y_lo = lines[0].y0
+    var y_hi = lines[0].y0
+    for i in 0..<n {
+      let l = lines[i]
+      x_lo = float.min(x_lo, float.min(l.x0, l.x1))
+      x_hi = float.max(x_hi, float.max(l.x0, l.x1))
+      y_lo = float.min(y_lo, float.min(l.y0, l.y1))
+      y_hi = float.max(y_hi, float.max(l.y0, l.y1))
+    }
+    let left = float.to_int(float.floor(x_lo))
+    let top = float.to_int(float.ceil(y_hi))
+    let w = float.to_int(float.ceil(x_hi)) - left
+    let h = top - float.to_int(float.floor(y_lo))
+    // To bitmap pixels: x from the bitmap's left edge, y down from its top.
+    let fl = int.to_float(left)
+    let ft = int.to_float(top)
+    var in_bitmap: List[coarse.Line] = []
+    for i in 0..<n {
+      let l = lines[i]
+      list.push(in_bitmap, { x0: l.x0 - fl, y0: ft - l.y0, x1: l.x1 - fl, y1: ft - l.y1 })
+    }
+    { w: w, h: h, left: left, top: top, coverage: rasterize(in_bitmap, w, h) }
+  }
+}

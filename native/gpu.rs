@@ -650,6 +650,32 @@ pub fn push_u32(value: i64) {
     with((), |s| s.data.push(value as u32))
 }
 
+/// Write the staged pixels into a rectangle of `texture` (see the contract in
+/// `src/web/gpu.almd`). Skipped, and the staging cleared, when fewer pixels
+/// were staged than the rectangle holds — the same as the JS host.
+pub fn flush_to_texture(_device: i64, texture: i64, x: i64, y: i64, w: i64, h: i64) {
+    with((), |s| {
+        let (w, h) = (w.max(0) as u32, h.max(0) as u32);
+        let count = (w * h) as usize;
+        if let Some(Res::Texture(tex)) = s.get(texture) {
+            if count > 0 && s.data.len() >= count {
+                s.queue().write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: x.max(0) as u32, y: y.max(0) as u32, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&s.data[..count]),
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                );
+            }
+        }
+        s.data.clear();
+    })
+}
+
 pub fn flush_to_buffer(_device: i64, buffer: i64) {
     with((), |s| {
         if let Some(buf) = s.buffer(buffer) {

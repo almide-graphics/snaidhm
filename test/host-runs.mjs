@@ -103,6 +103,7 @@ const ARGS = {
   push_f32: [1.0],
   push_u32: [1n],
   flush_to_buffer: [dev, buffer],
+  flush_to_texture: [dev, texture, 0n, 0n, 1n, 1n],
   add_buffer_binding: [buffer],
   add_texture_binding: [texture],
   add_sampler_binding: [sampler],
