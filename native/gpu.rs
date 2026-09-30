@@ -1710,6 +1710,25 @@ pub(crate) fn attach_surface(target: wgpu::SurfaceTarget<'static>, width: u32, h
     true
 }
 
+/// Show frames as soon as they are drawn (`on`), or in step with the display
+/// (the default). For a program answering keys — a terminal, an editor — the
+/// display's pace adds up to a frame or two between a key and what it shows.
+/// On (where the surface allows it): frames are not queued behind the
+/// display's refresh, and at most one waits to be shown. On macOS the window
+/// server composites every window, so nothing tears.
+pub fn set_low_latency(on: bool) {
+    with((), |s| {
+        let GpuState { adapter, device, screen, .. } = &mut *s;
+        let (Some(adapter), Some(device), Some(screen)) = (adapter.as_ref(), device.as_ref(), screen.as_mut()) else { return };
+        let modes = screen.surface.get_capabilities(adapter).present_modes;
+        let immediate = on && modes.contains(&wgpu::PresentMode::Immediate);
+        screen.config.present_mode = if immediate { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::AutoVsync };
+        screen.config.desired_maximum_frame_latency = if on { 1 } else { 2 };
+        screen.frame = None;
+        screen.surface.configure(device, &screen.config);
+    })
+}
+
 /// Follow the window to a new size in physical pixels. A zero size (a
 /// minimised window) keeps the old configuration; frames are skipped until the
 /// window comes back.
