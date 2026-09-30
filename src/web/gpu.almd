@@ -229,3 +229,35 @@ fn set_index_buffer_u16(pass: Int, buffer: Int) -> Unit = _
 @extern(wasm, "gpu", "write_buffer_at")
 @extern(rust, "crate::gpu", "write_buffer_at")
 fn write_buffer_at(device: Int, buffer: Int, dst_offset: Int, src_ptr: Int, len: Int) -> Unit = _
+
+// ── Textures, samplers, ranged draws ─────────────────────────────────────
+//
+// Creating a texture and filling it are SEPARATE because a decode is async in
+// the browser while a wasm call is not. The texture is created at its final
+// size up front — the caller reads that from the image header, which is file
+// parsing, not a GPU concern — so bind groups made against it stay valid when
+// the pixels arrive later. Swapping the texture object after a decode would
+// silently orphan every bind group already built from it.
+
+/// An empty RGBA8 texture, ready to be bound and filled.
+@extern(wasm, "gpu", "create_texture")
+@extern(rust, "crate::gpu", "create_texture")
+fn create_texture(device: Int, w: Int, h: Int) -> Int = _
+
+/// Decode an encoded image (PNG/JPEG) from linear memory into `texture`. The
+/// decode completes asynchronously; the texture reads as transparent until it
+/// does, never as garbage.
+@extern(wasm, "gpu", "upload_encoded_image")
+@extern(rust, "crate::gpu", "upload_encoded_image")
+fn upload_encoded_image(device: Int, texture: Int, ptr: Int, len: Int) -> Unit = _
+
+/// `filter`: 0 nearest, 1 linear. `wrap`: 0 clamp-to-edge, 1 repeat.
+@extern(wasm, "gpu", "create_sampler")
+@extern(rust, "crate::gpu", "create_sampler")
+fn create_sampler(device: Int, filter: Int, wrap: Int) -> Int = _
+
+/// Draw a RANGE of the bound index buffer. One draw per material needs this —
+/// `draw_indexed` can only start at zero.
+@extern(wasm, "gpu", "draw_indexed_from")
+@extern(rust, "crate::gpu", "draw_indexed_from")
+fn draw_indexed_from(pass: Int, first_index: Int, index_count: Int) -> Unit = _

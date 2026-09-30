@@ -847,6 +847,63 @@ pub fn begin_render_pass_3d(encoder: i64, r: f64, g: f64, b: f64, a: f64, load: 
     })
 }
 
+/// An empty RGBA8 texture at its final size.
+pub fn create_texture(_device: i64, w: i64, h: i64) -> i64 {
+    with(0, |s| {
+        let tex = s.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("snaidhm texture"),
+            size: wgpu::Extent3d {
+                width: w.max(1) as u32,
+                height: h.max(1) as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        s.alloc(Res::Texture(tex))
+    })
+}
+
+/// No-op natively, like `write_buffer`: `ptr` addresses wasm linear memory,
+/// which does not exist here, and decoding PNG/JPEG would mean pulling in an
+/// image codec this crate deliberately does not carry. The texture stays at its
+/// cleared contents rather than showing garbage. A native caller that needs
+/// real pixels uploads them through its own path.
+pub fn upload_encoded_image(_device: i64, _texture: i64, _ptr: i64, _len: i64) {}
+
+pub fn create_sampler(_device: i64, filter: i64, wrap: i64) -> i64 {
+    with(0, |s| {
+        let f = if filter == 0 { wgpu::FilterMode::Nearest } else { wgpu::FilterMode::Linear };
+        let w = if wrap == 1 { wgpu::AddressMode::Repeat } else { wgpu::AddressMode::ClampToEdge };
+        let sampler = s.device().create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("snaidhm sampler"),
+            mag_filter: f,
+            min_filter: f,
+            address_mode_u: w,
+            address_mode_v: w,
+            ..Default::default()
+        });
+        s.alloc(Res::Sampler(sampler))
+    })
+}
+
+/// Draw a range of the bound index buffer — one draw per material needs this.
+pub fn draw_indexed_from(pass: i64, first_index: i64, index_count: i64) {
+    with((), |s| {
+        s.on_pass(pass, |_, p| {
+            let Pass::Render(rp) = p else { return };
+            let first = first_index.max(0) as u32;
+            rp.draw_indexed(first..first + index_count.max(0) as u32, 0, 0..1);
+        })
+    })
+}
+
 /// Bind a u16 index buffer.
 pub fn set_index_buffer_u16(pass: i64, buffer: i64) {
     with((), |s| {

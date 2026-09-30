@@ -160,8 +160,13 @@ export function createGpuHost(canvas) {
     // against the same `gpu` namespace snaidhm owns. Pure boundary translation:
     // no application logic lives here.
 
-    set_depth_size(deviceId, w, h) {
-      const width = Math.max(1, N(w)), height = Math.max(1, N(h));
+    // NOTE: parameters must not be named `h`, `g`, `B` or `N` — those are the
+    // handle-table helpers this module closes over, and a parameter of the same
+    // name shadows them. `create_texture(deviceId, w, h)` did exactly that and
+    // failed at runtime with "h is not a function", which the wasm side cannot
+    // see and no signature check would catch.
+    set_depth_size(deviceId, width_, height_) {
+      const width = Math.max(1, N(width_)), height = Math.max(1, N(height_));
       if (_depth && _depth.width === width && _depth.height === height) return;
       if (_depth) _depth.tex.destroy();
       const tex = g(deviceId).createTexture({
@@ -207,6 +212,48 @@ export function createGpuHost(canvas) {
           depthLoadOp: "clear", depthStoreOp: "store",
         },
       })));
+    },
+
+    // ── Textures ──
+
+    create_texture(deviceId, width_, height_) {
+      return B(h(g(deviceId).createTexture({
+        size: [Math.max(1, N(width_)), Math.max(1, N(height_))],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+               GPUTextureUsage.RENDER_ATTACHMENT,
+      })));
+    },
+
+    // Async by nature: `createImageBitmap` is a promise and a wasm call is not.
+    // The texture already exists at its final size, so every bind group built
+    // from it stays valid — only its contents arrive late.
+    upload_encoded_image(deviceId, textureId, ptr, len) {
+      const device = g(deviceId), texture = g(textureId);
+      if (!device || !texture) return;
+      const encoded = new Uint8Array(_wasmMemory.buffer, N(ptr), N(len)).slice();
+      createImageBitmap(new Blob([encoded]), { premultiplyAlpha: "none", colorSpaceConversion: "none" })
+        .then((bmp) => {
+          device.queue.copyExternalImageToTexture(
+            { source: bmp },
+            { texture },
+            [Math.min(bmp.width, texture.width), Math.min(bmp.height, texture.height)],
+          );
+          bmp.close?.();
+        })
+        .catch((e) => console.warn("[gpu] image decode failed:", e.message));
+    },
+
+    create_sampler(deviceId, filter, wrap) {
+      const f = N(filter) === 0 ? "nearest" : "linear";
+      const w = N(wrap) === 1 ? "repeat" : "clamp-to-edge";
+      return B(h(g(deviceId).createSampler({
+        magFilter: f, minFilter: f, addressModeU: w, addressModeV: w,
+      })));
+    },
+
+    draw_indexed_from(passId, first, count) {
+      g(passId).drawIndexed(N(count), 1, N(first), 0, 0);
     },
 
     // u16 indices — half the bandwidth of the u32 path, and glTF's common case.
