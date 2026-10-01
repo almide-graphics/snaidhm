@@ -136,11 +136,13 @@ enum Binding {
 
 /// The on-screen destination `window.rs` attached, if any.
 struct Screen {
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
     /// The swapchain image of the frame being recorded, with its view. Taken
     /// by the first render pass of a frame, released by `present_frame`.
+    /// First, so a screen dropped mid-frame (its window closing) lets go of
+    /// the image before the surface it came from.
     frame: Option<(wgpu::SurfaceTexture, wgpu::TextureView)>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
 }
 
 #[derive(Default)]
