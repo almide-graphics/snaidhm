@@ -162,7 +162,13 @@ struct GpuState {
     /// pipelines, ...) are never released and so never recycled.
     free_slots: Vec<usize>,
 
+    /// The screen of the window render passes draw into now (`select_surface`),
+    /// and its window's id; the other windows' screens wait in `parked`.
     screen: Option<Screen>,
+    screen_id: i64,
+    parked: Vec<(i64, Screen)>,
+    /// `set_low_latency`'s choice, for screens attached after it.
+    low_latency: bool,
 
     /// Offscreen colour target, used when there is no screen.
     target: Option<wgpu::Texture>,
@@ -1654,7 +1660,7 @@ fn crc32(bytes: &[u8]) -> u32 {
 /// to present to this surface. A device that already exists is kept, and if it
 /// cannot present here the screen is refused — rendering stays offscreen, and
 /// the window says why instead of showing a blank frame.
-pub(crate) fn attach_surface(target: wgpu::SurfaceTarget<'static>, width: u32, height: u32) -> bool {
+pub(crate) fn attach_surface(id: i64, target: wgpu::SurfaceTarget<'static>, width: u32, height: u32) -> bool {
     let mut s = lock();
     let surface = match s.instance().create_surface(target) {
         Ok(surface) => surface,
@@ -1705,8 +1711,17 @@ pub(crate) fn attach_surface(target: wgpu::SurfaceTarget<'static>, width: u32, h
         alpha_mode,
         view_formats: vec![],
     };
-    surface.configure(s.device(), &config);
-    s.screen = Some(Screen { surface, config, frame: None });
+    let mut screen = Screen { surface, config, frame: None };
+    let low = s.low_latency;
+    configure_latency(s.adapter.as_ref().expect("set with the device"), s.device(), &mut screen, low);
+    // The first window's screen is the one drawn into; later ones wait to
+    // be selected.
+    if s.screen.is_none() {
+        s.screen = Some(screen);
+        s.screen_id = id;
+    } else {
+        s.parked.push((id, screen));
+    }
     true
 }
 
@@ -1718,27 +1733,70 @@ pub(crate) fn attach_surface(target: wgpu::SurfaceTarget<'static>, width: u32, h
 /// server composites every window, so nothing tears.
 pub fn set_low_latency(on: bool) {
     with((), |s| {
-        let GpuState { adapter, device, screen, .. } = &mut *s;
-        let (Some(adapter), Some(device), Some(screen)) = (adapter.as_ref(), device.as_ref(), screen.as_mut()) else { return };
-        let modes = screen.surface.get_capabilities(adapter).present_modes;
-        let immediate = on && modes.contains(&wgpu::PresentMode::Immediate);
-        screen.config.present_mode = if immediate { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::AutoVsync };
-        screen.config.desired_maximum_frame_latency = if on { 1 } else { 2 };
-        screen.frame = None;
-        screen.surface.configure(device, &screen.config);
+        s.low_latency = on;
+        let GpuState { adapter, device, screen, parked, .. } = &mut *s;
+        let (Some(adapter), Some(device)) = (adapter.as_ref(), device.as_ref()) else { return };
+        for screen in screen.iter_mut().chain(parked.iter_mut().map(|(_, sc)| sc)) {
+            configure_latency(adapter, device, screen, on);
+        }
     })
+}
+
+/// Configure `screen` for low latency (`on`, see `set_low_latency`) or the
+/// display's pace.
+fn configure_latency(adapter: &wgpu::Adapter, device: &wgpu::Device, screen: &mut Screen, on: bool) {
+    let modes = screen.surface.get_capabilities(adapter).present_modes;
+    let immediate = on && modes.contains(&wgpu::PresentMode::Immediate);
+    screen.config.present_mode = if immediate { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::AutoVsync };
+    screen.config.desired_maximum_frame_latency = if on { 1 } else { 2 };
+    screen.frame = None;
+    screen.surface.configure(device, &screen.config);
+}
+
+/// Make window `id`'s screen the one render passes draw into. A frame begun
+/// on the one before stays with it, to be shown by the next present.
+pub(crate) fn select_surface(id: i64) {
+    let mut s = lock();
+    if s.screen_id == id {
+        return;
+    }
+    let Some(i) = s.parked.iter().position(|(pid, _)| *pid == id) else { return };
+    let (_, next) = s.parked.swap_remove(i);
+    if let Some(prev) = s.screen.replace(next) {
+        let prev_id = s.screen_id;
+        s.parked.push((prev_id, prev));
+    }
+    s.screen_id = id;
+}
+
+/// Forget window `id`'s screen: its window is closing.
+pub(crate) fn detach_surface(id: i64) {
+    let mut s = lock();
+    s.parked.retain(|(pid, _)| *pid != id);
+    if s.screen_id == id {
+        s.screen = None;
+        s.screen_id = 0;
+        // Another window's screen, if there is one, is drawn into next.
+        if let Some((pid, next)) = s.parked.pop() {
+            s.screen = Some(next);
+            s.screen_id = pid;
+        }
+    }
 }
 
 /// Follow the window to a new size in physical pixels. A zero size (a
 /// minimised window) keeps the old configuration; frames are skipped until the
 /// window comes back.
-pub(crate) fn resize_surface(width: u32, height: u32) {
+pub(crate) fn resize_surface(id: i64, width: u32, height: u32) {
     if width == 0 || height == 0 {
         return;
     }
     let mut s = lock();
-    let GpuState { device, screen, .. } = &mut *s;
-    let (Some(device), Some(screen)) = (device.as_ref(), screen.as_mut()) else { return };
+    let current = s.screen_id == id;
+    let GpuState { device, screen, parked, .. } = &mut *s;
+    let Some(device) = device.as_ref() else { return };
+    let target = if current { screen.as_mut() } else { parked.iter_mut().find(|(pid, _)| *pid == id).map(|(_, sc)| sc) };
+    let Some(screen) = target else { return };
     // A frame acquired at the old size must not be presented at the new one.
     screen.frame = None;
     screen.config.width = width;
@@ -1746,17 +1804,19 @@ pub(crate) fn resize_surface(width: u32, height: u32) {
     screen.surface.configure(device, &screen.config);
 }
 
-/// Show the frame recorded since the last call, if a render pass drew one.
-/// The window calls this each time control returns to its event loop.
-/// Show the frame drawn since the last call; `true` if there was one.
-pub(crate) fn present_frame() -> bool {
+/// Show the frames drawn since the last call, each on its window; the ids of
+/// the windows that had one. The window calls this each time control
+/// returns to its event loop.
+pub(crate) fn present_frame() -> Vec<i64> {
     let mut s = lock();
-    let Some(screen) = s.screen.as_mut() else { return false };
-    match screen.frame.take() {
-        Some((texture, _view)) => {
+    let current = s.screen_id;
+    let GpuState { screen, parked, .. } = &mut *s;
+    let mut shown = Vec::new();
+    for (id, screen) in screen.iter_mut().map(|sc| (current, sc)).chain(parked.iter_mut().map(|(id, sc)| (*id, sc))) {
+        if let Some((texture, _view)) = screen.frame.take() {
             texture.present();
-            true
+            shown.push(id);
         }
-        None => false,
     }
+    shown
 }
