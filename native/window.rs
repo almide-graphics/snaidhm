@@ -74,6 +74,7 @@ const TEXT: i64 = 5;
 const KEY: i64 = 6;
 const COMPOSE: i64 = 7;
 const DROP: i64 = 8;
+const THEME: i64 = 9;
 
 /// Modifier bits, as `event_mods` returns them.
 const MOD_SHIFT: i64 = 1;
@@ -167,6 +168,11 @@ struct App {
     current: Input,
     /// Modifiers held now, MOD_* bits.
     mods: i64,
+    /// Which Option keys are down: 1 the left, 2 the right.
+    alt_keys: i64,
+    /// Which Option keys type as Alt (see `set_option_as_alt`): 0 none,
+    /// 1 both, 2 the left, 3 the right.
+    option_as_alt: i64,
 }
 
 fn mod_bits(m: ModifiersState) -> i64 {
@@ -191,9 +197,24 @@ impl App {
     }
 
     fn typed(&mut self, text: &str) {
+        // An Option that composes, not Alt: the text is what it typed.
+        let mods = if self.mods & MOD_ALT != 0 && !self.option_is_alt() { self.mods & !MOD_ALT } else { self.mods };
         for ch in text.chars().filter(|c| !c.is_control()) {
-            let input = self.at_cursor(TEXT, i64::from(u32::from(ch)));
+            let input = Input { mods, ..self.at_cursor(TEXT, i64::from(u32::from(ch))) };
             self.push(input);
+        }
+    }
+
+    /// Whether the Option held now types as Alt. Off macOS, Alt always does.
+    fn option_is_alt(&self) -> bool {
+        if !cfg!(target_os = "macos") {
+            return true;
+        }
+        match self.option_as_alt {
+            1 => true,
+            2 => self.alt_keys & 1 != 0,
+            3 => self.alt_keys & 2 != 0,
+            _ => false,
         }
     }
 
@@ -282,10 +303,13 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
-                // With Ctrl, Alt or Super held the text is a control char,
-                // an Option-composed letter or nothing; a shortcut wants the
-                // key itself, with `event_mods` saying what was held.
-                if self.mods & (MOD_CTRL | MOD_ALT | MOD_SUPER) != 0 {
+                // With Ctrl, Super or an Option typing as Alt held, the text
+                // is a control char, an Option-composed letter or nothing; a
+                // shortcut wants the key itself, with `event_mods` saying
+                // what was held. An Option not typing as Alt types what it
+                // composes (Option+¥ is a backslash on a Japanese keyboard),
+                // reported without Alt.
+                if self.mods & (MOD_CTRL | MOD_SUPER) != 0 || (self.mods & MOD_ALT != 0 && self.option_is_alt()) {
                     if let Some(text) = event.key_without_modifiers().to_text() {
                         let text = text.to_string();
                         self.typed(&text);
@@ -301,7 +325,15 @@ impl ApplicationHandler for App {
                 }
             }
             // Keys the input method takes arrive as these, not as keys.
-            WindowEvent::ModifiersChanged(m) => self.mods = mod_bits(m.state()),
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = mod_bits(m.state());
+                use winit::keyboard::ModifiersKeyState::Pressed;
+                self.alt_keys = (if m.lalt_state() == Pressed { 1 } else { 0 }) | (if m.ralt_state() == Pressed { 2 } else { 0 });
+            }
+            WindowEvent::ThemeChanged(_) => {
+                let input = self.at_cursor(THEME, 0);
+                self.push(input);
+            }
             WindowEvent::Ime(Ime::Preedit(text, marked)) => self.compose(text, marked),
             WindowEvent::Ime(Ime::Commit(text)) => self.typed(&text),
             // One event per file: a drop of several is several in a row.
@@ -530,6 +562,35 @@ mod watch {
         w.state.lock().unwrap().armed = false;
         unsafe { libc::write(w.pipe.1, [1u8].as_ptr() as *const _, 1) };
     }
+}
+
+/// Which Option keys type as Alt — sending ESC before the key, as a
+/// terminal's Meta — rather than composing characters as macOS does
+/// (Option+¥ a backslash on a Japanese keyboard, Option+e an accent):
+/// 0 neither (the default), 1 both, 2 the left, 3 the right. macOS only;
+/// elsewhere Alt is always Alt.
+pub fn set_option_as_alt(mode: i64) {
+    with_host((), |host| {
+        host.app.option_as_alt = mode;
+        #[cfg(target_os = "macos")]
+        if let Some(w) = host.app.window.as_ref() {
+            use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
+            w.set_option_as_alt(match mode {
+                1 => OptionAsAlt::Both,
+                2 => OptionAsAlt::OnlyLeft,
+                3 => OptionAsAlt::OnlyRight,
+                _ => OptionAsAlt::None,
+            });
+        }
+    });
+}
+
+/// Whether the system shows its dark appearance (macOS's, or the desktop's
+/// where the platform tells). A THEME event follows each change.
+pub fn dark() -> bool {
+    with_host(false, |host| {
+        host.app.window.as_ref().and_then(|w| w.theme()).map_or(false, |t| t == winit::window::Theme::Dark)
+    })
 }
 
 /// Asked, when the app is told to quit, whether the program must be asked
