@@ -171,6 +171,15 @@ fn set_title(title: String) -> Unit = _
 @extern(rust, "crate::window", "request_attention")
 fn request_attention() -> Unit = _
 
+/// The pointer's shape over the window: 0 the arrow, 1 the text I-beam, 2
+/// the hand of a link.
+@extern(rust, "crate::window", "set_pointer")
+fn set_pointer(kind: Int) -> Unit = _
+
+let POINTER_ARROW = 0
+let POINTER_TEXT = 1
+let POINTER_LINK = 2
+
 /// Make the window full screen (a space of its own on macOS), or back.
 @extern(rust, "crate::window", "toggle_fullscreen")
 fn toggle_fullscreen() -> Unit = _
