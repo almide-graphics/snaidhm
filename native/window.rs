@@ -451,7 +451,7 @@ thread_local! {
     /// Inputs handed in from outside the event loop's own events (see
     /// `inject`): (kind, code, mods). Kept apart from the host, which is
     /// borrowed while the loop runs — when a menu item fires.
-    static INJECTED: RefCell<Vec<(i64, i64, i64)>> = const { RefCell::new(Vec::new()) };
+    static INJECTED: RefCell<Vec<(i64, i64, i64, Option<(f64, f64)>)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Queue an input as if typed into the window with the focus (else the
@@ -459,7 +459,18 @@ thread_local! {
 /// accessors give them. For a native menu whose items do what their keys
 /// do. Safe to call while the event loop runs.
 pub fn inject(kind: i64, code: i64, mods: i64) {
-    INJECTED.with(|q| q.borrow_mut().push((kind, code, mods)));
+    queue_input(kind, code, mods, None);
+}
+
+/// `inject` with the pointer moved to (`x`, `y`) first, as `event_x` and
+/// `event_y` give it: a mouse input, for a test of what a press or a drag
+/// does.
+pub fn inject_at(kind: i64, code: i64, mods: i64, x: f64, y: f64) {
+    queue_input(kind, code, mods, Some((x, y)));
+}
+
+fn queue_input(kind: i64, code: i64, mods: i64, at: Option<(f64, f64)>) {
+    INJECTED.with(|q| q.borrow_mut().push((kind, code, mods, at)));
     if let Some(proxy) = PROXY.get() {
         let _ = proxy.send_event(());
     }
@@ -478,7 +489,10 @@ impl Host {
     fn take_injected(&mut self) {
         let injected = INJECTED.with(|q| std::mem::take(&mut *q.borrow_mut()));
         let win = self.app.wins.iter().find(|w| w.focused).map_or(self.app.current, |w| w.id);
-        for (kind, code, mods) in injected {
+        for (kind, code, mods, at) in injected {
+            if let (Some(pos), Some(w)) = (at, self.app.wins.iter_mut().find(|w| w.id == win)) {
+                w.cursor = pos;
+            }
             let input = Input { mods, ..self.app.at_cursor(win, kind, code) };
             self.app.push(input);
         }

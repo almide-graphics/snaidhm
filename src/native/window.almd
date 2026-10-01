@@ -70,6 +70,11 @@ fn set_size(width: Float, height: Float) -> Unit = _
 @extern(rust, "crate::window", "inject")
 fn inject(kind: Int, code: Int, mods: Int) -> Unit = _
 
+/// `inject` with the pointer moved to (`x`, `y`), as `event_x` and
+/// `event_y` give it, first: a press or a drag, for a test.
+@extern(rust, "crate::window", "inject_at")
+fn inject_at(kind: Int, code: Int, mods: Int, x: Float, y: Float) -> Unit = _
+
 /// The window the current input happened in.
 @extern(rust, "crate::window", "event_window")
 fn event_window() -> Int = _
