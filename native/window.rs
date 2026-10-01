@@ -927,7 +927,8 @@ pub fn request_attention() {
 }
 
 /// The pointer's shape over the window: 0 the arrow, 1 the text I-beam, 2
-/// the hand of a link. Set only when it changes.
+/// the hand of a link, 3 and 4 a divider dragged across and up or down.
+/// Set only when it changes.
 pub fn set_pointer(kind: i64) {
     with_host((), |host| {
         if let Some(w) = host.app.cur_window() {
@@ -935,6 +936,8 @@ pub fn set_pointer(kind: i64) {
             w.set_cursor(match kind {
                 1 => CursorIcon::Text,
                 2 => CursorIcon::Pointer,
+                3 => CursorIcon::ColResize,
+                4 => CursorIcon::RowResize,
                 _ => CursorIcon::Default,
             });
         }
