@@ -65,6 +65,11 @@ fn set_position(x: Float, y: Float) -> Unit = _
 @extern(rust, "crate::window", "set_size")
 fn set_size(width: Float, height: Float) -> Unit = _
 
+/// Queue an input as if typed into the window with the focus: `kind` TEXT
+/// or KEY, `code` and `mods` as the event accessors give them.
+@extern(rust, "crate::window", "inject")
+fn inject(kind: Int, code: Int, mods: Int) -> Unit = _
+
 /// The window the current input happened in.
 @extern(rust, "crate::window", "event_window")
 fn event_window() -> Int = _

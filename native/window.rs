@@ -448,6 +448,21 @@ impl ApplicationHandler for App {
 
 thread_local! {
     static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
+    /// Inputs handed in from outside the event loop's own events (see
+    /// `inject`): (kind, code, mods). Kept apart from the host, which is
+    /// borrowed while the loop runs — when a menu item fires.
+    static INJECTED: RefCell<Vec<(i64, i64, i64)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Queue an input as if typed into the window with the focus (else the
+/// current one): `kind` TEXT or KEY, `code` and `mods` as `next_event`'s
+/// accessors give them. For a native menu whose items do what their keys
+/// do. Safe to call while the event loop runs.
+pub fn inject(kind: i64, code: i64, mods: i64) {
+    INJECTED.with(|q| q.borrow_mut().push((kind, code, mods)));
+    if let Some(proxy) = PROXY.get() {
+        let _ = proxy.send_event(());
+    }
 }
 
 /// Run `f` against the open window, or return `default` when there is none.
@@ -459,6 +474,16 @@ fn with_host<R>(default: R, f: impl FnOnce(&mut Host) -> R) -> R {
 }
 
 impl Host {
+    /// The inputs `inject` queued, into the window with the focus.
+    fn take_injected(&mut self) {
+        let injected = INJECTED.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        let win = self.app.wins.iter().find(|w| w.focused).map_or(self.app.current, |w| w.id);
+        for (kind, code, mods) in injected {
+            let input = Input { mods, ..self.app.at_cursor(win, kind, code) };
+            self.app.push(input);
+        }
+    }
+
     /// Process events, blocking for at most `timeout` (`None`: until one
     /// arrives). Returns whether the window is still wanted.
     fn pump(&mut self, timeout: Option<Duration>) -> bool {
@@ -478,6 +503,7 @@ impl Host {
         if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(timeout, &mut self.app) {
             return false;
         }
+        self.take_injected();
         #[cfg(target_os = "macos")]
         if layer::QUIT_ASKED.swap(false, std::sync::atomic::Ordering::AcqRel) {
             self.app.close_requested = true;
@@ -490,6 +516,7 @@ impl Host {
             if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(Some(Duration::ZERO), &mut self.app) {
                 return false;
             }
+            self.take_injected();
         }
         !self.app.close_requested
     }
