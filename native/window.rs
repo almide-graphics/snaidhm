@@ -655,6 +655,21 @@ pub fn request_attention() {
     });
 }
 
+/// The pointer's shape over the window: 0 the arrow, 1 the text I-beam, 2
+/// the hand of a link. Set only when it changes.
+pub fn set_pointer(kind: i64) {
+    with_host((), |host| {
+        if let Some(w) = host.app.window.as_ref() {
+            use winit::window::CursorIcon;
+            w.set_cursor(match kind {
+                1 => CursorIcon::Text,
+                2 => CursorIcon::Pointer,
+                _ => CursorIcon::Default,
+            });
+        }
+    });
+}
+
 /// Fill the screen with the window, or give it back its frame when it does:
 /// on macOS a full-screen space of its own, as the green button makes.
 pub fn toggle_fullscreen() {
