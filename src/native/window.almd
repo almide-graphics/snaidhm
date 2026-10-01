@@ -162,6 +162,15 @@ fn keep_open() -> Unit = _
 @extern(rust, "crate::window", "minimize")
 fn minimize() -> Unit = _
 
+/// Set the window's title.
+@extern(rust, "crate::window", "set_title")
+fn set_title(title: String) -> Unit = _
+
+/// Ask for the user's attention while the window is in the background (the
+/// Dock icon bounces once on macOS; the window is marked urgent elsewhere).
+@extern(rust, "crate::window", "request_attention")
+fn request_attention() -> Unit = _
+
 /// Make the window full screen (a space of its own on macOS), or back.
 @extern(rust, "crate::window", "toggle_fullscreen")
 fn toggle_fullscreen() -> Unit = _
