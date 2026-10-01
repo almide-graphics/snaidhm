@@ -22,6 +22,40 @@
 @extern(rust, "crate::window", "open")
 fn open(title: String, width: Int, height: Int) -> Bool = _
 
+// ── Windows ───────────────────────────────────────────────────────────────
+//
+// `open` opens window 1; more open with `open_window`. Every call about "the
+// window" — its size, title, focus, IME, pointer, full screen — is about the
+// one `select` chose, and render passes draw into it; inputs say which window
+// they happened in (`event_window`).
+
+/// Open another window, `width` x `height` logical pixels, a little below and
+/// right of the current one; its id, 0 when it can't be opened. Needs a
+/// window `open`ed first. It shows with its first frame.
+@extern(rust, "crate::window", "open_window")
+fn open_window(title: String, width: Int, height: Int) -> Int = _
+
+/// Close window `id`.
+@extern(rust, "crate::window", "close_window")
+fn close_window(id: Int) -> Unit = _
+
+/// Make window `id` the one the per-window calls are about and render passes
+/// draw into.
+@extern(rust, "crate::window", "select")
+fn select(id: Int) -> Unit = _
+
+/// The window `select` chose (1 until another is).
+@extern(rust, "crate::window", "current")
+fn current() -> Int = _
+
+/// The window the current input happened in.
+@extern(rust, "crate::window", "event_window")
+fn event_window() -> Int = _
+
+/// The window with the keyboard focus, 0 when none has it.
+@extern(rust, "crate::window", "focused_window")
+fn focused_window() -> Int = _
+
 /// End the frame (show what its render passes drew) and process pending events
 /// without waiting. `false` once the window has been asked to close.
 @extern(rust, "crate::window", "pump")
@@ -83,6 +117,9 @@ let DROP = 8
 let THEME = 9
 /// The window gained (`event_code` 1) or lost (0) the keyboard focus.
 let FOCUS = 10
+/// A window's close button, while more than one is open; with one, `pump`
+/// and the waits return `false` instead.
+let CLOSE = 11
 
 let KEY_BACKSPACE = 8
 let KEY_TAB = 9

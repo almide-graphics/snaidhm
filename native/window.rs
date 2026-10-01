@@ -37,6 +37,13 @@
 //! caret is, for its candidate window. In the browser a DOM input element
 //! does all of this itself.
 //!
+//! ## Windows
+//!
+//! `open` opens window 1, `open_window` more. The per-window calls — size,
+//! title, focus, IME, pointer, full screen — are about the window `select`
+//! chose, and `gpu` render passes draw into its surface; each input names the
+//! window it happened in. One event loop serves them all.
+//!
 //! ## State
 //!
 //! A winit event loop is `!Send`, so the window lives in a thread-local, not in
@@ -76,6 +83,9 @@ const COMPOSE: i64 = 7;
 const DROP: i64 = 8;
 const THEME: i64 = 9;
 const FOCUS: i64 = 10;
+/// A window's close button, while more than one is open (with one, `pump`
+/// and the waits return `false` instead).
+const CLOSE: i64 = 11;
 
 /// Modifier bits, as `event_mods` returns them.
 const MOD_SHIFT: i64 = 1;
@@ -96,6 +106,8 @@ const QUEUE_LIMIT: usize = 1024;
 /// it shows no caret. `mods` are the modifiers held when it happened.
 #[derive(Clone, Default)]
 struct Input {
+    /// The window it happened in.
+    win: i64,
     kind: i64,
     mods: i64,
     x: f64,
@@ -143,23 +155,15 @@ fn key_code(key: &NamedKey) -> Option<i64> {
 struct Host {
     event_loop: EventLoop<()>,
     app: App,
-    /// When the window opened, until it is shown: it opens hidden and shows
-    /// with its first frame, rather than empty while the program gets its
-    /// GPU work ready.
-    hidden_since: Option<Instant>,
     /// Quitting asks the program first (see `layer::ask_before_quit`).
     quit_routed: bool,
 }
 
-#[derive(Default)]
-struct App {
-    /// Attributes of the window to create at the next `resumed`. winit only
-    /// lets a window be created from inside the event loop.
-    pending: Option<WindowAttributes>,
-    window: Option<Arc<Window>>,
-    /// Set when window creation or surface attachment failed.
-    failed: bool,
-    close_requested: bool,
+/// One open window.
+struct Win {
+    /// The program's name for it: 1 for the window `open` opened, then 2, 3, ...
+    id: i64,
+    window: Arc<Window>,
     /// Set by a resize, cleared by the `resized()` that reports it.
     resized: bool,
     /// The view's size, physical pixels: what the surface is configured to
@@ -168,17 +172,39 @@ struct App {
     /// the window's content rect, which in full screen still leaves out a
     /// title bar that is no longer there, so the view is taller than it says.
     size: (u32, u32),
-    /// Last cursor position, logical pixels.
+    /// Last cursor position over it, logical pixels.
     cursor: (f64, f64),
+    /// Whether it has the keyboard focus.
+    focused: bool,
+    /// When it opened, until it is shown: a window opens hidden and shows
+    /// with its first frame, rather than empty while the program gets its
+    /// GPU work ready.
+    hidden_since: Option<Instant>,
+}
+
+#[derive(Default)]
+struct App {
+    /// Windows to create, with their ids. winit only lets a window be
+    /// created from inside the event loop.
+    pending: Vec<(i64, WindowAttributes)>,
+    /// Ids of windows that could not be created (or given a surface).
+    failed: Vec<i64>,
+    wins: Vec<Win>,
+    /// The id the next window gets.
+    next_id: i64,
+    /// The window the per-window calls (size, title, IME, ...) and render
+    /// passes are for: see `select`.
+    current: i64,
+    /// Set when the only window's close button was pressed, or the app was
+    /// asked to quit.
+    close_requested: bool,
     events: VecDeque<Input>,
     /// The event `next_event` last returned, read by the accessors.
-    current: Input,
+    input: Input,
     /// Modifiers held now, MOD_* bits.
     mods: i64,
     /// Which Option keys are down: 1 the left, 2 the right.
     alt_keys: i64,
-    /// Whether the window has the keyboard focus.
-    focused: bool,
     /// Which Option keys type as Alt (see `set_option_as_alt`): 0 none,
     /// 1 both, 2 the left, 3 the right.
     option_as_alt: i64,
@@ -194,8 +220,25 @@ fn mod_bits(m: ModifiersState) -> i64 {
 }
 
 impl App {
-    fn scale(&self) -> f64 {
-        self.window.as_ref().map_or(1.0, |w| w.scale_factor())
+    fn win(&self, id: i64) -> Option<&Win> {
+        self.wins.iter().find(|w| w.id == id)
+    }
+
+    fn win_mut(&mut self, id: i64) -> Option<&mut Win> {
+        self.wins.iter_mut().find(|w| w.id == id)
+    }
+
+    /// The window `select` chose.
+    fn cur(&self) -> Option<&Win> {
+        self.win(self.current)
+    }
+
+    fn cur_window(&self) -> Option<&Arc<Window>> {
+        self.cur().map(|w| &w.window)
+    }
+
+    fn scale_of(&self, id: i64) -> f64 {
+        self.win(id).map_or(1.0, |w| w.window.scale_factor())
     }
 
     fn push(&mut self, input: Input) {
@@ -205,11 +248,11 @@ impl App {
         self.events.push_back(input);
     }
 
-    fn typed(&mut self, text: &str) {
+    fn typed(&mut self, win: i64, text: &str) {
         // An Option that composes, not Alt: the text is what it typed.
         let mods = if self.mods & MOD_ALT != 0 && !self.option_is_alt() { self.mods & !MOD_ALT } else { self.mods };
         for ch in text.chars().filter(|c| !c.is_control()) {
-            let input = Input { mods, ..self.at_cursor(TEXT, i64::from(u32::from(ch))) };
+            let input = Input { mods, ..self.at_cursor(win, TEXT, i64::from(u32::from(ch))) };
             self.push(input);
         }
     }
@@ -227,57 +270,94 @@ impl App {
         }
     }
 
-    fn compose(&mut self, text: String, marked: Option<(usize, usize)>) {
+    fn compose(&mut self, win: i64, text: String, marked: Option<(usize, usize)>) {
         // winit gives byte offsets; a UI counts characters.
         let chars = |byte: usize| text.get(..byte).map_or(0, |s| s.chars().count()) as i64;
         let (code, end) = marked.map_or((-1, -1), |(a, b)| (chars(a), chars(b)));
-        let input = Input { end, text, ..self.at_cursor(COMPOSE, code) };
+        let input = Input { end, text, ..self.at_cursor(win, COMPOSE, code) };
         self.push(input);
     }
 
-    fn at_cursor(&self, kind: i64, code: i64) -> Input {
-        Input { kind, mods: self.mods, x: self.cursor.0, y: self.cursor.1, code, ..Input::default() }
+    fn at_cursor(&self, win: i64, kind: i64, code: i64) -> Input {
+        let (x, y) = self.win(win).map_or((0.0, 0.0), |w| w.cursor);
+        Input { win, kind, mods: self.mods, x, y, code, ..Input::default() }
     }
+
+    /// Create the windows waiting to be.
+    fn create_pending(&mut self, event_loop: &ActiveEventLoop) {
+        for (id, attrs) in std::mem::take(&mut self.pending) {
+            match create(event_loop, id, attrs) {
+                Some(win) => self.wins.push(win),
+                None => self.failed.push(id),
+            }
+        }
+    }
+}
+
+/// Window `id`, with a surface the GPU draws into; none (the reason on
+/// stderr) when it can't be had.
+fn create(event_loop: &ActiveEventLoop, id: i64, attrs: WindowAttributes) -> Option<Win> {
+    let window = match event_loop.create_window(attrs) {
+        Ok(w) => Arc::new(w),
+        Err(e) => {
+            eprintln!("[snaidhm/window] cannot create the window: {e}");
+            return None;
+        }
+    };
+    let size = window.inner_size();
+    if !crate::gpu::attach_surface(id, window.clone().into(), size.width, size.height) {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(view) = ns_view(&window) {
+        layer::pin(view);
+    }
+    Some(Win {
+        id,
+        window,
+        resized: false,
+        size: (size.width, size.height),
+        cursor: (0.0, 0.0),
+        focused: false,
+        hidden_since: Some(Instant::now()),
+    })
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(attrs) = self.pending.take() else { return };
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("[snaidhm/window] cannot create the window: {e}");
-                self.failed = true;
-                return;
-            }
-        };
-        let size = window.inner_size();
-        self.size = (size.width, size.height);
-        if !crate::gpu::attach_surface(window.clone().into(), size.width, size.height) {
-            self.failed = true;
-            return;
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(view) = ns_view(&window) {
-            layer::pin(view);
-        }
-        self.window = Some(window);
+        self.create_pending(event_loop);
     }
 
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        self.create_pending(event_loop);
+    }
+
+    fn window_event(&mut self, _event_loop: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
+        let Some(id) = self.wins.iter().find(|w| w.window.id() == wid).map(|w| w.id) else { return };
         match event {
-            WindowEvent::CloseRequested => self.close_requested = true,
+            WindowEvent::CloseRequested => {
+                if self.wins.len() > 1 {
+                    let input = self.at_cursor(id, CLOSE, 0);
+                    self.push(input);
+                } else {
+                    self.close_requested = true;
+                }
+            }
             // A scale-factor change is followed by the `Resized` that carries
             // its new physical size, so this one arm covers both.
             WindowEvent::Resized(size) => {
-                crate::gpu::resize_surface(size.width, size.height);
-                self.size = (size.width, size.height);
-                self.resized = true;
+                crate::gpu::resize_surface(id, size.width, size.height);
+                if let Some(w) = self.win_mut(id) {
+                    w.size = (size.width, size.height);
+                    w.resized = true;
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let s = self.scale();
-                self.cursor = (position.x / s, position.y / s);
-                let input = self.at_cursor(MOUSE_MOVE, 0);
+                let s = self.scale_of(id);
+                if let Some(w) = self.win_mut(id) {
+                    w.cursor = (position.x / s, position.y / s);
+                }
+                let input = self.at_cursor(id, MOUSE_MOVE, 0);
                 self.push(input);
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -288,7 +368,7 @@ impl ApplicationHandler for App {
                     _ => return,
                 };
                 let kind = if state == ElementState::Pressed { MOUSE_DOWN } else { MOUSE_UP };
-                let input = self.at_cursor(kind, code);
+                let input = self.at_cursor(id, kind, code);
                 self.push(input);
             }
             // winit's positive delta moves the content right and down; the
@@ -297,11 +377,11 @@ impl ApplicationHandler for App {
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (-f64::from(x) * LINE_PX, -f64::from(y) * LINE_PX),
                     MouseScrollDelta::PixelDelta(p) => {
-                        let s = self.scale();
+                        let s = self.scale_of(id);
                         (-p.x / s, -p.y / s)
                     }
                 };
-                let input = Input { dx, dy, ..self.at_cursor(WHEEL, 0) };
+                let input = Input { dx, dy, ..self.at_cursor(id, WHEEL, 0) };
                 self.push(input);
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
@@ -309,7 +389,7 @@ impl ApplicationHandler for App {
                 // "\r" as text, which would type a line break into a field.
                 if let Key::Named(named) = &event.logical_key {
                     if let Some(code) = key_code(named) {
-                        let input = self.at_cursor(KEY, code);
+                        let input = self.at_cursor(id, KEY, code);
                         self.push(input);
                         return;
                     }
@@ -323,7 +403,7 @@ impl ApplicationHandler for App {
                 if self.mods & (MOD_CTRL | MOD_SUPER) != 0 || (self.mods & MOD_ALT != 0 && self.option_is_alt()) {
                     if let Some(text) = event.key_without_modifiers().to_text() {
                         let text = text.to_string();
-                        self.typed(&text);
+                        self.typed(id, &text);
                     }
                     return;
                 }
@@ -332,7 +412,7 @@ impl ApplicationHandler for App {
                 let text = event.text.as_deref().or_else(|| event.logical_key.to_text());
                 if let Some(text) = text {
                     let text = text.to_string();
-                    self.typed(&text);
+                    self.typed(id, &text);
                 }
             }
             // Keys the input method takes arrive as these, not as keys.
@@ -342,22 +422,24 @@ impl ApplicationHandler for App {
                 self.alt_keys = (if m.lalt_state() == Pressed { 1 } else { 0 }) | (if m.ralt_state() == Pressed { 2 } else { 0 });
             }
             WindowEvent::Focused(on) => {
-                self.focused = on;
-                let input = self.at_cursor(FOCUS, if on { 1 } else { 0 });
+                if let Some(w) = self.win_mut(id) {
+                    w.focused = on;
+                }
+                let input = self.at_cursor(id, FOCUS, if on { 1 } else { 0 });
                 self.push(input);
             }
             WindowEvent::ThemeChanged(_) => {
-                let input = self.at_cursor(THEME, 0);
+                let input = self.at_cursor(id, THEME, 0);
                 self.push(input);
             }
-            WindowEvent::Ime(Ime::Preedit(text, marked)) => self.compose(text, marked),
-            WindowEvent::Ime(Ime::Commit(text)) => self.typed(&text),
+            WindowEvent::Ime(Ime::Preedit(text, marked)) => self.compose(id, text, marked),
+            WindowEvent::Ime(Ime::Commit(text)) => self.typed(id, &text),
             // One event per file: a drop of several is several in a row.
             WindowEvent::DroppedFile(path) => {
-                let input = Input { text: path.to_string_lossy().into_owned(), ..self.at_cursor(DROP, 0) };
+                let input = Input { text: path.to_string_lossy().into_owned(), ..self.at_cursor(id, DROP, 0) };
                 self.push(input);
             }
-            WindowEvent::Ime(Ime::Disabled) => self.compose(String::new(), None),
+            WindowEvent::Ime(Ime::Disabled) => self.compose(id, String::new(), None),
             WindowEvent::Ime(Ime::Enabled) => {}
             _ => {}
         }
@@ -385,12 +467,12 @@ impl Host {
             self.quit_routed = layer::ask_before_quit();
         }
         let presented = crate::gpu::present_frame();
-        if let Some(since) = self.hidden_since {
-            if presented || since.elapsed() >= SHOW_DEADLINE {
-                if let Some(w) = &self.app.window {
-                    w.set_visible(true);
+        for w in &mut self.app.wins {
+            if let Some(since) = w.hidden_since {
+                if presented.contains(&w.id) || since.elapsed() >= SHOW_DEADLINE {
+                    w.window.set_visible(true);
+                    w.hidden_since = None;
                 }
-                self.hidden_since = None;
             }
         }
         if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(timeout, &mut self.app) {
@@ -418,14 +500,15 @@ impl Host {
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Open the window, `width` x `height` in logical pixels, and make it the
-/// screen every later `gpu` render pass draws into. `false` when no window can
-/// be opened (no display, a second window, a GPU that cannot present to it);
-/// the reason is on stderr, and rendering stays offscreen.
+/// screen every later `gpu` render pass draws into; it is window 1 (see
+/// `open_window` for more). `false` when no window can be opened (no
+/// display, one already open, a GPU that cannot present to it); the reason is
+/// on stderr, and rendering stays offscreen.
 pub fn open(title: &str, width: i64, height: i64) -> bool {
     HOST.with(|h| {
         let mut slot = h.borrow_mut();
         if slot.is_some() {
-            eprintln!("[snaidhm/window] a window is already open; snaidhm drives one");
+            eprintln!("[snaidhm/window] a window is already open; open more with open_window");
             return false;
         }
         let event_loop = match EventLoop::new() {
@@ -435,26 +518,107 @@ pub fn open(title: &str, width: i64, height: i64) -> bool {
                 return false;
             }
         };
-        let attrs = Window::default_attributes()
-            .with_title(title)
-            .with_inner_size(LogicalSize::new(width.max(1) as f64, height.max(1) as f64))
-            .with_visible(false);
+        let attrs = attributes(title, width, height);
         let _ = PROXY.set(event_loop.create_proxy());
-        let mut host = Host { event_loop, app: App { pending: Some(attrs), ..App::default() }, hidden_since: Some(Instant::now()), quit_routed: false };
-        let deadline = Instant::now() + OPEN_DEADLINE;
-        while host.app.window.is_none() && !host.app.failed {
-            if Instant::now() >= deadline {
-                eprintln!("[snaidhm/window] the platform never let the window be created");
-                return false;
-            }
-            host.event_loop.pump_app_events(Some(Duration::from_millis(10)), &mut host.app);
-        }
-        if host.app.failed {
+        let app = App { pending: vec![(1, attrs)], next_id: 2, current: 1, ..App::default() };
+        let mut host = Host { event_loop, app, quit_routed: false };
+        if !host.created(1) {
             return false;
         }
         *slot = Some(host);
         true
     })
+}
+
+/// A window titled `title`, `width` x `height` logical pixels, hidden until
+/// its first frame.
+fn attributes(title: &str, width: i64, height: i64) -> WindowAttributes {
+    Window::default_attributes()
+        .with_title(title)
+        .with_inner_size(LogicalSize::new(width.max(1) as f64, height.max(1) as f64))
+        .with_visible(false)
+}
+
+impl Host {
+    /// Pump until window `id` waiting to be created is, or couldn't be.
+    fn created(&mut self, id: i64) -> bool {
+        let deadline = Instant::now() + OPEN_DEADLINE;
+        loop {
+            if self.app.wins.iter().any(|w| w.id == id) {
+                return true;
+            }
+            if self.app.failed.contains(&id) {
+                return false;
+            }
+            if Instant::now() >= deadline {
+                eprintln!("[snaidhm/window] the platform never let the window be created");
+                self.app.pending.retain(|(pid, _)| *pid != id);
+                return false;
+            }
+            self.event_loop.pump_app_events(Some(Duration::from_millis(10)), &mut self.app);
+        }
+    }
+}
+
+/// Open another window, `width` x `height` logical pixels, a little below and
+/// right of the current one; its id, 0 when it can't be opened. It draws
+/// nothing until `select`ed. Needs a window `open`ed first.
+pub fn open_window(title: &str, width: i64, height: i64) -> i64 {
+    with_host(0, |host| {
+        let id = host.app.next_id;
+        host.app.next_id += 1;
+        let mut attrs = attributes(title, width, height);
+        if let Some(w) = host.app.cur_window() {
+            if let Ok(at) = w.outer_position() {
+                let s = w.scale_factor();
+                attrs = attrs.with_position(winit::dpi::LogicalPosition::new(at.x as f64 / s + 24.0, at.y as f64 / s + 24.0));
+            }
+        }
+        host.app.pending.push((id, attrs));
+        if let Some(proxy) = PROXY.get() {
+            let _ = proxy.send_event(());
+        }
+        if host.created(id) { id } else { 0 }
+    })
+}
+
+/// Close window `id`. The last one closing leaves no screen: render passes
+/// draw offscreen.
+pub fn close_window(id: i64) {
+    with_host((), |host| {
+        crate::gpu::detach_surface(id);
+        host.app.wins.retain(|w| w.id != id);
+        host.app.events.retain(|e| e.win != id);
+        if host.app.current == id {
+            host.app.current = host.app.wins.first().map_or(0, |w| w.id);
+        }
+    })
+}
+
+/// Make window `id` the one the per-window calls — its size, title, focus,
+/// IME, pointer, ... — are about, and the screen render passes draw into.
+pub fn select(id: i64) {
+    with_host((), |host| {
+        if host.app.win(id).is_some() {
+            host.app.current = id;
+            crate::gpu::select_surface(id);
+        }
+    })
+}
+
+/// The window `select` chose (1 until another is).
+pub fn current() -> i64 {
+    with_host(0, |host| host.app.current)
+}
+
+/// The window the current input happened in.
+pub fn event_window() -> i64 {
+    with_host(0, |host| host.app.input.win)
+}
+
+/// The id of the window with the keyboard focus, 0 when none has it.
+pub fn focused_window() -> i64 {
+    with_host(0, |host| host.app.wins.iter().find(|w| w.focused).map_or(0, |w| w.id))
 }
 
 /// End the frame and process pending events without waiting. `false` once the
@@ -589,9 +753,9 @@ pub fn set_option_as_alt(mode: i64) {
     with_host((), |host| {
         host.app.option_as_alt = mode;
         #[cfg(target_os = "macos")]
-        if let Some(w) = host.app.window.as_ref() {
+        for w in &host.app.wins {
             use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
-            w.set_option_as_alt(match mode {
+            w.window.set_option_as_alt(match mode {
                 1 => OptionAsAlt::Both,
                 2 => OptionAsAlt::OnlyLeft,
                 3 => OptionAsAlt::OnlyRight,
@@ -603,14 +767,14 @@ pub fn set_option_as_alt(mode: i64) {
 
 /// Whether the window has the keyboard focus; FOCUS events follow changes.
 pub fn focused() -> bool {
-    with_host(false, |host| host.app.focused)
+    with_host(false, |host| host.app.cur().is_some_and(|w| w.focused))
 }
 
 /// Whether the system shows its dark appearance (macOS's, or the desktop's
 /// where the platform tells). A THEME event follows each change.
 pub fn dark() -> bool {
     with_host(false, |host| {
-        host.app.window.as_ref().and_then(|w| w.theme()).map_or(false, |t| t == winit::window::Theme::Dark)
+        host.app.wins.first().and_then(|w| w.window.theme()).map_or(false, |t| t == winit::window::Theme::Dark)
     })
 }
 
@@ -635,7 +799,7 @@ pub fn keep_open() {
 /// Put the window in the Dock (minimize it).
 pub fn minimize() {
     with_host((), |host| {
-        if let Some(w) = host.app.window.as_ref() {
+        if let Some(w) = host.app.cur_window() {
             w.set_minimized(true);
         }
     });
@@ -644,7 +808,7 @@ pub fn minimize() {
 /// Set the window's title.
 pub fn set_title(title: &str) {
     with_host((), |host| {
-        if let Some(w) = host.app.window.as_ref() {
+        if let Some(w) = host.app.cur_window() {
             w.set_title(title);
         }
     });
@@ -655,7 +819,7 @@ pub fn set_title(title: &str) {
 /// Nothing while it has the focus.
 pub fn request_attention() {
     with_host((), |host| {
-        if let Some(w) = host.app.window.as_ref() {
+        if let Some(w) = host.app.cur_window() {
             if !w.has_focus() {
                 w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
             }
@@ -667,7 +831,7 @@ pub fn request_attention() {
 /// the hand of a link. Set only when it changes.
 pub fn set_pointer(kind: i64) {
     with_host((), |host| {
-        if let Some(w) = host.app.window.as_ref() {
+        if let Some(w) = host.app.cur_window() {
             use winit::window::CursorIcon;
             w.set_cursor(match kind {
                 1 => CursorIcon::Text,
@@ -682,7 +846,7 @@ pub fn set_pointer(kind: i64) {
 /// on macOS a full-screen space of its own, as the green button makes.
 pub fn toggle_fullscreen() {
     with_host((), |host| {
-        if let Some(w) = host.app.window.as_ref() {
+        if let Some(w) = host.app.cur_window() {
             w.set_fullscreen(if w.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
         }
     });
@@ -694,7 +858,7 @@ pub fn toggle_fullscreen() {
 pub fn set_background(r: f64, g: f64, b: f64) {
     #[cfg(target_os = "macos")]
     with_host((), |host| {
-        if let Some(view) = host.app.window.as_ref().and_then(|w| ns_view(w)) {
+        if let Some(view) = host.app.cur_window().and_then(|w| ns_view(w)) {
             layer::background(view, r, g, b);
         }
     });
@@ -846,17 +1010,20 @@ mod layer {
 /// `true` exactly once after each change of the window's size — the moment to
 /// rebuild anything sized to it (a scene, the depth target).
 pub fn resized() -> bool {
-    with_host(false, |host| std::mem::take(&mut host.app.resized))
+    with_host(false, |host| {
+        let id = host.app.current;
+        host.app.win_mut(id).is_some_and(|w| std::mem::take(&mut w.resized))
+    })
 }
 
 /// Width of the drawable area in physical pixels, the size render targets are.
 pub fn width() -> i64 {
-    with_host(0, |host| if host.app.window.is_some() { host.app.size.0 as i64 } else { 0 })
+    with_host(0, |host| host.app.cur().map_or(0, |w| w.size.0 as i64))
 }
 
 /// Height of the drawable area in physical pixels.
 pub fn height() -> i64 {
-    with_host(0, |host| if host.app.window.is_some() { host.app.size.1 as i64 } else { 0 })
+    with_host(0, |host| host.app.cur().map_or(0, |w| w.size.1 as i64))
 }
 
 /// The kind of the next queued input, which the `event_*` accessors then
@@ -866,60 +1033,60 @@ pub fn next_event() -> i64 {
     with_host(0, |host| {
         let input = host.app.events.pop_front().unwrap_or_default();
         let kind = input.kind;
-        host.app.current = input;
+        host.app.input = input;
         kind
     })
 }
 
 /// Pointer position of the current input, logical pixels.
 pub fn event_x() -> f64 {
-    with_host(0.0, |host| host.app.current.x)
+    with_host(0.0, |host| host.app.input.x)
 }
 
 pub fn event_y() -> f64 {
-    with_host(0.0, |host| host.app.current.y)
+    with_host(0.0, |host| host.app.input.y)
 }
 
 /// Wheel distance of the current input, logical pixels, DOM signs.
 pub fn event_dx() -> f64 {
-    with_host(0.0, |host| host.app.current.dx)
+    with_host(0.0, |host| host.app.input.dx)
 }
 
 pub fn event_dy() -> f64 {
-    with_host(0.0, |host| host.app.current.dy)
+    with_host(0.0, |host| host.app.input.dy)
 }
 
 /// Button, typed code point, or DOM key code of the current input.
 pub fn event_code() -> i64 {
-    with_host(0, |host| host.app.current.code)
+    with_host(0, |host| host.app.input.code)
 }
 
 /// Physical pixels per logical pixel (2.0 on a typical Retina display).
 pub fn scale_factor() -> f64 {
-    with_host(1.0, |host| host.app.window.as_ref().map_or(1.0, |w| w.scale_factor()))
+    with_host(1.0, |host| host.app.cur_window().map_or(1.0, |w| w.scale_factor()))
 }
 
 /// End of the marked part of the current composition, characters.
 pub fn event_end() -> i64 {
-    with_host(0, |host| host.app.current.end)
+    with_host(0, |host| host.app.input.end)
 }
 
 /// Modifiers held when the current input happened: 1 Shift, 2 Ctrl, 4 Alt
 /// (Option), 8 Super (Command).
 pub fn event_mods() -> i64 {
-    with_host(0, |host| host.app.current.mods)
+    with_host(0, |host| host.app.input.mods)
 }
 
 /// Text of the current composition.
 pub fn event_text() -> String {
-    with_host(String::new(), |host| host.app.current.text.clone())
+    with_host(String::new(), |host| host.app.input.text.clone())
 }
 
 /// Let the platform's input method compose text in this window (`true`), or
 /// take keys as they are (`false`, the default).
 pub fn set_ime(allowed: bool) {
     with_host((), |host| {
-        if let Some(w) = &host.app.window {
+        if let Some(w) = host.app.cur_window() {
             w.set_ime_allowed(allowed);
         }
     })
@@ -929,7 +1096,7 @@ pub fn set_ime(allowed: bool) {
 /// method can put its candidate window beside it rather than over it.
 pub fn set_ime_area(x: f64, y: f64, w: f64, h: f64) {
     with_host((), |host| {
-        if let Some(win) = &host.app.window {
+        if let Some(win) = host.app.cur_window() {
             win.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(w.max(1.0), h.max(1.0)));
         }
     })
