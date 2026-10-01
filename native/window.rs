@@ -633,6 +633,28 @@ pub fn minimize() {
     });
 }
 
+/// Set the window's title.
+pub fn set_title(title: &str) {
+    with_host((), |host| {
+        if let Some(w) = host.app.window.as_ref() {
+            w.set_title(title);
+        }
+    });
+}
+
+/// Ask for the user's attention while the window is in the background: on
+/// macOS the Dock icon bounces once, elsewhere the window is marked urgent.
+/// Nothing while it has the focus.
+pub fn request_attention() {
+    with_host((), |host| {
+        if let Some(w) = host.app.window.as_ref() {
+            if !w.has_focus() {
+                w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+            }
+        }
+    });
+}
+
 /// Fill the screen with the window, or give it back its frame when it does:
 /// on macOS a full-screen space of its own, as the green button makes.
 pub fn toggle_fullscreen() {
