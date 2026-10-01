@@ -76,6 +76,9 @@ let KEY = 6
 /// range at its caret — in characters, -1 when it shows no caret. What it
 /// commits arrives as TEXT events.
 let COMPOSE = 7
+/// A file was dropped on the window, at the pointer: `event_text` is its
+/// path. Several dropped at once come as several DROPs in a row.
+let DROP = 8
 
 let KEY_BACKSPACE = 8
 let KEY_TAB = 9
@@ -134,7 +137,7 @@ fn event_end() -> Int = _
 @extern(rust, "crate::window", "event_mods")
 fn event_mods() -> Int = _
 
-/// Text of the current COMPOSE.
+/// Text of the current COMPOSE, or the path of the current DROP.
 @extern(rust, "crate::window", "event_text")
 fn event_text() -> String = _
 

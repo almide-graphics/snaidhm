@@ -73,6 +73,7 @@ const WHEEL: i64 = 4;
 const TEXT: i64 = 5;
 const KEY: i64 = 6;
 const COMPOSE: i64 = 7;
+const DROP: i64 = 8;
 
 /// Modifier bits, as `event_mods` returns them.
 const MOD_SHIFT: i64 = 1;
@@ -303,6 +304,11 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(m) => self.mods = mod_bits(m.state()),
             WindowEvent::Ime(Ime::Preedit(text, marked)) => self.compose(text, marked),
             WindowEvent::Ime(Ime::Commit(text)) => self.typed(&text),
+            // One event per file: a drop of several is several in a row.
+            WindowEvent::DroppedFile(path) => {
+                let input = Input { text: path.to_string_lossy().into_owned(), ..self.at_cursor(DROP, 0) };
+                self.push(input);
+            }
             WindowEvent::Ime(Ime::Disabled) => self.compose(String::new(), None),
             WindowEvent::Ime(Ime::Enabled) => {}
             _ => {}
