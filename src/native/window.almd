@@ -79,6 +79,8 @@ let COMPOSE = 7
 /// A file was dropped on the window, at the pointer: `event_text` is its
 /// path. Several dropped at once come as several DROPs in a row.
 let DROP = 8
+/// The system's appearance changed between light and dark: see `dark`.
+let THEME = 9
 
 let KEY_BACKSPACE = 8
 let KEY_TAB = 9
@@ -161,6 +163,16 @@ fn minimize() -> Unit = _
 /// Make the window full screen (a space of its own on macOS), or back.
 @extern(rust, "crate::window", "toggle_fullscreen")
 fn toggle_fullscreen() -> Unit = _
+
+/// Which Option keys type as Alt (ESC before the key) rather than
+/// composing characters: 0 neither, 1 both, 2 the left, 3 the right. macOS
+/// only; elsewhere Alt is always Alt.
+@extern(rust, "crate::window", "set_option_as_alt")
+fn set_option_as_alt(mode: Int) -> Unit = _
+
+/// Whether the system shows its dark appearance; THEME events follow changes.
+@extern(rust, "crate::window", "dark")
+fn dark() -> Bool = _
 
 /// Fill what a frame doesn't cover with this colour (0..1 each): the edge a
 /// window being resized uncovers before the program draws for its new size.
