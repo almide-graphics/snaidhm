@@ -162,6 +162,12 @@ struct App {
     close_requested: bool,
     /// Set by a resize, cleared by the `resized()` that reports it.
     resized: bool,
+    /// The view's size, physical pixels: what the surface is configured to
+    /// and the cursor's position is measured in. Kept from the last
+    /// `Resized`, which reports the view's frame — `inner_size` on macOS is
+    /// the window's content rect, which in full screen still leaves out a
+    /// title bar that is no longer there, so the view is taller than it says.
+    size: (u32, u32),
     /// Last cursor position, logical pixels.
     cursor: (f64, f64),
     events: VecDeque<Input>,
@@ -246,6 +252,7 @@ impl ApplicationHandler for App {
             }
         };
         let size = window.inner_size();
+        self.size = (size.width, size.height);
         if !crate::gpu::attach_surface(window.clone().into(), size.width, size.height) {
             self.failed = true;
             return;
@@ -264,6 +271,7 @@ impl ApplicationHandler for App {
             // its new physical size, so this one arm covers both.
             WindowEvent::Resized(size) => {
                 crate::gpu::resize_surface(size.width, size.height);
+                self.size = (size.width, size.height);
                 self.resized = true;
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -843,12 +851,12 @@ pub fn resized() -> bool {
 
 /// Width of the drawable area in physical pixels, the size render targets are.
 pub fn width() -> i64 {
-    with_host(0, |host| host.app.window.as_ref().map_or(0, |w| w.inner_size().width as i64))
+    with_host(0, |host| if host.app.window.is_some() { host.app.size.0 as i64 } else { 0 })
 }
 
 /// Height of the drawable area in physical pixels.
 pub fn height() -> i64 {
-    with_host(0, |host| host.app.window.as_ref().map_or(0, |w| w.inner_size().height as i64))
+    with_host(0, |host| if host.app.window.is_some() { host.app.size.1 as i64 } else { 0 })
 }
 
 /// The kind of the next queued input, which the `event_*` accessors then
