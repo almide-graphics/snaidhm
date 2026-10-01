@@ -48,6 +48,23 @@ fn select(id: Int) -> Unit = _
 @extern(rust, "crate::window", "current")
 fn current() -> Int = _
 
+/// Where the window is: the top left of its frame, in logical pixels from
+/// the top left of the main display. (0, 0) where the platform doesn't say.
+@extern(rust, "crate::window", "x")
+fn x() -> Float = _
+
+@extern(rust, "crate::window", "y")
+fn y() -> Float = _
+
+/// Move the window's frame to (`x`, `y`) as `x` and `y` give it — unless
+/// nothing of it would show on a display.
+@extern(rust, "crate::window", "set_position")
+fn set_position(x: Float, y: Float) -> Unit = _
+
+/// Size the window's drawable area to `width` x `height` logical pixels.
+@extern(rust, "crate::window", "set_size")
+fn set_size(width: Float, height: Float) -> Unit = _
+
 /// The window the current input happened in.
 @extern(rust, "crate::window", "event_window")
 fn event_window() -> Int = _

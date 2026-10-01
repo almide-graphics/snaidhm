@@ -805,6 +805,78 @@ pub fn minimize() {
     });
 }
 
+/// Where the window is on the screen: the top left of its frame, title bar
+/// included, in logical pixels from the top left of the main display (x,
+/// then y). (0, 0) when the platform doesn't say (Wayland).
+pub fn x() -> f64 {
+    with_host(0.0, |host| frame_at(host).0)
+}
+
+pub fn y() -> f64 {
+    with_host(0.0, |host| frame_at(host).1)
+}
+
+fn frame_at(host: &Host) -> (f64, f64) {
+    host.app.cur_window().and_then(|w| {
+        let s = w.scale_factor();
+        w.outer_position().ok().map(|p| (p.x as f64 / s, p.y as f64 / s))
+    }).unwrap_or((0.0, 0.0))
+}
+
+/// Move the window so the top left of its frame is at (`x`, `y`), logical
+/// pixels as `x` and `y` give them. Where nothing of it would show on a
+/// display, it stays where it is.
+pub fn set_position(x: f64, y: f64) {
+    with_host((), |host| {
+        if let Some(w) = host.app.cur_window() {
+            let screens = displays(w);
+            // A title bar's grip on some display: not off the edge of one
+            // that is no longer there.
+            let visible = screens.is_empty() || screens.iter().any(|&(sx, sy, sw, sh)| {
+                x + 80.0 > sx && x < sx + sw - 80.0 && y >= sy - 1.0 && y < sy + sh - 40.0
+            });
+            if visible {
+                w.set_outer_position(LogicalPosition::new(x, y));
+            }
+        }
+    })
+}
+
+/// The displays as (x, y, width, height), logical pixels from the top left
+/// of the main display; none when the platform doesn't say.
+fn displays(w: &Window) -> Vec<(f64, f64, f64, f64)> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let _ = w;
+        layer::screens()
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        w.available_monitors().map(|m| {
+            let s = m.scale_factor();
+            (m.position().x as f64 / s, m.position().y as f64 / s, m.size().width as f64 / s, m.size().height as f64 / s)
+        }).collect()
+    }
+}
+
+/// Size the window's drawable area to `width` x `height` logical pixels.
+/// `resized()` reports it, as for a resize by the user.
+pub fn set_size(width: f64, height: f64) {
+    with_host((), |host| {
+        let id = host.app.current;
+        let Some(w) = host.app.cur_window().cloned() else { return };
+        let asked = w.request_inner_size(LogicalSize::new(width.max(1.0), height.max(1.0)));
+        // Done at once on some platforms, without a `Resized` to say so
+        // (macOS): the size it has now is the one to draw at.
+        let size = asked.unwrap_or_else(|| w.inner_size());
+        crate::gpu::resize_surface(id, size.width, size.height);
+        if let Some(win) = host.app.win_mut(id) {
+            win.size = (size.width, size.height);
+            win.resized = true;
+        }
+    })
+}
+
 /// Set the window's title.
 pub fn set_title(title: &str) {
     with_host((), |host| {
@@ -993,6 +1065,28 @@ mod layer {
             let imp: unsafe extern "C" fn(Id, Id, Id) -> usize = should_terminate;
             class_replaceMethod(object_getClass(delegate), sel(c"applicationShouldTerminate:"), imp as *const c_void, c"Q@:@".as_ptr());
             true
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Rect { x: f64, y: f64, w: f64, h: f64 }
+
+    /// Every display's frame, from `NSScreen.screens`, turned to top-left
+    /// coordinates: AppKit's run up from the bottom of the main display (the
+    /// first). A rect comes back in registers on arm64, so plain
+    /// `objc_msgSend` returns it.
+    #[cfg(target_arch = "aarch64")]
+    pub fn screens() -> Vec<(f64, f64, f64, f64)> {
+        unsafe {
+            let all = send(objc_getClass(c"NSScreen".as_ptr()), c"screens");
+            if all.is_null() {
+                return Vec::new();
+            }
+            let frame: unsafe extern "C" fn(Id, Id) -> Rect = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let rects: Vec<Rect> = (0..count(all)).map(|i| frame(send_index(all, c"objectAtIndex:", i), sel(c"frame"))).collect();
+            let Some(main) = rects.first().copied() else { return Vec::new() };
+            rects.iter().map(|r| (r.x, main.h - (r.y + r.h), r.w, r.h)).collect()
         }
     }
 
