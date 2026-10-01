@@ -464,6 +464,8 @@ mod watch {
             let mut p = [0i32; 2];
             unsafe { libc::pipe(p.as_mut_ptr()) };
             for fd in p {
+                // Not inherited by the programs the window starts.
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
                 unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
             }
             let w: &'static Watch = Box::leak(Box::new(Watch {
@@ -528,6 +530,18 @@ mod watch {
         w.state.lock().unwrap().armed = false;
         unsafe { libc::write(w.pipe.1, [1u8].as_ptr() as *const _, 1) };
     }
+}
+
+/// Asked, when the app is told to quit, whether the program must be asked
+/// first. Answering is the program's native code (it knows, say, whether a
+/// shell is running something); asked synchronously on the main thread, as
+/// the quit can't wait for the program's loop — a logout or restart waits
+/// on the answer. Without one, every quit is asked about.
+static QUIT_CHECK: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
+
+/// Register the quit check (see `QUIT_CHECK`); the first registered stays.
+pub fn set_quit_check(needs_asking: fn() -> bool) {
+    let _ = QUIT_CHECK.set(needs_asking);
 }
 
 /// Take back a close the user asked for (`pump` and the waits returned
@@ -664,10 +678,15 @@ mod layer {
     /// close request.
     pub static QUIT_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-    /// NSTerminateCancel.
+    /// NSTerminateCancel, NSTerminateNow.
     const TERMINATE_CANCEL: usize = 0;
+    const TERMINATE_NOW: usize = 1;
 
     unsafe extern "C" fn should_terminate(_this: Id, _cmd: Id, _sender: Id) -> usize {
+        // Nothing to ask about: quit at once, so a logout or restart goes on.
+        if super::QUIT_CHECK.get().is_some_and(|needs_asking| !needs_asking()) {
+            return TERMINATE_NOW;
+        }
         QUIT_ASKED.store(true, std::sync::atomic::Ordering::Release);
         if let Some(proxy) = super::PROXY.get() {
             let _ = proxy.send_event(());
