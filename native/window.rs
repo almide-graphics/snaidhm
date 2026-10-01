@@ -75,6 +75,7 @@ const KEY: i64 = 6;
 const COMPOSE: i64 = 7;
 const DROP: i64 = 8;
 const THEME: i64 = 9;
+const FOCUS: i64 = 10;
 
 /// Modifier bits, as `event_mods` returns them.
 const MOD_SHIFT: i64 = 1;
@@ -170,6 +171,8 @@ struct App {
     mods: i64,
     /// Which Option keys are down: 1 the left, 2 the right.
     alt_keys: i64,
+    /// Whether the window has the keyboard focus.
+    focused: bool,
     /// Which Option keys type as Alt (see `set_option_as_alt`): 0 none,
     /// 1 both, 2 the left, 3 the right.
     option_as_alt: i64,
@@ -329,6 +332,11 @@ impl ApplicationHandler for App {
                 self.mods = mod_bits(m.state());
                 use winit::keyboard::ModifiersKeyState::Pressed;
                 self.alt_keys = (if m.lalt_state() == Pressed { 1 } else { 0 }) | (if m.ralt_state() == Pressed { 2 } else { 0 });
+            }
+            WindowEvent::Focused(on) => {
+                self.focused = on;
+                let input = self.at_cursor(FOCUS, if on { 1 } else { 0 });
+                self.push(input);
             }
             WindowEvent::ThemeChanged(_) => {
                 let input = self.at_cursor(THEME, 0);
@@ -583,6 +591,11 @@ pub fn set_option_as_alt(mode: i64) {
             });
         }
     });
+}
+
+/// Whether the window has the keyboard focus; FOCUS events follow changes.
+pub fn focused() -> bool {
+    with_host(false, |host| host.app.focused)
 }
 
 /// Whether the system shows its dark appearance (macOS's, or the desktop's

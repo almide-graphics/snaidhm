@@ -81,6 +81,8 @@ let COMPOSE = 7
 let DROP = 8
 /// The system's appearance changed between light and dark: see `dark`.
 let THEME = 9
+/// The window gained (`event_code` 1) or lost (0) the keyboard focus.
+let FOCUS = 10
 
 let KEY_BACKSPACE = 8
 let KEY_TAB = 9
@@ -169,6 +171,10 @@ fn toggle_fullscreen() -> Unit = _
 /// only; elsewhere Alt is always Alt.
 @extern(rust, "crate::window", "set_option_as_alt")
 fn set_option_as_alt(mode: Int) -> Unit = _
+
+/// Whether the window has the keyboard focus; FOCUS events follow changes.
+@extern(rust, "crate::window", "focused")
+fn focused() -> Bool = _
 
 /// Whether the system shows its dark appearance; THEME events follow changes.
 @extern(rust, "crate::window", "dark")
