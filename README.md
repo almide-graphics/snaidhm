@@ -1,3 +1,5 @@
+> **Moved.** snaidhm is now developed in [almide-graphics/ceangal2](https://github.com/almide-graphics/ceangal2) (`snaidhm/`), rebuilt around one host ABI with per-context GPU state and a WebGPU / wgpu host for every platform. This repository is archived and kept for reference; existing git dependencies keep working.
+
 # snaidhm
 
 > Irish: *snaidhm* — knot. As in Celtic knots: interleaving paths with no beginning and no end.
