@@ -511,6 +511,17 @@ impl Host {
                 if presented.contains(&w.id) || since.elapsed() >= SHOW_DEADLINE {
                     w.window.set_visible(true);
                     w.hidden_since = None;
+                    // Shown, a window too big for the screen is made to fit
+                    // it, and macOS sends no `Resized` for that: the surface
+                    // kept the size asked for, and its top went under the
+                    // title bar. Full screen isn't shown this way, so
+                    // `inner_size` is the view's size here.
+                    let size = w.window.inner_size();
+                    if (size.width, size.height) != w.size {
+                        crate::gpu::resize_surface(w.id, size.width, size.height);
+                        w.size = (size.width, size.height);
+                        w.resized = true;
+                    }
                 }
             }
         }
@@ -966,6 +977,12 @@ pub fn toggle_fullscreen() {
             w.set_fullscreen(if w.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
         }
     });
+}
+
+/// Whether the window fills the screen, however it came to: by
+/// `toggle_fullscreen`, the green button or the menu.
+pub fn is_fullscreen() -> bool {
+    with_host(false, |host| host.app.cur_window().is_some_and(|w| w.fullscreen().is_some()))
 }
 
 /// Fill what a frame doesn't cover with this colour (0..1 each) — the edge a
