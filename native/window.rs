@@ -979,6 +979,12 @@ pub fn toggle_fullscreen() {
     });
 }
 
+/// Whether the window fills the screen, however it came to: by
+/// `toggle_fullscreen`, the green button or the menu.
+pub fn is_fullscreen() -> bool {
+    with_host(false, |host| host.app.cur_window().is_some_and(|w| w.fullscreen().is_some()))
+}
+
 /// Fill what a frame doesn't cover with this colour (0..1 each) — the edge a
 /// window being resized uncovers before the program draws for the new size.
 /// macOS only; elsewhere nothing happens.

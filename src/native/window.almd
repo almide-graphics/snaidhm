@@ -250,6 +250,10 @@ let POINTER_ROW_RESIZE = 4
 @extern(rust, "crate::window", "toggle_fullscreen")
 fn toggle_fullscreen() -> Unit = _
 
+/// Whether the window is full screen, however it came to be.
+@extern(rust, "crate::window", "is_fullscreen")
+fn is_fullscreen() -> Bool = _
+
 /// Which Option keys type as Alt (ESC before the key) rather than
 /// composing characters: 0 neither, 1 both, 2 the left, 3 the right. macOS
 /// only; elsewhere Alt is always Alt.
