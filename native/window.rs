@@ -511,6 +511,17 @@ impl Host {
                 if presented.contains(&w.id) || since.elapsed() >= SHOW_DEADLINE {
                     w.window.set_visible(true);
                     w.hidden_since = None;
+                    // Shown, a window too big for the screen is made to fit
+                    // it, and macOS sends no `Resized` for that: the surface
+                    // kept the size asked for, and its top went under the
+                    // title bar. Full screen isn't shown this way, so
+                    // `inner_size` is the view's size here.
+                    let size = w.window.inner_size();
+                    if (size.width, size.height) != w.size {
+                        crate::gpu::resize_surface(w.id, size.width, size.height);
+                        w.size = (size.width, size.height);
+                        w.resized = true;
+                    }
                 }
             }
         }
