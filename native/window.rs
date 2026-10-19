@@ -348,6 +348,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 crate::gpu::resize_surface(id, size.width, size.height);
                 if let Some(w) = self.win_mut(id) {
+                    trace_fit(format!("[resized] {} event {:?} view {:?} surface was {:?}", now_hms(), (size.width, size.height), view_pixels(&w.window), w.size));
                     w.size = (size.width, size.height);
                     w.resized = true;
                 }
@@ -511,20 +512,10 @@ impl Host {
                 if presented.contains(&w.id) || since.elapsed() >= SHOW_DEADLINE {
                     w.window.set_visible(true);
                     w.hidden_since = None;
-                    // Shown, a window too big for the screen is made to fit
-                    // it, and macOS sends no `Resized` for that: the surface
-                    // kept the size asked for, and its top went under the
-                    // title bar. Full screen isn't shown this way, so
-                    // `inner_size` is the view's size here.
-                    let size = w.window.inner_size();
-                    if (size.width, size.height) != w.size {
-                        crate::gpu::resize_surface(w.id, size.width, size.height);
-                        w.size = (size.width, size.height);
-                        w.resized = true;
-                    }
                 }
             }
         }
+        self.app.fit_surfaces();
         if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(timeout, &mut self.app) {
             return false;
         }
@@ -543,8 +534,61 @@ impl Host {
             }
             self.take_injected();
         }
+        self.app.fit_surfaces();
         !self.app.close_requested
     }
+}
+
+impl App {
+    /// Every surface sized to its view as the view is now. macOS changes a
+    /// view's size without a `Resized` in more ways than can be listed (a
+    /// window shown smaller than asked, one fitted under the menu bar, full
+    /// screen left or entered, a move to another display), and `inner_size`
+    /// is wrong in full screen. A surface left at another size draws with
+    /// its top under the title bar, rows off from the pointer. So no event
+    /// is trusted: each pump reads the view's own bounds, in pixels.
+    fn fit_surfaces(&mut self) {
+        for w in &mut self.wins {
+            let Some(size) = view_pixels(&w.window) else { continue };
+            if size != w.size && size.0 > 0 && size.1 > 0 {
+                trace_fit(format!("[fit] {} surface {:?} -> view {:?}", now_hms(), w.size, size));
+                crate::gpu::resize_surface(w.id, size.0, size.1);
+                w.size = size;
+                w.resized = true;
+            }
+        }
+    }
+}
+
+/// A line of the size trace, when SNAIDHM_TRACE_FIT is set: to stderr for
+/// "1", else appended to the file it names (an app opened from the Finder
+/// has no stderr to read).
+fn trace_fit(line: String) {
+    let Some(to) = std::env::var_os("SNAIDHM_TRACE_FIT") else { return };
+    if to == "1" {
+        eprintln!("{line}");
+    } else if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&to) {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Wall-clock time of day (UTC), for a trace line.
+fn now_hms() -> String {
+    let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    format!("{:02}:{:02}:{:02}", s / 3600 % 24, s / 60 % 60, s % 60)
+}
+
+/// The view's size in physical pixels, from its bounds: what the cursor's
+/// position is measured against.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn view_pixels(window: &Window) -> Option<(u32, u32)> {
+    ns_view(window).and_then(layer::backing_size)
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn view_pixels(_window: &Window) -> Option<(u32, u32)> {
+    None
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -1148,6 +1192,18 @@ mod layer {
             let rects: Vec<Rect> = (0..count(all)).map(|i| frame(send_index(all, c"objectAtIndex:", i), sel(c"frame"))).collect();
             let Some(main) = rects.first().copied() else { return Vec::new() };
             rects.iter().map(|r| (r.x, main.h - (r.y + r.h), r.w, r.h)).collect()
+        }
+    }
+
+    /// `view`'s bounds in backing (physical) pixels. A rect goes and comes
+    /// back in registers on arm64, so plain `objc_msgSend` takes it.
+    #[cfg(target_arch = "aarch64")]
+    pub fn backing_size(view: Id) -> Option<(u32, u32)> {
+        unsafe {
+            let bounds: unsafe extern "C" fn(Id, Id) -> Rect = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let to_backing: unsafe extern "C" fn(Id, Id, Rect) -> Rect = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let r = to_backing(view, sel(c"convertRectToBacking:"), bounds(view, sel(c"bounds")));
+            (r.w.is_finite() && r.h.is_finite()).then(|| (r.w.round().max(0.0) as u32, r.h.round().max(0.0) as u32))
         }
     }
 
