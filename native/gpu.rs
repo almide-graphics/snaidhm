@@ -1743,12 +1743,14 @@ pub(crate) fn attach_surface(id: i64, target: wgpu::SurfaceTarget<'static>, widt
     true
 }
 
-/// Show frames as soon as they are drawn (`on`), or in step with the display
-/// (the default). For a program answering keys — a terminal, an editor — the
-/// display's pace adds up to a frame or two between a key and what it shows.
-/// On (where the surface allows it): frames are not queued behind the
-/// display's refresh, and at most one waits to be shown. On macOS the window
-/// server composites every window, so nothing tears.
+/// Show frames with the least wait (`on`), or at the display's ease (the
+/// default). For a program answering keys — a terminal, an editor — frames
+/// queued behind the display's refresh add a frame or two between a key and
+/// what it shows. On: at most one frame waits to be shown, so a new one is
+/// never behind an older one. Frames keep step with the display either way:
+/// shown out of step (`PresentMode::Immediate`) they tore — a window drawn
+/// straight to the display, as a full-screen one is on macOS, changed part
+/// way down the screen, and text scrolling in looked like a wave.
 pub fn set_low_latency(on: bool) {
     with((), |s| {
         s.low_latency = on;
@@ -1761,11 +1763,10 @@ pub fn set_low_latency(on: bool) {
 }
 
 /// Configure `screen` for low latency (`on`, see `set_low_latency`) or the
-/// display's pace.
-fn configure_latency(adapter: &wgpu::Adapter, device: &wgpu::Device, screen: &mut Screen, on: bool) {
-    let modes = screen.surface.get_capabilities(adapter).present_modes;
-    let immediate = on && modes.contains(&wgpu::PresentMode::Immediate);
-    screen.config.present_mode = if immediate { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::AutoVsync };
+/// display's ease: in step with the display both ways, one frame or two
+/// allowed to wait.
+fn configure_latency(_adapter: &wgpu::Adapter, device: &wgpu::Device, screen: &mut Screen, on: bool) {
+    screen.config.present_mode = wgpu::PresentMode::AutoVsync;
     screen.config.desired_maximum_frame_latency = if on { 1 } else { 2 };
     screen.frame = None;
     screen.surface.configure(device, &screen.config);
