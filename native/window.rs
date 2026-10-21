@@ -208,6 +208,8 @@ struct App {
     /// Which Option keys type as Alt (see `set_option_as_alt`): 0 none,
     /// 1 both, 2 the left, 3 the right.
     option_as_alt: i64,
+    /// When an input was last queued (see `Host::pump`).
+    last_input: Option<Instant>,
 }
 
 fn mod_bits(m: ModifiersState) -> i64 {
@@ -245,6 +247,7 @@ impl App {
         if self.events.len() >= QUEUE_LIMIT {
             self.events.pop_front();
         }
+        self.last_input = Some(Instant::now());
         self.events.push_back(input);
     }
 
@@ -516,6 +519,7 @@ impl Host {
             }
         }
         self.app.fit_surfaces();
+        let queued = self.app.events.len();
         if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(timeout, &mut self.app) {
             return false;
         }
@@ -527,8 +531,17 @@ impl Host {
         // Once more without waiting, when the wait had one: on macOS winit
         // can hold an input that arrived while it woke for something else (a
         // PTY's output, the timeout) until the next event, and a key held down
-        // showed up in pairs, one repeat late.
-        if timeout != Some(Duration::ZERO) {
+        // showed up in pairs, one repeat late. Not when the wait ended with
+        // an input — the loop ran on past it to the next wait, and holds
+        // nothing — and not while no input has come for a while: a pump on
+        // macOS costs a few ms (`[NSApp run]` entered and stopped, with an
+        // event posted to stop it), and a terminal streaming output woke
+        // twenty times a second with nothing typed, so the second pump was
+        // most of what the output cost. The first key after a pause may then
+        // wait for the next wake, at most a frame; the keys after it don't.
+        let held_maybe = self.app.events.len() == queued
+            && self.app.last_input.is_some_and(|t| t.elapsed() < RECENT_INPUT);
+        if timeout != Some(Duration::ZERO) && held_maybe {
             if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(Some(Duration::ZERO), &mut self.app) {
                 return false;
             }
@@ -749,6 +762,10 @@ pub fn wait_fds(fds: &[i64], timeout_ms: i64) -> bool {
     watch::disarm();
     alive
 }
+
+/// How long after an input the second pump of a wait goes on being made
+/// (see `Host::pump`).
+const RECENT_INPUT: Duration = Duration::from_secs(2);
 
 /// Wakes the event loop from other threads.
 static PROXY: std::sync::OnceLock<EventLoopProxy<()>> = std::sync::OnceLock::new();

@@ -105,6 +105,7 @@ const ARGS = {
   finish_and_submit: [dev, encoder],
   push_f32: [1.0],
   push_u32: [1n],
+  push_quad: [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
   flush_to_buffer: [dev, buffer],
   flush_to_texture: [dev, texture, 0n, 0n, 1n, 1n],
   add_buffer_binding: [buffer],

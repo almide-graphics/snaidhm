@@ -181,6 +181,11 @@ export function createImports(canvas) {
     begin_data() { _dataChunks = []; _dataIsF32 = []; },
     push_f32(v) { _dataChunks.push(v); _dataIsF32.push(true); },
     push_u32(v) { _dataChunks.push(N(v)); _dataIsF32.push(false); },
+    push_quad(x0, y0, x1, y1, u0, v0, u1, v1, r, g, b, a) {
+      for (const [x, y, u, v] of [[x0, y0, u0, v0], [x1, y0, u1, v0], [x0, y1, u0, v1], [x0, y1, u0, v1], [x1, y0, u1, v0], [x1, y1, u1, v1]]) {
+        _dataChunks.push(x, y, u, v, r, g, b, a); _dataIsF32.push(true, true, true, true, true, true, true, true);
+      }
+    },
     flush_to_buffer(deviceId, bufferId) {
       const buf = new ArrayBuffer(_dataChunks.length * 4);
       const f32 = new Float32Array(buf);
