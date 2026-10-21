@@ -779,6 +779,22 @@ pub fn push_u32(value: i64) {
     with((), |s| s.data.push(value as u32))
 }
 
+/// Six vertices of 8 floats for one quad (see `src/web/gpu.almd`): one lock
+/// and one bounds check for what `push_f32` did 48 times.
+#[allow(clippy::too_many_arguments)]
+pub fn push_quad(x0: f64, y0: f64, x1: f64, y1: f64, u0: f64, v0: f64, u1: f64, v1: f64, r: f64, g: f64, b: f64, a: f64) {
+    let (x0, y0, x1, y1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
+    let (u0, v0, u1, v1) = (u0 as f32, v0 as f32, u1 as f32, v1 as f32);
+    let (r, g, b, a) = (r as f32, g as f32, b as f32, a as f32);
+    let verts = [[x0, y0, u0, v0], [x1, y0, u1, v0], [x0, y1, u0, v1], [x0, y1, u0, v1], [x1, y0, u1, v0], [x1, y1, u1, v1]];
+    with((), |s| {
+        s.data.reserve(48);
+        for [x, y, u, v] in verts {
+            s.data.extend([x, y, u, v, r, g, b, a].map(f32::to_bits));
+        }
+    })
+}
+
 /// Write the staged pixels into a rectangle of `texture` (see the contract in
 /// `src/web/gpu.almd`). Skipped, and the staging cleared, when fewer pixels
 /// were staged than the rectangle holds — the same as the JS host.
