@@ -725,6 +725,18 @@ pub fn event_window() -> i64 {
     with_host(0, |host| host.app.input.win)
 }
 
+/// The refresh rate of the display the current window is on, millihertz;
+/// 0 when the platform doesn't say.
+pub fn refresh_rate() -> i64 {
+    with_host(0, |host| {
+        host.app
+            .cur_window()
+            .and_then(|w| w.current_monitor())
+            .and_then(|m| m.refresh_rate_millihertz())
+            .map_or(0, |mhz| mhz as i64)
+    })
+}
+
 /// The id of the window with the keyboard focus, 0 when none has it.
 pub fn focused_window() -> i64 {
     with_host(0, |host| host.app.wins.iter().find(|w| w.focused).map_or(0, |w| w.id))

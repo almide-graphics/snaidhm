@@ -83,6 +83,12 @@ fn event_window() -> Int = _
 @extern(rust, "crate::window", "focused_window")
 fn focused_window() -> Int = _
 
+/// The refresh rate of the display the current window is on, millihertz
+/// (120000 for 120 Hz); 0 when the platform doesn't say. For a program that
+/// paces its work to the display: a frame a refresh, no more.
+@extern(rust, "crate::window", "refresh_rate")
+fn refresh_rate() -> Int = _
+
 /// End the frame (show what its render passes drew) and process pending events
 /// without waiting. `false` once the window has been asked to close.
 @extern(rust, "crate::window", "pump")
