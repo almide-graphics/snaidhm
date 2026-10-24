@@ -89,6 +89,15 @@ fn focused_window() -> Int = _
 @extern(rust, "crate::window", "refresh_rate")
 fn refresh_rate() -> Int = _
 
+/// Have the display's refresh wake the loop (`on`): each refresh of the
+/// display the window is on then queues a VSYNC input for every window, the
+/// moment to draw what changed, so that the frame is shown at the very next
+/// refresh and never waits behind another. Off while nothing changes, the
+/// loop sleeps. Whether the host can: `false` where it can't, and a program
+/// paces its frames itself.
+@extern(rust, "crate::window", "vsync")
+fn vsync(on: Bool) -> Bool = _
+
 /// End the frame (show what its render passes drew) and process pending events
 /// without waiting. `false` once the window has been asked to close.
 @extern(rust, "crate::window", "pump")
@@ -153,6 +162,10 @@ let FOCUS = 10
 /// A window's close button, while more than one is open; with one, `pump`
 /// and the waits return `false` instead.
 let CLOSE = 11
+/// The display refreshed, while `vsync(true)`: the moment to draw.
+/// `event_code` is how many ms ago, for a program keeping an eye on how
+/// soon after the refresh it is drawing.
+let VSYNC = 12
 
 let KEY_BACKSPACE = 8
 let KEY_TAB = 9

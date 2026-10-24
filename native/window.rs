@@ -86,6 +86,8 @@ const FOCUS: i64 = 10;
 /// A window's close button, while more than one is open (with one, `pump`
 /// and the waits return `false` instead).
 const CLOSE: i64 = 11;
+/// The display refreshed (see `vsync`).
+const VSYNC: i64 = 12;
 
 /// Modifier bits, as `event_mods` returns them.
 const MOD_SHIFT: i64 = 1;
@@ -509,7 +511,9 @@ impl Host {
         if !self.quit_routed {
             self.quit_routed = layer::ask_before_quit();
         }
+        let t_pump = Instant::now();
         let presented = crate::gpu::present_frame();
+        let t_presented = t_pump.elapsed();
         for w in &mut self.app.wins {
             if let Some(since) = w.hidden_since {
                 if presented.contains(&w.id) || since.elapsed() >= SHOW_DEADLINE {
@@ -547,8 +551,28 @@ impl Host {
             }
             self.take_injected();
         }
+        if tracing() {
+            let age = vsync::peek();
+            eprintln!("pump present {:?} total {:?} timeout {:?} vsync_age {:?}", t_presented, t_pump.elapsed(), timeout, age);
+        }
+        self.take_vsync();
         self.app.fit_surfaces();
         !self.app.close_requested
+    }
+
+    /// A refresh the display link saw since the last pump: a VSYNC input for
+    /// every window, one at a time — a program that fell behind finds one
+    /// waiting, not a backlog. Not through `push`: a refresh is not an input
+    /// a key could be held behind.
+    fn take_vsync(&mut self) {
+        let Some(age) = vsync::take() else { return };
+        let code = age.as_millis().min(i64::MAX as u128) as i64;
+        for w in &self.app.wins {
+            let id = w.id;
+            if !self.app.events.iter().any(|e| e.kind == VSYNC && e.win == id) {
+                self.app.events.push_back(Input { win: id, kind: VSYNC, code, ..Input::default() });
+            }
+        }
     }
 }
 
@@ -737,6 +761,28 @@ pub fn refresh_rate() -> i64 {
     })
 }
 
+/// Have the display's refresh wake the loop (`on`), or not: while on, each
+/// refresh of the display the current window is on queues a VSYNC input for
+/// every window, the moment to draw what changed so that the frame is shown
+/// at the next refresh and never queued behind another. Off when nothing
+/// changes, the loop sleeps. Whether the host can: on macOS (a
+/// CVDisplayLink); elsewhere `false`, and frames pace themselves.
+pub fn vsync(on: bool) -> bool {
+    with_host(false, |host| {
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::MonitorHandleExtMacOS;
+            let display = host.app.cur_window().and_then(|w| w.current_monitor()).map_or(0, |m| m.native_id());
+            vsync::set(on, display)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (on, host);
+            false
+        }
+    })
+}
+
 /// The id of the window with the keyboard focus, 0 when none has it.
 pub fn focused_window() -> i64 {
     with_host(0, |host| host.app.wins.iter().find(|w| w.focused).map_or(0, |w| w.id))
@@ -778,6 +824,12 @@ pub fn wait_fds(fds: &[i64], timeout_ms: i64) -> bool {
 /// How long after an input the second pump of a wait goes on being made
 /// (see `Host::pump`).
 const RECENT_INPUT: Duration = Duration::from_secs(2);
+
+/// Whether SNAIDHM_TRACE asks for timing lines on stderr.
+pub(crate) fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SNAIDHM_TRACE").is_some())
+}
 
 /// Wakes the event loop from other threads.
 static PROXY: std::sync::OnceLock<EventLoopProxy<()>> = std::sync::OnceLock::new();
@@ -1340,4 +1392,154 @@ pub fn set_ime_area(x: f64, y: f64, w: f64, h: f64) {
             win.set_ime_cursor_area(LogicalPosition::new(x, y), LogicalSize::new(w.max(1.0), h.max(1.0)));
         }
     })
+}
+
+/// The display's refresh, as a CVDisplayLink: its callback, on CoreVideo's
+/// thread once per refresh, notes it and wakes the event loop, and `pump`
+/// turns the note into VSYNC inputs. Started and stopped only from the main
+/// thread: CoreVideo stops and starts the link itself there when the
+/// display reconfigures (sleep, a mode change), and a start from another
+/// thread racing that stop leaves `CVDisplayLinkStop` waiting forever (as
+/// Ghostty found, ghostty-org/ghostty#14150). Bound to the display the
+/// window is on, so a window on a 60 Hz display is paced at 60 Hz.
+#[cfg(target_os = "macos")]
+mod vsync {
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    type Link = *mut c_void;
+    type Callback = extern "C" fn(Link, *const c_void, *const c_void, u64, *mut u64, *mut c_void) -> i32;
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    extern "C" {
+        fn CVDisplayLinkCreateWithActiveCGDisplays(out: *mut Link) -> i32;
+        fn CVDisplayLinkSetOutputCallback(link: Link, callback: Callback, ctx: *mut c_void) -> i32;
+        fn CVDisplayLinkSetCurrentCGDisplay(link: Link, display: u32) -> i32;
+        fn CVDisplayLinkStart(link: Link) -> i32;
+        fn CVDisplayLinkStop(link: Link) -> i32;
+    }
+
+    struct State { link: Link, running: bool, display: u32 }
+    // The link is used from the main thread only; the pointer is just a handle.
+    unsafe impl Send for State {}
+
+    static STATE: Mutex<Option<State>> = Mutex::new(None);
+    /// When the latest refresh came, until `take` has it.
+    static DUE: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// A CVTimeStamp's fields, by offset: version u32, videoTimeScale i32,
+    /// videoTime i64, hostTime u64, rateScalar f64, videoRefreshPeriod i64.
+    fn stamp(p: *const c_void) -> Option<(u64, f64)> {
+        if p.is_null() {
+            return None;
+        }
+        let at = |off: usize| unsafe { p.cast::<u8>().add(off) };
+        let scale = unsafe { *at(4).cast::<i32>() };
+        let host = unsafe { *at(16).cast::<u64>() };
+        let refresh = unsafe { *at(32).cast::<i64>() };
+        (scale > 0).then(|| (host, refresh as f64 / scale as f64))
+    }
+
+    /// Seconds per unit of `mach_absolute_time`.
+    fn host_unit() -> f64 {
+        static UNIT: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        *UNIT.get_or_init(|| {
+            #[repr(C)]
+            struct Timebase { numer: u32, denom: u32 }
+            extern "C" {
+                fn mach_timebase_info(info: *mut Timebase) -> i32;
+            }
+            let mut tb = Timebase { numer: 1, denom: 1 };
+            unsafe { mach_timebase_info(&mut tb) };
+            tb.numer as f64 / tb.denom.max(1) as f64 / 1e9
+        })
+    }
+
+    /// How long after CoreVideo's callback the tick is passed on, seconds.
+    /// The display gives a frame's buffer back at a fixed moment of its
+    /// cycle, and a frame begun before that moment blocks the thread until
+    /// it — 5 ms of every 8 at 120 Hz, in which nothing is read and no key
+    /// is taken. So the tick is held until that moment: held longer each
+    /// time a frame still waited, eased back a little each time it didn't,
+    /// and wrapped to the next cycle when it would reach past this one (a
+    /// frame that waits past the next callback was going to be shown a
+    /// refresh later anyway). Kept while the link is stopped and started:
+    /// the moment is the display's, not the scroll's.
+    static HOLD: Mutex<f64> = Mutex::new(0.0);
+
+    extern "C" fn tick(_: Link, now: *const c_void, output: *const c_void, _: u64, _: *mut u64, _: *mut c_void) -> i32 {
+        let period = match (stamp(now), stamp(output)) {
+            (Some((_, period)), _) if period > 0.0 => period,
+            _ => 1.0 / 60.0,
+        };
+        let waited = crate::gpu::take_acquire_wait().as_secs_f64();
+        let hold = {
+            let mut h = HOLD.lock().unwrap();
+            if waited > 0.0005 {
+                *h += waited - 0.0003;
+            } else {
+                *h = (*h - 0.00002).max(0.0);
+            }
+            if *h > period - 0.0015 {
+                *h = (*h - period).max(0.0);
+            }
+            *h
+        };
+        if hold > 0.0 {
+            std::thread::sleep(Duration::from_secs_f64(hold));
+        }
+        if super::tracing() {
+            let lead = match (stamp(now), stamp(output)) {
+                (Some((n, _)), Some((o, _))) => (o as f64 - n as f64) * host_unit() * 1000.0,
+                _ => 0.0,
+            };
+            eprintln!("tick output in {lead:.2} ms, held {:.2} ms, frame waited {:.2} ms", hold * 1000.0, waited * 1000.0);
+        }
+        *DUE.lock().unwrap() = Some(Instant::now());
+        if let Some(proxy) = super::PROXY.get() {
+            let _ = proxy.send_event(());
+        }
+        0
+    }
+
+    /// How long ago the refresh not yet taken came, if one is waiting.
+    pub fn peek() -> Option<Duration> {
+        DUE.lock().unwrap().map(|at| at.elapsed())
+    }
+
+    /// How long ago the refresh since the last call came, if one did.
+    pub fn take() -> Option<Duration> {
+        DUE.lock().unwrap().take().map(|at| at.elapsed())
+    }
+
+    /// Run the link (`on`) on `display` (0: leave it where it is), or stop
+    /// it. Whether a link could be made.
+    pub fn set(on: bool, display: u32) -> bool {
+        let mut guard = STATE.lock().unwrap();
+        if guard.is_none() {
+            let mut link: Link = std::ptr::null_mut();
+            if unsafe { CVDisplayLinkCreateWithActiveCGDisplays(&mut link) } != 0 || link.is_null() {
+                return false;
+            }
+            unsafe { CVDisplayLinkSetOutputCallback(link, tick, std::ptr::null_mut()) };
+            *guard = Some(State { link, running: false, display: 0 });
+        }
+        let st = guard.as_mut().expect("made above");
+        if on && display != 0 && display != st.display {
+            // Retargeting restarts a running link itself.
+            unsafe { CVDisplayLinkSetCurrentCGDisplay(st.link, display) };
+            st.display = display;
+        }
+        if on != st.running {
+            let r = if on { unsafe { CVDisplayLinkStart(st.link) } } else { unsafe { CVDisplayLinkStop(st.link) } };
+            if r == 0 {
+                st.running = on;
+            }
+        }
+        if !on {
+            *DUE.lock().unwrap() = None;
+        }
+        true
+    }
 }

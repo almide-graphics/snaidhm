@@ -19,7 +19,12 @@ rust = true
 # is zeroed through a mapping, not by a GPU clear — on Metal the first
 # transfer command of a process holds ~46 MB of driver memory.
 wgpu = { git = "https://github.com/almide-graphics/wgpu.git", rev = "da6a54b2391cc1b9c0587ad43d0c43b7bad6caae" }
-winit = "0.30"
+# winit 0.30.13 with one change, on this repository's `winit-pump-queue`
+# branch: on macOS its `pump_app_events` takes events straight off the
+# queue instead of entering `[NSApp run]` and stopping it again, which
+# costs about 8 ms a call on macOS 26 — a window could not pump once a
+# frame at 120 Hz, and every wake for a file paid it.
+winit = { git = "https://github.com/almide-graphics/snaidhm.git", rev = "91a5ac9b5441f3b390ca39c2ce700365ddee1d3d" }
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 libc = "0.2"

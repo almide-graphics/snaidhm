@@ -499,6 +499,7 @@ impl GpuState {
             return true;
         }
         let device = self.device.as_ref().expect("device checked by `with`");
+        let t_acq = std::time::Instant::now();
         let texture = match screen.surface.get_current_texture() {
             Ok(t) => t,
             // The surface no longer matches the window (a resize raced the
@@ -512,6 +513,11 @@ impl GpuState {
             }
             Err(_) => return false,
         };
+        let waited = t_acq.elapsed();
+        ACQUIRE_WAIT.store(waited.as_nanos().min(u64::MAX as u128) as u64, std::sync::atomic::Ordering::Relaxed);
+        if crate::window::tracing() {
+            eprintln!("acquire {:?} latency {}", waited, screen.config.desired_maximum_frame_latency);
+        }
         let view = texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
         screen.frame = Some((texture, view));
         true
@@ -1821,6 +1827,15 @@ pub(crate) fn resize_surface(id: i64, width: u32, height: u32) {
     screen.config.width = width;
     screen.config.height = height;
     screen.surface.configure(device, &screen.config);
+}
+
+/// How long the last frame waited for its buffer, nanoseconds: the display
+/// gives one back at a fixed moment of its cycle, and a frame begun before
+/// it blocks the thread until then. `take_acquire_wait` reads and clears it.
+static ACQUIRE_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn take_acquire_wait() -> std::time::Duration {
+    std::time::Duration::from_nanos(ACQUIRE_WAIT.swap(0, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Show the frames drawn since the last call, each on its window; the ids of
