@@ -1402,6 +1402,20 @@ pub fn set_ime_area(x: f64, y: f64, w: f64, h: f64) {
 /// thread racing that stop leaves `CVDisplayLinkStop` waiting forever (as
 /// Ghostty found, ghostty-org/ghostty#14150). Bound to the display the
 /// window is on, so a window on a 60 Hz display is paced at 60 Hz.
+/// Without a display link (off macOS), no refresh ever comes.
+#[cfg(not(target_os = "macos"))]
+mod vsync {
+    use std::time::Duration;
+
+    pub fn peek() -> Option<Duration> {
+        None
+    }
+
+    pub fn take() -> Option<Duration> {
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod vsync {
     use std::ffi::c_void;
