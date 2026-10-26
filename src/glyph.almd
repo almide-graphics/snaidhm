@@ -31,7 +31,7 @@ let TOL = 0.1
 fn rasterize(lines: List[coarse.Line], w: Int, h: Int) -> List[Int] = {
   var acc: List[Float] = list.repeat(0.0, w * h + 2)
   let n = list.len(lines)
-  let hf = int.to_float(h)
+  let hf = float.from(h)
   for li in 0..<n {
     let l = lines[li]
     if l.y0 != l.y1 then {
@@ -42,24 +42,24 @@ fn rasterize(lines: List[coarse.Line], w: Int, h: Int) -> List[Int] = {
       let bx = if l.y0 < l.y1 then l.x1 else l.x0
       let by = if l.y0 < l.y1 then l.y1 else l.y0
       let dxdy = (bx - ax) / (by - ay)
-      let y_start = int.max(0, float.to_int(float.floor(ay)))
-      let y_end = int.min(h, float.to_int(float.ceil(by)))
+      let y_start = int.max(0, int.from_saturating(float.floor(ay)))
+      let y_end = int.min(h, int.from_saturating(float.ceil(by)))
       var x = ax + dxdy * (float.max(0.0, ay) - ay)
       for y in y_start..<y_end {
-        let yf = int.to_float(y)
+        let yf = float.from(y)
         let row = y * w
         let dy = float.min(yf + 1.0, float.min(by, hf)) - float.max(yf, ay)
         let x_next = x + dxdy * dy
         let d = dy * dir
         // Clamped to the bitmap: the outline lies inside it, so this only
         // absorbs rounding, and keeps every index below within the buffer.
-        let wf = int.to_float(w)
+        let wf = float.from(w)
         let x0 = float.clamp(float.min(x, x_next), 0.0, wf)
         let x1 = float.clamp(float.max(x, x_next), 0.0, wf)
         let x0_floor = float.floor(x0)
-        let x0i = float.to_int(x0_floor)
+        let x0i = int.from_saturating(x0_floor)
         let x1_ceil = float.ceil(x1)
-        let x1i = float.to_int(x1_ceil)
+        let x1i = int.from_saturating(x1_ceil)
         if x1i <= x0i + 1 then {
           // Within one pixel column: the pixel gets the area right of the
           // line's mean x, the next pixel the rest.
@@ -79,7 +79,7 @@ fn rasterize(lines: List[coarse.Line], w: Int, h: Int) -> List[Int] = {
             let a1 = s * (1.5 - x0f)
             acc[row + x0i + 1] = acc[row + x0i + 1] + d * (a1 - a0)
             for xi in (x0i + 2)..<(x1i - 1) { acc[row + xi] = acc[row + xi] + d * s }
-            let a2 = a1 + int.to_float(x1i - x0i - 3) * s
+            let a2 = a1 + float.from(x1i - x0i - 3) * s
             acc[row + x1i - 1] = acc[row + x1i - 1] + d * (1.0 - a2 - am)
           }
           acc[row + x1i] = acc[row + x1i] + d * am
@@ -95,7 +95,7 @@ fn rasterize(lines: List[coarse.Line], w: Int, h: Int) -> List[Int] = {
   for i in 0..<(w * h) {
     sum = sum + acc[i]
     let c = float.min(1.0, float.abs(sum))
-    out[i] = float.to_int(float.round(c * 255.0))
+    out[i] = int.from_saturating(float.round(c * 255.0))
   }
   out
 }
@@ -116,13 +116,13 @@ fn flatten(c: List[Float], k: Int) -> List[coarse.Line] = {
   let d2x = dx - 2.0 * cx + bx
   let d2y = dy - 2.0 * cy + by
   let dd = float.max(math.sqrt(d1x * d1x + d1y * d1y), math.sqrt(d2x * d2x + d2y * d2y))
-  let n = int.clamp(float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * TOL)))), 1, 64)
-  let nf = int.to_float(n)
+  let n = int.clamp(int.from_saturating(float.ceil(math.sqrt(3.0 * dd / (4.0 * TOL)))), 1, 64)
+  let nf = float.from(n)
   var out: List[coarse.Line] = []
   var px = ax
   var py = ay
   for i in 1...n {
-    let t = int.to_float(i) / nf
+    let t = float.from(i) / nf
     let u = 1.0 - t
     let qx = u * u * u * ax + 3.0 * u * u * t * bx + 3.0 * u * t * t * cx + t * t * t * dx
     let qy = u * u * u * ay + 3.0 * u * u * t * by + 3.0 * u * t * t * cy + t * t * t * dy
@@ -136,7 +136,7 @@ fn flatten(c: List[Float], k: Int) -> List[coarse.Line] = {
 /// Glyph `glyph_id` of `font` rasterized at `size_px` pixels per em. A glyph
 /// with no outline (a space) is a 0 x 0 bitmap.
 fn glyph_bitmap(font: sfnt.Font, glyph_id: Int, size_px: Float) -> Bitmap = {
-  let scale = size_px / int.to_float(font.units_per_em)
+  let scale = size_px / float.from(font.units_per_em)
   // Font units, y up, scaled to pixels with the pen at the origin.
   let cubics = sfnt.closed_cubics(sfnt.outline(font, glyph_id), scale, 0.0, 0.0)
   var lines: List[coarse.Line] = []
@@ -160,13 +160,13 @@ fn glyph_bitmap(font: sfnt.Font, glyph_id: Int, size_px: Float) -> Bitmap = {
       y_lo = float.min(y_lo, float.min(l.y0, l.y1))
       y_hi = float.max(y_hi, float.max(l.y0, l.y1))
     }
-    let left = float.to_int(float.floor(x_lo))
-    let top = float.to_int(float.ceil(y_hi))
-    let w = float.to_int(float.ceil(x_hi)) - left
-    let h = top - float.to_int(float.floor(y_lo))
+    let left = int.from_saturating(float.floor(x_lo))
+    let top = int.from_saturating(float.ceil(y_hi))
+    let w = int.from_saturating(float.ceil(x_hi)) - left
+    let h = top - int.from_saturating(float.floor(y_lo))
     // To bitmap pixels: x from the bitmap's left edge, y down from its top.
-    let fl = int.to_float(left)
-    let ft = int.to_float(top)
+    let fl = float.from(left)
+    let ft = float.from(top)
     var in_bitmap: List[coarse.Line] = []
     for i in 0..<n {
       let l = lines[i]

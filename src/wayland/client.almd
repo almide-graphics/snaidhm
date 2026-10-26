@@ -5,18 +5,19 @@
 // (wire.almd). Descriptors that arrive with events queue in arrival order;
 // an event that carries one (wl_keyboard.keymap) takes the next.
 //
-// The whole client is Almide over `net`'s Unix-socket primitives: no libwayland.
+// The whole client is Almide over `unix`'s socket primitives: no libwayland.
 
 import env
-import net
+import io
+import unix
 import self.wayland.wire as wire
 
 /// The wl_display object every client starts with.
 let DISPLAY = 1
 
-var sock = 0 - 1
-var pending: Bytes = bytes.new(0)
-var fds: List[Int] = []
+var sock: Option[unix.Fd] = none
+var pending: Bytes = bytes.zeros(0)
+var fds: List[unix.Fd] = []
 // Object ids this client allocates, from 2 (1 is the display); the server's
 // start at 0xFF000000.
 var next_id = 2
@@ -35,14 +36,17 @@ effect fn connect() -> Result[Unit, String] = {
   debug = (env.get("WAYLAND_DEBUG") ?? "") == "1"
   if path == "" then err("XDG_RUNTIME_DIR is not set; no Wayland session to connect to")
   else {
-    sock = net.unix_connect(path)!
+    sock = some(unix.connect(path)!)
     ok(())
   }
 }
 
 /// The connection's socket: wait on it together with other descriptors
-/// (net.unix_wait), then `read(0)`.
-fn fd() -> Int = sock
+/// (unix.select), then `read(0)`. Aborts before `connect`.
+fn fd() -> unix.Fd = match sock {
+  some(s) => s,
+  none => panic("wayland: not connected"),
+}
 
 /// A fresh object id for a request that creates an object.
 fn new_id() -> Int = {
@@ -53,9 +57,9 @@ fn new_id() -> Int = {
 
 /// Send request `op` of object `obj`, its argument words `args`, and the
 /// descriptors `with` for its fd arguments, in order.
-effect fn send(obj: Int, op: Int, args: List[Int], with: List[Int]) -> Result[Unit, String] = {
+effect fn send(obj: Int, op: Int, args: List[Int], with: List[unix.Fd]) -> Result[Unit, String] = {
   if debug then eprintln("[wayland] -> ${int.to_string(obj)}.${int.to_string(op)} ${words(args)}${if list.len(with) > 0 then " fds ${int.to_string(list.len(with))}" else ""}") else ()
-  net.unix_send(sock, wire.request(obj, op, args), with)
+  unix.write_fds(fd(), wire.request(obj, op, args), with)
 }
 
 fn words(args: List[Int]) -> String = args |> list.map((w) => int.to_string(w)) |> list.join(" ")
@@ -68,14 +72,14 @@ effect fn read(timeout_ms: Int) -> Result[List[wire.Event], String] = {
   var more = true
   var gone = false
   while more {
-    if net.unix_poll(sock, wait)! then {
-      let got = net.unix_recv(sock, 65536)!
+    if list.len(unix.select([fd()], wait)!) > 0 then {
+      let got = io.read(fd(), 65536)!
       if bytes.len(got) == 0 then {
         gone = true
         more = false
       } else {
-        fds = fds + net.unix_take_fds(sock)
-        let split = wire.split(bytes.concat(pending, got))
+        fds = fds + unix.take_fds(fd())!
+        let split = wire.split(pending + got)
         pending = split.1
         events = events + split.0
         if debug then {
@@ -114,13 +118,13 @@ fn check(events: List[wire.Event]) -> Result[List[wire.Event], String] = {
 }
 
 /// The next descriptor that arrived with the events, for the event being
-/// handled that carries one; -1 when none is queued.
-fn take_fd() -> Int = {
-  if list.len(fds) == 0 then 0 - 1
+/// handled that carries one; none when none is queued.
+fn take_fd() -> Option[unix.Fd] = {
+  if list.len(fds) == 0 then none
   else {
     let fd = fds[0]
     fds = list.drop(fds, 1)
-    fd
+    some(fd)
   }
 }
 

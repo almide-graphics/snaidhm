@@ -1,7 +1,7 @@
 import self.cpu.canvas as canvas
 
 /// The alpha byte of pixel (`x`, `y`).
-fn alpha_at(c: canvas.Canvas, x: Int, y: Int) -> Int = bytes.read_u8(c.px, (y * c.w + x) * 4 + 3)
+fn alpha_at(c: canvas.Canvas, x: Int, y: Int) -> Int = bytes.get(c.px, (y * c.w + x) * 4 + 3) ?? 0
 
 test "a rectangle fills its pixels, in units" {
   let c = canvas.rect(canvas.scaled(8, 8, 2.0), 1.0, 1.0, 3.0, 3.0, 0.0, 1.0, 1.0, 1.0, 1.0)

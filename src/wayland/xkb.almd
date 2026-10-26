@@ -32,7 +32,7 @@ fn block(text: String, section: String) -> String = {
       match string.index_of(rest, "{") {
         none => "",
         some(open) => {
-          let cs = string.chars(rest)
+          let cs = string.to_list(rest)
           let n = list.len(cs)
           var depth = 0
           var close = n
@@ -161,7 +161,7 @@ fn keysym(km: Keymap, code: Int, level: Int) -> String = {
 /// A keysym written as its number (`0x61`), as newer xkbcommon writes every
 /// keysym; -1 for one written as a name (`a`, `Return`).
 fn number(sym: String) -> Int =
-  if string.starts_with(sym, "0x") then int.from_hex(string.slice(sym, 2)) ?? (0 - 1)
+  if string.starts_with(sym, "0x") then int.parse_radix(string.slice(sym, 2), 16) ?? (0 - 1)
   else 0 - 1
 
 /// The character a numbered keysym types: Latin-1 keysyms are their code
@@ -174,11 +174,11 @@ fn char_of_number(v: Int) -> Int =
 /// The character a keysym types, as a code point; 0 for a keysym that types
 /// none (a modifier, a function key, a named key).
 fn char_of(sym: String) -> Int = {
-  let cs = string.chars(sym)
+  let cs = string.to_list(sym)
   let v = number(sym)
   if v >= 0 then char_of_number(v)
-  else if list.len(cs) == 1 then string.codepoint(sym) ?? 0
-  else if string.starts_with(sym, "U") and list.len(cs) >= 5 then int.from_hex(string.slice(sym, 1)) ?? 0
+  else if list.len(cs) == 1 then string.to_codepoint(sym) ?? 0
+  else if string.starts_with(sym, "U") and list.len(cs) >= 5 then int.parse_radix(string.slice(sym, 1), 16) ?? 0
   else match sym {
     "space" => 32, "exclam" => 33, "quotedbl" => 34, "numbersign" => 35,
     "dollar" => 36, "percent" => 37, "ampersand" => 38, "apostrophe" => 39,

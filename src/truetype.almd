@@ -20,8 +20,8 @@ let CLOSE = 3
 let MAX_DEPTH = 8
 
 fn glyph_span(data: Bytes, loca: Int, long_loca: Bool, gid: Int) -> (Int, Int) =
-  if long_loca then (bytes.read_u32_be(data, loca + gid * 4), bytes.read_u32_be(data, loca + gid * 4 + 4))
-  else (bytes.read_u16_be(data, loca + gid * 2) * 2, bytes.read_u16_be(data, loca + gid * 2 + 2) * 2)
+  if long_loca then (bytes.get_u32_be(data, loca + gid * 4) ?? 0, bytes.get_u32_be(data, loca + gid * 4 + 4) ?? 0)
+  else (bytes.get_u16_be(data, loca + gid * 2) ?? 0 * 2, bytes.get_u16_be(data, loca + gid * 2 + 2) ?? 0 * 2)
 
 /// Glyph `gid`'s outline, font units, y up. `lsb` is its left side bearing
 /// from hmtx: as TrueType rasterizers place a glyph (the phantom point at
@@ -29,8 +29,8 @@ fn glyph_span(data: Bytes, loca: Int, long_loca: Bool, gid: Int) -> (Int, Int) =
 /// nothing, in a font whose hmtx agrees with its glyf bounding boxes.
 fn outline(data: Bytes, loca: Int, glyf: Int, long_loca: Bool, gid: Int, lsb: Int) -> Outline = {
   let span = glyph_span(data, loca, long_loca, gid)
-  let shift = if span.1 > span.0 then lsb - bytes.read_i16_be(data, glyf + span.0 + 2) else 0
-  placed(data, loca, glyf, long_loca, gid, [1.0, 0.0, 0.0, 1.0, int.to_float(shift), 0.0], 0)
+  let shift = if span.1 > span.0 then lsb - bytes.get_i16_be(data, glyf + span.0 + 2) ?? 0 else 0
+  placed(data, loca, glyf, long_loca, gid, [1.0, 0.0, 0.0, 1.0, float.from(shift), 0.0], 0)
 }
 
 /// Glyph `gid` with every point mapped by `m` = [a, b, c, d, dx, dy]:
@@ -40,7 +40,7 @@ fn placed(data: Bytes, loca: Int, glyf: Int, long_loca: Bool, gid: Int, m: List[
   if span.1 <= span.0 or depth > MAX_DEPTH then { cmds: [], pts: [] }
   else {
     let at = glyf + span.0
-    let contours = bytes.read_i16_be(data, at)
+    let contours = bytes.get_i16_be(data, at) ?? 0
     if contours >= 0 then simple(data, at, contours, m)
     else composite(data, loca, glyf, long_loca, at, m, depth)
   }
@@ -55,18 +55,18 @@ fn simple(data: Bytes, at: Int, contours: Int, m: List[Float]) -> Outline = {
   if contours == 0 then { cmds: cmds, pts: pts }
   else {
     var ends: List[Int] = []
-    for c in 0..<contours { list.push(ends, bytes.read_u16_be(data, at + 10 + c * 2)) }
+    for c in 0..<contours { list.push(ends, bytes.get_u16_be(data, at + 10 + c * 2) ?? 0) }
     let n = ends[contours - 1] + 1
     var pos = at + 10 + contours * 2
-    pos = pos + 2 + bytes.read_u16_be(data, pos)
+    pos = pos + 2 + bytes.get_u16_be(data, pos) ?? 0
     // Flags, with their repeats.
     var flags: List[Int] = []
     while list.len(flags) < n {
-      let f = bytes.read_u8(data, pos)
+      let f = bytes.get(data, pos) ?? 0
       pos = pos + 1
       list.push(flags, f)
       if int.band(f, 0x08) != 0 then {
-        let r = bytes.read_u8(data, pos)
+        let r = bytes.get(data, pos) ?? 0
         pos = pos + 1
         for _ in 0..<r { list.push(flags, f) }
       } else ()
@@ -77,28 +77,28 @@ fn simple(data: Bytes, at: Int, contours: Int, m: List[Float]) -> Outline = {
     for i in 0..<n {
       let f = flags[i]
       if int.band(f, 0x02) != 0 then {
-        let d = bytes.read_u8(data, pos)
+        let d = bytes.get(data, pos) ?? 0
         pos = pos + 1
         x = x + (if int.band(f, 0x10) != 0 then d else 0 - d)
       } else if int.band(f, 0x10) == 0 then {
-        x = x + bytes.read_i16_be(data, pos)
+        x = x + bytes.get_i16_be(data, pos) ?? 0
         pos = pos + 2
       } else ()
-      list.push(xs, int.to_float(x))
+      list.push(xs, float.from(x))
     }
     var ys: List[Float] = []
     var y = 0
     for i in 0..<n {
       let f = flags[i]
       if int.band(f, 0x04) != 0 then {
-        let d = bytes.read_u8(data, pos)
+        let d = bytes.get(data, pos) ?? 0
         pos = pos + 1
         y = y + (if int.band(f, 0x20) != 0 then d else 0 - d)
       } else if int.band(f, 0x20) == 0 then {
-        y = y + bytes.read_i16_be(data, pos)
+        y = y + bytes.get_i16_be(data, pos) ?? 0
         pos = pos + 2
       } else ()
-      list.push(ys, int.to_float(y))
+      list.push(ys, float.from(y))
     }
     var px: List[Float] = []
     var py: List[Float] = []
@@ -188,7 +188,7 @@ fn quad(x0: Float, y0: Float, qx: Float, qy: Float, x1: Float, y1: Float) -> Lis
   [x0 + 2.0 / 3.0 * (qx - x0), y0 + 2.0 / 3.0 * (qy - y0),
    x1 + 2.0 / 3.0 * (qx - x1), y1 + 2.0 / 3.0 * (qy - y1), x1, y1]
 
-fn f2dot14(data: Bytes, at: Int) -> Float = int.to_float(bytes.read_i16_be(data, at)) / 16384.0
+fn f2dot14(data: Bytes, at: Int) -> Float = float.from(bytes.get_i16_be(data, at) ?? 0) / 16384.0
 
 fn composite(data: Bytes, loca: Int, glyf: Int, long_loca: Bool, at: Int, m: List[Float], depth: Int) -> Outline = {
   var cmds: List[Int] = []
@@ -196,18 +196,18 @@ fn composite(data: Bytes, loca: Int, glyf: Int, long_loca: Bool, at: Int, m: Lis
   var pos = at + 10
   var more = true
   while more {
-    let flags = bytes.read_u16_be(data, pos)
-    let child = bytes.read_u16_be(data, pos + 2)
+    let flags = bytes.get_u16_be(data, pos) ?? 0
+    let child = bytes.get_u16_be(data, pos + 2) ?? 0
     pos = pos + 4
     let words = int.band(flags, 0x0001) != 0
     let xy = int.band(flags, 0x0002) != 0
-    let a1 = if words then bytes.read_i16_be(data, pos) else i8(data, pos)
-    let a2 = if words then bytes.read_i16_be(data, pos + 2) else i8(data, pos + 1)
+    let a1 = if words then bytes.get_i16_be(data, pos) ?? 0 else i8(data, pos)
+    let a2 = if words then bytes.get_i16_be(data, pos + 2) ?? 0 else i8(data, pos + 1)
     pos = pos + (if words then 4 else 2)
     // Offsets; matched-point placement (not x/y values) is not supported and
     // places the component unmoved.
-    let dx = if xy then int.to_float(a1) else 0.0
-    let dy = if xy then int.to_float(a2) else 0.0
+    let dx = if xy then float.from(a1) else 0.0
+    let dy = if xy then float.from(a2) else 0.0
     var a = 1.0
     var b = 0.0
     var c = 0.0
@@ -242,6 +242,6 @@ fn composite(data: Bytes, loca: Int, glyf: Int, long_loca: Bool, at: Int, m: Lis
 }
 
 fn i8(data: Bytes, at: Int) -> Int = {
-  let v = bytes.read_u8(data, at)
+  let v = bytes.get(data, at) ?? 0
   if v >= 128 then v - 256 else v
 }

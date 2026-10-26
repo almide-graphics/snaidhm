@@ -28,10 +28,10 @@ fn seg_area(x0: Float, y0: Float, x1: Float, y1: Float) -> Float = {
 }
 
 fn exact(lines: List[coarse.Line], px: Int, py: Int) -> Int = {
-  let fx = int.to_float(px)
-  let fy = int.to_float(py)
+  let fx = float.from(px)
+  let fy = float.from(py)
   let area = lines |> list.fold(0.0, (acc, l) => acc + seg_area(l.x0 - fx, l.y0 - fy, l.x1 - fx, l.y1 - fy))
-  float.to_int(float.round(float.min(1.0, float.abs(area)) * 255.0))
+  int.from_saturating(float.round(float.min(1.0, float.abs(area)) * 255.0))
 }
 
 // The largest difference, in 0–255 steps, over the whole bitmap.
@@ -57,7 +57,7 @@ fn polygon(pts: List[Float]) -> List[coarse.Line] = {
 fn circle(cx: Float, cy: Float, r: Float, n: Int, reverse: Bool) -> List[coarse.Line] =
   polygon(0..<n |> list.flat_map((i) => {
     let k = if reverse then n - i else i
-    let t = 2.0 * math.pi() * int.to_float(k) / int.to_float(n)
+    let t = 2.0 * math.pi() * float.from(k) / float.from(n)
     [cx + r * math.cos(t), cy + r * math.sin(t)]
   }))
 

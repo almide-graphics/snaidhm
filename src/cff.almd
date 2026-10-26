@@ -50,15 +50,15 @@ fn absent() -> Cff = {
 
 fn read_off(b: Bytes, at: Int, size: Int) -> Int = {
   var v = 0
-  for i in 0..<size { v = v * 256 + bytes.read_u8(b, at + i) }
+  for i in 0..<size { v = v * 256 + bytes.get(b, at + i) ?? 0 }
   v
 }
 
 fn index_at(b: Bytes, at: Int) -> Index = {
-  let count = bytes.read_u16_be(b, at)
+  let count = bytes.get_u16_be(b, at) ?? 0
   if count == 0 then { count: 0, off_size: 1, offsets: at + 2, data: at + 2 }
   else {
-    let off_size = bytes.read_u8(b, at + 2)
+    let off_size = bytes.get(b, at + 2) ?? 0
     let offsets = at + 3
     { count: count, off_size: off_size, offsets: offsets, data: offsets + (count + 1) * off_size - 1 }
   }
@@ -86,7 +86,7 @@ fn real(b: Bytes, at: Int) -> (Float, Int) = {
   var pos = at
   var done = false
   while not done {
-    let byte = bytes.read_u8(b, pos)
+    let byte = bytes.get(b, pos) ?? 0
     pos = pos + 1
     for k in 0..<2 {
       let nib = if k == 0 then byte / 16 else byte % 16
@@ -112,32 +112,32 @@ fn dict(b: Bytes, start: Int, stop: Int) -> Dict = {
   var first = 0
   var pos = start
   while pos < stop {
-    let b0 = bytes.read_u8(b, pos)
+    let b0 = bytes.get(b, pos) ?? 0
     if b0 <= 21 then {
-      let op = if b0 == 12 then 1200 + bytes.read_u8(b, pos + 1) else b0
+      let op = if b0 == 12 then 1200 + bytes.get(b, pos + 1) ?? 0 else b0
       pos = pos + (if b0 == 12 then 2 else 1)
       list.push(ops, op)
       list.push(firsts, first)
       list.push(counts, list.len(args) - first)
       first = list.len(args)
     } else if b0 == 28 then {
-      list.push(args, int.to_float(bytes.read_i16_be(b, pos + 1)))
+      list.push(args, float.from(bytes.get_i16_be(b, pos + 1) ?? 0))
       pos = pos + 3
     } else if b0 == 29 then {
-      list.push(args, int.to_float(bytes.read_i32_be(b, pos + 1)))
+      list.push(args, float.from(bytes.get_i32_be(b, pos + 1) ?? 0))
       pos = pos + 5
     } else if b0 == 30 then {
       let r = real(b, pos + 1)
       list.push(args, r.0)
       pos = r.1
     } else if b0 >= 32 and b0 <= 246 then {
-      list.push(args, int.to_float(b0 - 139))
+      list.push(args, float.from(b0 - 139))
       pos = pos + 1
     } else if b0 >= 247 and b0 <= 250 then {
-      list.push(args, int.to_float((b0 - 247) * 256 + bytes.read_u8(b, pos + 1) + 108))
+      list.push(args, float.from((b0 - 247) * 256 + bytes.get(b, pos + 1) ?? 0 + 108))
       pos = pos + 2
     } else if b0 >= 251 and b0 <= 254 then {
-      list.push(args, int.to_float(0 - (b0 - 251) * 256 - bytes.read_u8(b, pos + 1) - 108))
+      list.push(args, float.from(0 - (b0 - 251) * 256 - bytes.get(b, pos + 1) ?? 0 - 108))
       pos = pos + 2
     } else {
       pos = pos + 1
@@ -161,16 +161,16 @@ fn has(d: Dict, op: Int) -> Bool = list.contains(d.ops, op)
 /// The local subroutines of the Private DICT at `private_at` (`size` bytes).
 fn private_subrs(b: Bytes, private_at: Int, size: Int) -> Index = {
   let pd = dict(b, private_at, private_at + size)
-  if has(pd, 19) then index_at(b, private_at + float.to_int(operand(pd, 19, 0, 0.0)))
+  if has(pd, 19) then index_at(b, private_at + int.from_saturating(operand(pd, 19, 0, 0.0)))
   else empty_index()
 }
 
 /// The CFF table at `at`.
 fn parse(b: Bytes, at: Int) -> Result[Cff, String] = {
-  let major = bytes.read_u8(b, at)
+  let major = bytes.get(b, at) ?? 0
   if major != 1 then err("CFF version ${int.to_string(major)} (only 1 is read)")
   else {
-    let names = index_at(b, at + bytes.read_u8(b, at + 2))
+    let names = index_at(b, at + bytes.get(b, at + 2) ?? 0)
     let tops = index_at(b, index_end(b, names))
     let strings = index_at(b, index_end(b, tops))
     let gsubrs = index_at(b, index_end(b, strings))
@@ -179,30 +179,30 @@ fn parse(b: Bytes, at: Int) -> Result[Cff, String] = {
       let span = item(b, tops, 0)
       let top = dict(b, span.0, span.1)
       if not has(top, 17) then err("no CharStrings")
-      else if float.to_int(operand(top, 1206, 0, 2.0)) != 2 then err("charstring type other than 2")
+      else if int.from_saturating(operand(top, 1206, 0, 2.0)) != 2 then err("charstring type other than 2")
       else {
-        let charstrings = index_at(b, at + float.to_int(operand(top, 17, 0, 0.0)))
+        let charstrings = index_at(b, at + int.from_saturating(operand(top, 17, 0, 0.0)))
         let cid = has(top, 1230)
         let lsubrs = if has(top, 18) then {
-          let size = float.to_int(operand(top, 18, 0, 0.0))
-          let off = float.to_int(operand(top, 18, 1, 0.0))
+          let size = int.from_saturating(operand(top, 18, 0, 0.0))
+          let off = int.from_saturating(operand(top, 18, 1, 0.0))
           private_subrs(b, at + off, size)
         } else empty_index()
         var fd_lsubrs: List[Index] = []
         if cid and has(top, 1236) then {
-          let fds = index_at(b, at + float.to_int(operand(top, 1236, 0, 0.0)))
+          let fds = index_at(b, at + int.from_saturating(operand(top, 1236, 0, 0.0)))
           for i in 0..<fds.count {
             let fs = item(b, fds, i)
             let fd = dict(b, fs.0, fs.1)
             let sub = if has(fd, 18) then {
-              let size = float.to_int(operand(fd, 18, 0, 0.0))
-              let off = float.to_int(operand(fd, 18, 1, 0.0))
+              let size = int.from_saturating(operand(fd, 18, 0, 0.0))
+              let off = int.from_saturating(operand(fd, 18, 1, 0.0))
               private_subrs(b, at + off, size)
             } else empty_index()
             list.push(fd_lsubrs, sub)
           }
         } else ()
-        let fd_select = if cid and has(top, 1237) then at + float.to_int(operand(top, 1237, 0, 0.0)) else 0
+        let fd_select = if cid and has(top, 1237) then at + int.from_saturating(operand(top, 1237, 0, 0.0)) else 0
         ok({ present: true, charstrings: charstrings, gsubrs: gsubrs, lsubrs: lsubrs,
              cid: cid, fd_select: fd_select, fd_lsubrs: fd_lsubrs })
       }
@@ -214,15 +214,15 @@ fn parse(b: Bytes, at: Int) -> Result[Cff, String] = {
 fn fd_of(b: Bytes, c: Cff, gid: Int) -> Int = {
   if c.fd_select == 0 then 0
   else {
-    let format = bytes.read_u8(b, c.fd_select)
-    if format == 0 then bytes.read_u8(b, c.fd_select + 1 + gid)
+    let format = bytes.get(b, c.fd_select) ?? 0
+    if format == 0 then bytes.get(b, c.fd_select + 1 + gid) ?? 0
     else if format == 3 then {
       // Ranges (first glyph, fd), sorted, then a sentinel.
-      let n = bytes.read_u16_be(b, c.fd_select + 1)
+      let n = bytes.get_u16_be(b, c.fd_select + 1) ?? 0
       var fd = 0
       for i in 0..<n {
         let r = c.fd_select + 3 + i * 3
-        if gid >= bytes.read_u16_be(b, r) then { fd = bytes.read_u8(b, r + 2) } else ()
+        if gid >= bytes.get_u16_be(b, r) ?? 0 then { fd = bytes.get(b, r + 2) ?? 0 } else ()
       }
       fd
     } else 0
@@ -303,24 +303,24 @@ fn run(b: Bytes, c: Cff, lsubrs: Index, start: Int, stop: Int, st0: State, depth
   var pos = start
   var returned = false
   while pos < stop and not st.ended and not returned {
-    let b0 = bytes.read_u8(b, pos)
+    let b0 = bytes.get(b, pos) ?? 0
     pos = pos + 1
     if b0 >= 32 then {
       // Numbers.
-      if b0 <= 246 then { st = { ...st, stack: st.stack + [int.to_float(b0 - 139)] } }
+      if b0 <= 246 then { st = { ...st, stack: st.stack + [float.from(b0 - 139)] } }
       else if b0 <= 250 then {
-        st = { ...st, stack: st.stack + [int.to_float((b0 - 247) * 256 + bytes.read_u8(b, pos) + 108)] }
+        st = { ...st, stack: st.stack + [float.from((b0 - 247) * 256 + bytes.get(b, pos) ?? 0 + 108)] }
         pos = pos + 1
       } else if b0 <= 254 then {
-        st = { ...st, stack: st.stack + [int.to_float(0 - (b0 - 251) * 256 - bytes.read_u8(b, pos) - 108)] }
+        st = { ...st, stack: st.stack + [float.from(0 - (b0 - 251) * 256 - bytes.get(b, pos) ?? 0 - 108)] }
         pos = pos + 1
       } else {
         // 16.16 fixed.
-        st = { ...st, stack: st.stack + [int.to_float(bytes.read_i32_be(b, pos)) / 65536.0] }
+        st = { ...st, stack: st.stack + [float.from(bytes.get_i32_be(b, pos) ?? 0) / 65536.0] }
         pos = pos + 4
       }
     } else if b0 == 28 then {
-      st = { ...st, stack: st.stack + [int.to_float(bytes.read_i16_be(b, pos))] }
+      st = { ...st, stack: st.stack + [float.from(bytes.get_i16_be(b, pos) ?? 0)] }
       pos = pos + 2
     } else if b0 == 1 or b0 == 3 or b0 == 18 or b0 == 23 then {
       st = stems(st)
@@ -332,7 +332,7 @@ fn run(b: Bytes, c: Cff, lsubrs: Index, start: Int, stop: Int, st0: State, depth
       // callsubr / callgsubr.
       let subrs = if b0 == 10 then lsubrs else c.gsubrs
       let n = list.len(st.stack)
-      let k = float.to_int(st.stack[n - 1]) + bias(subrs.count)
+      let k = int.from_saturating(st.stack[n - 1]) + bias(subrs.count)
       st = { ...st, stack: list.take(st.stack, n - 1) }
       if k >= 0 and k < subrs.count and depth < MAX_CALLS then {
         let span = item(b, subrs, k)
@@ -344,7 +344,7 @@ fn run(b: Bytes, c: Cff, lsubrs: Index, start: Int, stop: Int, st0: State, depth
       // endchar (the seac form, four operands, is not supported).
       st = { ...clear(st), ended: true }
     } else if b0 == 12 then {
-      let b1 = bytes.read_u8(b, pos)
+      let b1 = bytes.get(b, pos) ?? 0
       pos = pos + 1
       st = clear(flex(st, b1))
     } else {

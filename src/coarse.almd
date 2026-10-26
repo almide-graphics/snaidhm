@@ -60,7 +60,7 @@ type Entry = { key: Int, tile: Int, path: Int, backdrop: Int, line: Int }
 
 type Grid = { tile: Float, tiles_x: Int, tiles_y: Int, num_paths: Int }
 
-fn cell(v: Float, tile: Float) -> Int = float.to_int(float.floor(v / tile))
+fn cell(v: Float, tile: Float) -> Int = int.from_saturating(float.floor(v / tile))
 
 fn x_at_y(l: Line, y: Float) -> Float =
   l.x0 + (l.x1 - l.x0) * (y - l.y0) / (l.y1 - l.y0)
@@ -110,7 +110,7 @@ fn add_pieces(g: Grid, path: Int, l: Line, out: Out) -> Out = {
   let lo = int.max(0, cell(float.min(l.x0, l.x1), g.tile) - 1)
   let hi = int.min(g.tiles_x - 1, cell(float.max(l.x0, l.x1), g.tile))
   for tx in lo...hi {
-    let x_lo = int.to_float(tx) * g.tile
+    let x_lo = float.from(tx) * g.tile
     match clip_x(l, x_lo, x_lo + g.tile) {
       some(piece) => {
         let id = list.len(lines)
@@ -138,7 +138,7 @@ fn add_steps(g: Grid, path: Int, l: Line, out: Out) -> Out = {
   let lo = int.max(0, cell(x_min, g.tile) - 1)
   let hi = int.min(g.tiles_x - 1, cell(x_max, g.tile))
   for tx in lo...hi {
-    let edge = int.to_float(tx + 1) * g.tile
+    let edge = float.from(tx + 1) * g.tile
     if x_min <= edge and edge < x_max then {
       let yc = y_at_x(l, edge)
       let ty = cell(yc, g.tile)
@@ -148,7 +148,7 @@ fn add_steps(g: Grid, path: Int, l: Line, out: Out) -> Out = {
         // the winding; above it, it takes it away.
         let y_right = if l.x1 > l.x0 then l.y1 else l.y0
         let delta = if y_right > yc then right_sign(l) else 0 - right_sign(l)
-        let bottom = int.to_float(ty + 1) * g.tile
+        let bottom = float.from(ty + 1) * g.tile
         let x = edge + 1.0
         let step = if delta < 0 then { x0: x, y0: yc, x1: x, y1: bottom }
                    else { x0: x, y0: bottom, x1: x, y1: yc }
@@ -192,12 +192,12 @@ fn add_backdrops(g: Grid, path: Int, ls: List[Line], out: Out) -> Out = {
     let l = ls[i]
     let y_min = float.min(l.y0, l.y1)
     let y_max = float.max(l.y0, l.y1)
-    let first = int.max(r_lo, float.to_int(float.ceil(y_min / g.tile)))
+    let first = int.max(r_lo, int.from_saturating(float.ceil(y_min / g.tile)))
     for ty in first...r_hi {
-      let top = int.to_float(ty) * g.tile
+      let top = float.from(ty) * g.tile
       if top >= y_min and top < y_max then {
         // Tiles 0 ..< reach have their right edge left of the crossing.
-        let reach = float.to_int(float.ceil(x_at_y(l, top) / g.tile)) - 1
+        let reach = int.from_saturating(float.ceil(x_at_y(l, top) / g.tile)) - 1
         let k = int.clamp(reach, c_lo, c_hi + 1) - c_lo
         let at = (ty - r_lo) * (cols + 1) + k
         add[at] = add[at] + right_sign(l)
@@ -240,7 +240,7 @@ fn prepared(lines: List[PathLine], path: Int) -> List[Line] = {
 /// grid of `tile`-pixel tiles. Commands in a tile run in path order, so later
 /// paths paint over earlier ones.
 fn build(lines: List[PathLine], tile: Int, tiles_x: Int, tiles_y: Int, num_paths: Int) -> Coarse = {
-  let g = { tile: int.to_float(tile), tiles_x: tiles_x, tiles_y: tiles_y, num_paths: int.max(1, num_paths) }
+  let g = { tile: float.from(tile), tiles_x: tiles_x, tiles_y: tiles_y, num_paths: int.max(1, num_paths) }
   var out: Out = { lines: [], entries: [] }
   for path in 0..<num_paths {
     let ls = prepared(lines, path)

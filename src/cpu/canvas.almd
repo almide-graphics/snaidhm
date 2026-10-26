@@ -28,37 +28,37 @@ fn new(w: Int, h: Int) -> Canvas = scaled(w, h, 1.0)
 /// A `w` x `h` pixel canvas of `scale` pixels per unit — a window's
 /// `width()`, `height()` and `scale()` — transparent black.
 fn scaled(w: Int, h: Int, scale: Float) -> Canvas =
-  { w: w, h: h, scale: scale, px: bytes.new(w * h * 4), clip_x0: 0, clip_y0: 0, clip_x1: w, clip_y1: h }
+  { w: w, h: h, scale: scale, px: bytes.zeros(w * h * 4), clip_x0: 0, clip_y0: 0, clip_x1: w, clip_y1: h }
 
 /// Draw only inside `x0 ..< x1` x `y0 ..< y1` (units) from now on — a list's
 /// frame its scrolled rows must not leave.
 fn clip(c: Canvas, x0: Float, y0: Float, x1: Float, y1: Float) -> Canvas = {
   ...c,
-  clip_x0: int.clamp(float.to_int(float.floor(x0 * c.scale)), 0, c.w),
-  clip_y0: int.clamp(float.to_int(float.floor(y0 * c.scale)), 0, c.h),
-  clip_x1: int.clamp(float.to_int(float.ceil(x1 * c.scale)), 0, c.w),
-  clip_y1: int.clamp(float.to_int(float.ceil(y1 * c.scale)), 0, c.h),
+  clip_x0: int.clamp(int.from_saturating(float.floor(x0 * c.scale)), 0, c.w),
+  clip_y0: int.clamp(int.from_saturating(float.floor(y0 * c.scale)), 0, c.h),
+  clip_x1: int.clamp(int.from_saturating(float.ceil(x1 * c.scale)), 0, c.w),
+  clip_y1: int.clamp(int.from_saturating(float.ceil(y1 * c.scale)), 0, c.h),
 }
 
 /// Draw anywhere on the canvas again.
 fn unclip(c: Canvas) -> Canvas = { ...c, clip_x0: 0, clip_y0: 0, clip_x1: c.w, clip_y1: c.h }
 
 /// The canvas's width in units.
-fn width(c: Canvas) -> Float = int.to_float(c.w) / c.scale
+fn width(c: Canvas) -> Float = float.from(c.w) / c.scale
 
 /// The canvas's height in units.
-fn height(c: Canvas) -> Float = int.to_float(c.h) / c.scale
+fn height(c: Canvas) -> Float = float.from(c.h) / c.scale
 
-fn channel(v: Float) -> Int = float.to_int(float.round(float.clamp(v, 0.0, 1.0) * 255.0))
+fn channel(v: Float) -> Int = int.from_saturating(float.round(float.clamp(v, 0.0, 1.0) * 255.0))
 
 /// Blend colour (`r`, `g`, `b`) at opacity `a` over pixel `i`.
 fn blend(mut px: Bytes, i: Int, r: Float, g: Float, b: Float, a: Float) -> Unit = {
   let o = i * 4
   let keep = 1.0 - a
-  bytes.set_at(px, o, channel(b * a + int.to_float(bytes.read_u8(px, o)) / 255.0 * keep))
-  bytes.set_at(px, o + 1, channel(g * a + int.to_float(bytes.read_u8(px, o + 1)) / 255.0 * keep))
-  bytes.set_at(px, o + 2, channel(r * a + int.to_float(bytes.read_u8(px, o + 2)) / 255.0 * keep))
-  bytes.set_at(px, o + 3, channel(a + int.to_float(bytes.read_u8(px, o + 3)) / 255.0 * keep))
+  px = bytes.set(px, o, channel(b * a + float.from(bytes.get(px, o) ?? 0) / 255.0 * keep))
+  px = bytes.set(px, o + 1, channel(g * a + float.from(bytes.get(px, o + 1) ?? 0) / 255.0 * keep))
+  px = bytes.set(px, o + 2, channel(r * a + float.from(bytes.get(px, o + 2) ?? 0) / 255.0 * keep))
+  px = bytes.set(px, o + 3, channel(a + float.from(bytes.get(px, o + 3) ?? 0) / 255.0 * keep))
 }
 
 /// Fill the whole canvas with an opaque colour.
@@ -69,10 +69,10 @@ fn clear(c: Canvas, r: Float, g: Float, b: Float) -> Canvas = {
   let gr = channel(g)
   let rr = channel(r)
   for i in 0..<n {
-    bytes.set_at(px, i * 4, br)
-    bytes.set_at(px, i * 4 + 1, gr)
-    bytes.set_at(px, i * 4 + 2, rr)
-    bytes.set_at(px, i * 4 + 3, 255)
+    px = bytes.set(px, i * 4, br)
+    px = bytes.set(px, i * 4 + 1, gr)
+    px = bytes.set(px, i * 4 + 2, rr)
+    px = bytes.set(px, i * 4 + 3, 255)
   }
   { ...c, px: px }
 }
@@ -86,14 +86,14 @@ fn rect(c: Canvas, ux0: Float, uy0: Float, ux1: Float, uy1: Float, radius: Float
   let y0 = uy0 * c.scale
   let x1 = ux1 * c.scale
   let y1 = uy1 * c.scale
-  let lo_x = int.max(c.clip_x0, float.to_int(float.floor(x0)))
-  let hi_x = int.min(c.clip_x1, float.to_int(float.ceil(x1)))
-  let lo_y = int.max(c.clip_y0, float.to_int(float.floor(y0)))
-  let hi_y = int.min(c.clip_y1, float.to_int(float.ceil(y1)))
+  let lo_x = int.max(c.clip_x0, int.from_saturating(float.floor(x0)))
+  let hi_x = int.min(c.clip_x1, int.from_saturating(float.ceil(x1)))
+  let lo_y = int.max(c.clip_y0, int.from_saturating(float.floor(y0)))
+  let hi_y = int.min(c.clip_y1, int.from_saturating(float.ceil(y1)))
   let rad = float.min(radius * c.scale, float.min(x1 - x0, y1 - y0) / 2.0)
   for y in lo_y..<hi_y {
     for x in lo_x..<hi_x {
-      let cov = coverage(int.to_float(x) + 0.5, int.to_float(y) + 0.5, x0, y0, x1, y1, rad)
+      let cov = coverage(float.from(x) + 0.5, float.from(y) + 0.5, x0, y0, x1, y1, rad)
       if cov > 0.0 then blend(px, y * c.w + x, r, g, b, a * cov) else ()
     }
   }
@@ -119,8 +119,8 @@ fn draw_text(c: Canvas, fonts: List[sfnt.Font], chars: List[Int], usize: Float, 
              r: Float, g: Float, b: Float, a: Float) -> Canvas = {
   var px = c.px
   let size = usize * c.scale
-  let size_px = int.max(1, float.to_int(float.round(size)))
-  let baseline = float.to_int(float.round(y * c.scale))
+  let size_px = int.max(1, int.from_saturating(float.round(size)))
+  let baseline = int.from_saturating(float.round(y * c.scale))
   var pen = x * c.scale
   let n = list.len(chars)
   for i in 0..<n {
@@ -130,12 +130,12 @@ fn draw_text(c: Canvas, fonts: List[sfnt.Font], chars: List[Int], usize: Float, 
     let bm = match map.get(glyphs, k) {
       some(cached) => cached,
       none => {
-        let made = glyph.glyph_bitmap(font, p.1, int.to_float(size_px))
+        let made = glyph.glyph_bitmap(font, p.1, float.from(size_px))
         glyphs = map.set(glyphs, k, made)
         made
       },
     }
-    let left = float.to_int(float.round(pen)) + bm.left
+    let left = int.from_saturating(float.round(pen)) + bm.left
     let top = baseline - bm.top
     for gy in 0..<bm.h {
       let yy = top + gy
@@ -143,11 +143,11 @@ fn draw_text(c: Canvas, fonts: List[sfnt.Font], chars: List[Int], usize: Float, 
         for gx in 0..<bm.w {
           let xx = left + gx
           let cov = bm.coverage[gy * bm.w + gx]
-          if xx >= c.clip_x0 and xx < c.clip_x1 and cov > 0 then blend(px, yy * c.w + xx, r, g, b, a * int.to_float(cov) / 255.0) else ()
+          if xx >= c.clip_x0 and xx < c.clip_x1 and cov > 0 then blend(px, yy * c.w + xx, r, g, b, a * float.from(cov) / 255.0) else ()
         }
       } else ()
     }
-    pen = pen + int.to_float(sfnt.advance(font, p.1)) * size / int.to_float(font.units_per_em)
+    pen = pen + float.from(sfnt.advance(font, p.1)) * size / float.from(font.units_per_em)
   }
   { ...c, px: px }
 }
@@ -159,7 +159,7 @@ fn measure(fonts: List[sfnt.Font], chars: List[Int], size: Float) -> Float = {
   for i in 0..<n {
     let p = sfnt.pick(fonts, chars[i])
     let font = fonts[p.0]
-    w = w + int.to_float(sfnt.advance(font, p.1)) * size / int.to_float(font.units_per_em)
+    w = w + float.from(sfnt.advance(font, p.1)) * size / float.from(font.units_per_em)
   }
   w
 }

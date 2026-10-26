@@ -12,11 +12,11 @@ type Vec2 = { x: Float, y: Float }
 // ── DDA core: compute tiles a segment passes through + backdrop deltas ──
 // Returns list of (tx, ty, is_top_edge) tuples encoded as integers: tx * 10000 + ty * 100 + (if top_edge 1 else 0)
 fn dda_walk(p0: Vec2, p1: Vec2) -> List[Int] = {
-  let tile_scale = 1.0 / int.to_float(TILE)
-  let px0 = (p0.x + 1.0) * 0.5 * int.to_float(WIDTH)
-  let py0 = (1.0 - p0.y) * 0.5 * int.to_float(HEIGHT)
-  let px1 = (p1.x + 1.0) * 0.5 * int.to_float(WIDTH)
-  let py1 = (1.0 - p1.y) * 0.5 * int.to_float(HEIGHT)
+  let tile_scale = 1.0 / float.from(TILE)
+  let px0 = (p0.x + 1.0) * 0.5 * float.from(WIDTH)
+  let py0 = (1.0 - p0.y) * 0.5 * float.from(HEIGHT)
+  let px1 = (p1.x + 1.0) * 0.5 * float.from(WIDTH)
+  let py1 = (1.0 - p1.y) * 0.5 * float.from(HEIGHT)
   let is_down = py1 >= py0
   let sx0 = (if is_down then px0 else px1) * tile_scale
   let sy0 = (if is_down then py0 else py1) * tile_scale
@@ -37,9 +37,9 @@ fn dda_walk(p0: Vec2, p1: Vec2) -> List[Int] = {
   let b = float.min((dy * c + dx * (ytop - sy0)) * idxdy, 0.99999994)
   let span_x = float.max(1.0, float.ceil(float.max(sx0, sx1)) - float.floor(float.min(sx0, sx1)))
   let span_y = float.max(1.0, float.ceil(sy1) - float.floor(sy0))
-  let count_x = float.to_int(span_x) - 1
-  let count = count_x + float.to_int(span_y)
-  let robust_err = float.floor(a_raw * int.to_float(count - 1) + b) - int.to_float(count_x)
+  let count_x = int.from_saturating(span_x) - 1
+  let count = count_x + int.from_saturating(span_y)
+  let robust_err = float.floor(a_raw * float.from(count - 1) + b) - float.from(count_x)
   let a = if robust_err > 0.0 then a_raw - 0.0000002
           else if robust_err < 0.0 then a_raw + 0.0000002
           else a_raw
@@ -49,10 +49,10 @@ fn dda_walk(p0: Vec2, p1: Vec2) -> List[Int] = {
   var last_z = float.floor(b - a)
   var result: List[Int] = []
   for i in 0..<count {
-    let zf = a * int.to_float(i) + b
+    let zf = a * float.from(i) + b
     let z = float.floor(zf)
-    let ty = float.to_int(y0 + int.to_float(i) - z)
-    let tx = float.to_int(x0 + sign * z)
+    let ty = int.from_saturating(y0 + float.from(i) - z)
+    let tx = int.from_saturating(x0 + sign * z)
     if tx >= 0 and tx < tiles_x and ty >= 0 and ty < tiles_y then {
       let top_edge = if i == 0 then float.floor(sy0) == sy0 else last_z == z
       result = result + [tx * 10000 + ty * 100 + (if top_edge then 1 else 0)]
@@ -73,14 +73,14 @@ fn decode_te(v: Int) -> Int = v - (v / 100) * 100
 // Returns list of backdrop values for each tile column (length = tiles_x)
 fn compute_row_backdrop(segs: List[{p0: Vec2, p1: Vec2}], row: Int) -> List[Int] = {
   let tiles_x = WIDTH / TILE
-  let tile_scale = 1.0 / int.to_float(TILE)
+  let tile_scale = 1.0 / float.from(TILE)
   var deltas: List[Int] = list.repeat(0, tiles_x)
 
   for seg in segs {
-    let px0 = (seg.p0.x + 1.0) * 0.5 * int.to_float(WIDTH)
-    let py0 = (1.0 - seg.p0.y) * 0.5 * int.to_float(HEIGHT)
-    let px1 = (seg.p1.x + 1.0) * 0.5 * int.to_float(WIDTH)
-    let py1 = (1.0 - seg.p1.y) * 0.5 * int.to_float(HEIGHT)
+    let px0 = (seg.p0.x + 1.0) * 0.5 * float.from(WIDTH)
+    let py0 = (1.0 - seg.p0.y) * 0.5 * float.from(HEIGHT)
+    let px1 = (seg.p1.x + 1.0) * 0.5 * float.from(WIDTH)
+    let py1 = (1.0 - seg.p1.y) * 0.5 * float.from(HEIGHT)
     let is_down = py1 >= py0
     let sx0 = (if is_down then px0 else px1) * tile_scale
     let sy0 = (if is_down then py0 else py1) * tile_scale
@@ -101,9 +101,9 @@ fn compute_row_backdrop(segs: List[{p0: Vec2, p1: Vec2}], row: Int) -> List[Int]
     let b = float.min((dy * c + dx * (ytop - sy0)) * idxdy, 0.99999994)
     let span_x = float.max(1.0, float.ceil(float.max(sx0, sx1)) - float.floor(float.min(sx0, sx1)))
     let span_y = float.max(1.0, float.ceil(sy1) - float.floor(sy0))
-    let count_x = float.to_int(span_x) - 1
-    let count = count_x + float.to_int(span_y)
-    let robust_err = float.floor(a_raw * int.to_float(count - 1) + b) - int.to_float(count_x)
+    let count_x = int.from_saturating(span_x) - 1
+    let count = count_x + int.from_saturating(span_y)
+    let robust_err = float.floor(a_raw * float.from(count - 1) + b) - float.from(count_x)
     let a = if robust_err > 0.0 then a_raw - 0.0000002
             else if robust_err < 0.0 then a_raw + 0.0000002
             else a_raw
@@ -111,10 +111,10 @@ fn compute_row_backdrop(segs: List[{p0: Vec2, p1: Vec2}], row: Int) -> List[Int]
     let delta = if is_down then -1 else 1
     var last_z = float.floor(b - a)
     for i in 0..<count {
-      let zf = a * int.to_float(i) + b
+      let zf = a * float.from(i) + b
       let z = float.floor(zf)
-      let ty = float.to_int(y0 + int.to_float(i) - z)
-      let tx = float.to_int(x0 + sign * z)
+      let ty = int.from_saturating(y0 + float.from(i) - z)
+      let tx = int.from_saturating(x0 + sign * z)
       if ty == row and tx >= 0 and tx < tiles_x then {
         let top_edge = if i == 0 then float.floor(sy0) == sy0 else last_z == z
         if top_edge then {
@@ -285,10 +285,10 @@ test "backdrop: circle path (4 cubics, closed)" {
   var segs: List[{p0: Vec2, p1: Vec2}] = []
   for cub in cubics {
     let n = 8  // fixed subdivision for test
-    let nf = int.to_float(n)
+    let nf = float.from(n)
     for i in 0..<n {
-      let t0 = int.to_float(i) / nf
-      let t1 = int.to_float(i + 1) / nf
+      let t0 = float.from(i) / nf
+      let t1 = float.from(i + 1) / nf
       let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
         let u = 1.0 - t
         let uu = u * u
@@ -348,10 +348,10 @@ test "backdrop: circle edge rows (top)" {
   var segs: List[{p0: Vec2, p1: Vec2}] = []
   for cub in cubics {
     let n = 8
-    let nf = int.to_float(n)
+    let nf = float.from(n)
     for i in 0..<n {
-      let t0 = int.to_float(i) / nf
-      let t1 = int.to_float(i + 1) / nf
+      let t0 = float.from(i) / nf
+      let t1 = float.from(i + 1) / nf
       let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
         let u = 1.0 - t
         let uu = u * u
@@ -390,10 +390,10 @@ test "backdrop: circle edge rows (top)" {
 fn pixel_coverage(segs: List[{p0: Vec2, p1: Vec2, path_id: Int}], px: Int, py: Int, path_id: Int) -> Float = {
   let tiles_x = WIDTH / TILE
   let num_tiles = tiles_x * (HEIGHT / TILE)
-  let tile_scale = 1.0 / int.to_float(TILE)
-  let w_f = int.to_float(WIDTH)
-  let h_f = int.to_float(HEIGHT)
-  let tile_f = int.to_float(TILE)
+  let tile_scale = 1.0 / float.from(TILE)
+  let w_f = float.from(WIDTH)
+  let h_f = float.from(HEIGHT)
+  let tile_f = float.from(TILE)
 
   // 1. DDA: compute backdrop + tile assignment
   var backdrop_deltas: List[Int] = list.repeat(0, tiles_x)
@@ -427,9 +427,9 @@ fn pixel_coverage(segs: List[{p0: Vec2, p1: Vec2, path_id: Int}], px: Int, py: I
     let b = float.min((dy * c + dx * (ytop - sy0)) * idxdy, 0.99999994)
     let span_x = float.max(1.0, float.ceil(float.max(sx0, sx1)) - float.floor(float.min(sx0, sx1)))
     let span_y = float.max(1.0, float.ceil(sy1) - float.floor(sy0))
-    let count_x = float.to_int(span_x) - 1
-    let count = count_x + float.to_int(span_y)
-    let robust_err = float.floor(a_raw * int.to_float(count - 1) + b) - int.to_float(count_x)
+    let count_x = int.from_saturating(span_x) - 1
+    let count = count_x + int.from_saturating(span_y)
+    let robust_err = float.floor(a_raw * float.from(count - 1) + b) - float.from(count_x)
     let a = if robust_err > 0.0 then a_raw - 0.0000002
             else if robust_err < 0.0 then a_raw + 0.0000002
             else a_raw
@@ -438,10 +438,10 @@ fn pixel_coverage(segs: List[{p0: Vec2, p1: Vec2, path_id: Int}], px: Int, py: I
     var last_z = float.floor(b - a)
     let target_ty = py / TILE
     for i in 0..<count {
-      let zf = a * int.to_float(i) + b
+      let zf = a * float.from(i) + b
       let z = float.floor(zf)
-      let ty = float.to_int(y0 + int.to_float(i) - z)
-      let tx = float.to_int(x0 + sign * z)
+      let ty = int.from_saturating(y0 + float.from(i) - z)
+      let tx = int.from_saturating(x0 + sign * z)
       if tx >= 0 and tx < tiles_x and ty == target_ty then {
         // Assign seg to this tile
         let tid = ty * tiles_x + tx
@@ -481,16 +481,16 @@ fn pixel_coverage(segs: List[{p0: Vec2, p1: Vec2, path_id: Int}], px: Int, py: I
 
   // 3. Compute area for this pixel
   let target_tid = (py / TILE) * tiles_x + (px / TILE)
-  var area = int.to_float(bd_result[target_tx])
+  var area = float.from(bd_result[target_tx])
   let local_segs = tile_segs[target_tid]
   for si in local_segs {
     let seg = segs[si]
     let ndc_to_px = 0.5 * w_f
     let ndc_to_py = 0.5 * h_f
-    let sp0x = (seg.p0.x + 1.0) * ndc_to_px - int.to_float(px)
-    let sp0y = (1.0 - seg.p0.y) * ndc_to_py - int.to_float(py)
-    let sp1x = (seg.p1.x + 1.0) * ndc_to_px - int.to_float(px)
-    let sp1y = (1.0 - seg.p1.y) * ndc_to_py - int.to_float(py)
+    let sp0x = (seg.p0.x + 1.0) * ndc_to_px - float.from(px)
+    let sp0y = (1.0 - seg.p0.y) * ndc_to_py - float.from(py)
+    let sp1x = (seg.p1.x + 1.0) * ndc_to_px - float.from(px)
+    let sp1y = (1.0 - seg.p1.y) * ndc_to_py - float.from(py)
     // seg_area (Vello-style analytical coverage)
     let y = sp0y
     let dly = sp1y - sp0y
@@ -532,10 +532,10 @@ test "full pipeline: pixel outside circle bottom has coverage 0" {
   var segs: List[{p0: Vec2, p1: Vec2, path_id: Int}] = []
   for cub in cubics {
     let n = 8
-    let nf = int.to_float(n)
+    let nf = float.from(n)
     for i in 0..<n {
-      let t0 = int.to_float(i) / nf
-      let t1 = int.to_float(i + 1) / nf
+      let t0 = float.from(i) / nf
+      let t1 = float.from(i + 1) / nf
       let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
         let u = 1.0 - t
         let uu = u * u
@@ -581,15 +581,15 @@ test "full pipeline: circle bottom edge with Wang subdivision" {
     let d2y = d.y - 2.0*c.y + b.y
     let dd = float.max(math.sqrt(d1x*d1x + d1y*d1y), math.sqrt(d2x*d2x + d2y*d2y))
     let tol = 0.5 / 512.0
-    int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
+    int.max(1, int.min(256, int.from_saturating(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
   }
   var segs: List[{p0: Vec2, p1: Vec2, path_id: Int}] = []
   for cub in cubics {
     let n = wang(cub.a, cub.b, cub.c, cub.d)
-    let nf = int.to_float(n)
+    let nf = float.from(n)
     for i in 0..<n {
-      let t0 = int.to_float(i) / nf
-      let t1 = int.to_float(i + 1) / nf
+      let t0 = float.from(i) / nf
+      let t1 = float.from(i + 1) / nf
       let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
         let u = 1.0 - t
         let uu = u * u
@@ -680,17 +680,17 @@ test "backdrop: wang subdivision circle" {
     let d2y = d.y - 2.0*c.y + b.y
     let dd = float.max(math.sqrt(d1x*d1x + d1y*d1y), math.sqrt(d2x*d2x + d2y*d2y))
     let tol = 0.5 / 512.0
-    int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
+    int.max(1, int.min(256, int.from_saturating(float.ceil(math.sqrt(3.0 * dd / (4.0 * tol))))))
   }
   var segs: List[{p0: Vec2, p1: Vec2}] = []
   var total_n = 0
   for cub in cubics {
     let n = wang(cub.a, cub.b, cub.c, cub.d)
     total_n = total_n + n
-    let nf = int.to_float(n)
+    let nf = float.from(n)
     for i in 0..<n {
-      let t0 = int.to_float(i) / nf
-      let t1 = int.to_float(i + 1) / nf
+      let t0 = float.from(i) / nf
+      let t1 = float.from(i + 1) / nf
       let eval = (a: Vec2, b: Vec2, c: Vec2, d: Vec2, t: Float) => {
         let u = 1.0 - t
         let uu = u * u
@@ -763,10 +763,10 @@ test "multi-path: two overlapping circles correct coverage" {
     var segs: List[{p0: Vec2, p1: Vec2, path_id: Int}] = []
     for cub in cubics {
       let n = 8
-      let nf = int.to_float(n)
+      let nf = float.from(n)
       for i in 0..<n {
-        let t0 = int.to_float(i) / nf
-        let t1 = int.to_float(i + 1) / nf
+        let t0 = float.from(i) / nf
+        let t1 = float.from(i + 1) / nf
         let p0 = eval(cub.a, cub.b, cub.c, cub.d, t0)
         let p1 = eval(cub.a, cub.b, cub.c, cub.d, t1)
         segs = segs + [{p0: p0, p1: p1, path_id: pid}]

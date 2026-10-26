@@ -14,11 +14,11 @@ test "a string argument: length with the NUL, bytes, padded to a word" {
 test "a request: object, size and opcode, then the words" {
   let b = wire.request(3, 2, [10, 20])
   assert_eq(bytes.len(b), 16)
-  assert_eq(bytes.read_u32_le(b, 0), 3)
-  assert_eq(bytes.read_u32_le(b, 4), 16 * 65536 + 2)
-  assert_eq(bytes.read_u32_le(b, 12), 20)
+  assert_eq(bytes.get_u32_le(b, 0) ?? 0, 3)
+  assert_eq(bytes.get_u32_le(b, 4) ?? 0, 16 * 65536 + 2)
+  assert_eq(bytes.get_u32_le(b, 12) ?? 0, 20)
   // A negative int argument is its two's-complement word.
-  assert_eq(bytes.read_u32_le(wire.request(1, 0, [wire.int32(0 - 1)]), 8), 0xFFFFFFFF)
+  assert_eq(bytes.get_u32_le(wire.request(1, 0, [wire.int32(0 - 1)]), 8) ?? 0, 0xFFFFFFFF)
 }
 
 test "24.8 fixed point" {
@@ -31,7 +31,7 @@ test "24.8 fixed point" {
 test "events split out of a stream, a partial one kept" {
   let a = wire.request(2, 0, [7] + wire.string("wl_seat") + [5])
   let b = wire.request(9, 1, [42])
-  let stream = bytes.concat(bytes.concat(a, b), bytes.slice(a, 0, 6))
+  let stream = (a + b) + bytes.slice(a, 0, 6)
   let split = wire.split(stream)
   assert_eq(list.len(split.0), 2)
   assert_eq(split.0[0].obj, 2)

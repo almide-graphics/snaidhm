@@ -1,6 +1,6 @@
 [package]
 name = "snaidhm"
-version = "0.0.1"
+version = "0.1.0"
 description = "Compute-shader-first 2D/3D renderer for Almide"
 
 [dependencies]
@@ -28,3 +28,8 @@ winit = { git = "https://github.com/almide-graphics/snaidhm.git", rev = "91a5ac9
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 libc = "0.2"
+
+# Dialect epoch 15 (#4093): a git dependency outside github.com/almide is fetched only
+# from an owner the root manifest trusts.
+[trust]
+owners = ["github.com/almide-graphics"]

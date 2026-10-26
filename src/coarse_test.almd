@@ -32,8 +32,8 @@ fn seg_area(x0: Float, y0: Float, x1: Float, y1: Float) -> Float = {
 }
 
 fn area_at(l: coarse.Line, px: Int, py: Int) -> Float = {
-  let fx = int.to_float(px)
-  let fy = int.to_float(py)
+  let fx = float.from(px)
+  let fy = float.from(py)
   seg_area(l.x0 - fx, l.y0 - fy, l.x1 - fx, l.y1 - fy)
 }
 
@@ -47,7 +47,7 @@ fn coarse_area(c: coarse.Coarse, tiles_x: Int, path: Int, px: Int, py: Int) -> F
     if c.cmds[cb] != path then acc
     else {
       let ids = 0..<c.cmds[cb + 3] |> list.map((k) => c.line_ids[c.cmds[cb + 2] + k])
-      acc + int.to_float(c.cmds[cb + 1])
+      acc + float.from(c.cmds[cb + 1])
         + (ids |> list.fold(0.0, (s, id) => s + area_at(c.lines[id], px, py)))
     }
   })
@@ -86,7 +86,7 @@ fn polygon(path: Int, pts: List[Float]) -> List[coarse.PathLine] = {
 
 fn circle(path: Int, cx: Float, cy: Float, r: Float, n: Int) -> List[coarse.PathLine] =
   polygon(path, 0..<n |> list.flat_map((i) => {
-    let t = 2.0 * math.pi() * int.to_float(i) / int.to_float(n)
+    let t = 2.0 * math.pi() * float.from(i) / float.from(n)
     [cx + r * math.cos(t), cy + r * math.sin(t)]
   }))
 
@@ -133,6 +133,6 @@ test "a ring: a hole wound the other way" {
 test "a wide row packs without a per-tile limit" {
   // Twelve paths in one tile row: fixed slots of 16 lines / 8 commands per
   // tile dropped most of this; packed lists keep all of it.
-  let lines = 0..<12 |> list.flat_map((i) => circle(i, 8.0 + int.to_float(i) * 10.0, 8.0, 6.0, 24))
+  let lines = 0..<12 |> list.flat_map((i) => circle(i, 8.0 + float.from(i) * 10.0, 8.0, 6.0, 24))
   assert(worst(lines, 12, 128, 16) < TOL)
 }

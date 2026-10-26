@@ -12,10 +12,10 @@ import self.native.fonts as fonts
 import self.sfnt as sfnt
 
 fn cp(s: String) -> List[Int] = {
-  let cs = string.chars(s)
+  let cs = string.to_list(s)
   let n = list.len(cs)
   var out: List[Int] = []
-  for i in 0..<n { list.push(out, string.codepoint(cs[i]) ?? 0) }
+  for i in 0..<n { list.push(out, string.to_codepoint(cs[i]) ?? 0) }
   out
 }
 
@@ -58,12 +58,12 @@ effect fn main() -> Unit = {
   let limit = match list.get(env.args(), 0) { some(s) => int.parse(s) ?? 0, none => 0 }
   if window.open("Almide on Wayland", 720, 400)! then {
     let faces = fonts.system()!
-    let start = env.millis()
+    let start = datetime.now_ms()
     var ui: Ui = { hover: false, clicks: 0, wheel: 0.0, keys: 0, keymap: 0, typed: "" }
     window.present(draw(faces, ui, frame()))!
     var going = true
     while going {
-      going = window.pump(16)! and (limit == 0 or env.millis() - start < limit)
+      going = window.pump(16)! and (limit == 0 or datetime.now_ms() - start < limit)
       let keymap = string.len(window.keymap_text())
       var dirty = window.resized() or keymap != ui.keymap
       ui = { ...ui, keymap: keymap }
@@ -77,7 +77,7 @@ effect fn main() -> Unit = {
         } else if kind == window.WHEEL then {
           ui = { ...ui, wheel: ui.wheel + window.event_dy() }
         } else if kind == window.TEXT then {
-          ui = { ...ui, typed: ui.typed + string.from_codepoint(window.event_code()) }
+          ui = { ...ui, typed: ui.typed + (string.from_codepoint(window.event_code()) ?? "") }
         } else if kind == window.KEY then {
           ui = { ...ui, keys: ui.keys + 1 }
           if window.event_code() == window.KEY_ESCAPE then { going = false } else ()
