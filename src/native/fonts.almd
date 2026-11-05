@@ -31,7 +31,7 @@ let CJK = [
 /// Face 0 of the first of `paths` that reads and parses, from `i` on.
 effect fn first(paths: List[String], i: Int) -> sfnt.Font? =
   if i >= list.len(paths) then none
-  else match fs.read_bytes_raw(paths[i]) {
+  else match fs.read_bytes(paths[i]) {
     ok(data) => match sfnt.load(data, 0) {
       ok(font) => some(font),
       err(_) => first(paths, i + 1)!,

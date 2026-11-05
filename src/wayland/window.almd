@@ -13,7 +13,8 @@
 //     }
 //   }
 
-import net
+import io
+import unix
 import self.wayland.client as client
 import self.wayland.text_input as ti
 import self.wayland.wire as wire
@@ -86,7 +87,7 @@ var was_resized = false
 
 // Two buffers in one shared-memory pool, so one can be drawn while the
 // compositor still reads the other.
-var pool_fd = 0 - 1
+var pool_fd: Option[unix.Fd] = none
 var pool = 0
 var pool_w = 0
 var pool_h = 0
@@ -125,7 +126,7 @@ var ime_pending: ti.Pending = ti.empty()
 var composing = false
 // The keyboard's keymap, as the compositor handed it over (XKB text), what
 // it says each key types, and the modifiers now held or locked.
-var keymap: Bytes = bytes.new(0)
+var keymap: Bytes = bytes.zeros(0)
 var keys: xkb.Keymap = xkb.empty()
 var shift = false
 var caps = false
@@ -327,7 +328,10 @@ effect fn hide() -> Result[Unit, String] = {
   for i in 0..<n { client.send(buffers[i], 0, [], [])! }
   for b in retired { client.send(b, 0, [], [])! }
   if pool != 0 then { client.send(pool, 1, [], [])! } else ()
-  if pool_fd >= 0 then { net.unix_close(pool_fd)! } else ()
+  match pool_fd {
+    some(p) => io.close(p)!,
+    none => (),
+  }
   if viewport != 0 then { client.send(viewport, 0, [], [])! } else ()
   if surface_scale != 0 then { client.send(surface_scale, 0, [], [])! } else ()
   if layer_surface != 0 then { client.send(layer_surface, 7, [], [])! } else ()
@@ -340,7 +344,7 @@ effect fn hide() -> Result[Unit, String] = {
   busy = none_busy
   retired = none_ids
   pool = 0
-  pool_fd = 0 - 1
+  pool_fd = none
   pool_w = 0
   pool_h = 0
   layer_surface = 0
@@ -369,8 +373,8 @@ effect fn pump(timeout_ms: Int) -> Result[Bool, String] = {
 }
 
 /// The compositor connection's descriptor, to wait on beside others:
-/// `net.unix_wait([window.fd(), other], t)`, then `pump(0)`.
-fn fd() -> Int = client.fd()
+/// `unix.select([window.fd(), other], t)`, then `pump(0)`.
+fn fd() -> unix.Fd = client.fd()
 
 /// `true` exactly once after each change of the window's size.
 fn resized() -> Bool = {
@@ -388,13 +392,13 @@ fn height() -> Int = cur_h
 
 /// The window's size in units — what the pointer's coordinates run over,
 /// and what a canvas made for it measures (`canvas.width`, `canvas.height`).
-fn extent() -> (Float, Float) = (int.to_float(log_w), int.to_float(log_h))
+fn extent() -> (Float, Float) = (float.from(log_w), float.from(log_h))
 
 /// Pixels per unit on the output the window is on (1.0 on a plain screen,
 /// 2.0 or 1.6 on a dense one). Draw on `canvas.scaled(width(), height(),
 /// scale())` in units and the UI keeps its size, sharp; `resized()` reports a
 /// change of scale too.
-fn scale() -> Float = int.to_float(scale120) / 120.0
+fn scale() -> Float = float.from(scale120) / 120.0
 
 /// The XKB keymap the compositor gave for the keyboard (empty until then).
 fn keymap_text() -> String = bytes.to_string_lossy(keymap)
@@ -407,7 +411,10 @@ effect fn present(pixels: Bytes) -> Result[Unit, String] = {
   while list.all(busy, (b) => b) { handle(client.read(0 - 1)!)! }
   let slot = if busy[0] then 1 else 0
   let size = cur_w * cur_h * 4
-  net.shm_write(pool_fd, slot * size, pixels)!
+  match pool_fd {
+    some(p) => unix.shm_write(p, slot * size, pixels)!,
+    none => (),
+  }
   busy = list.set(busy, slot, true)
   // The buffer covers the surface at the scale: through the viewport at any
   // scale, or as a whole-number buffer scale.
@@ -427,11 +434,15 @@ effect fn make_pool() -> Result[Unit, String] = {
     else { client.send(buffers[i], 0, [], [])! }
   }
   if pool != 0 then { client.send(pool, 1, [], [])! } else ()
-  if pool_fd >= 0 then { net.unix_close(pool_fd)! } else ()
+  match pool_fd {
+    some(p) => io.close(p)!,
+    none => (),
+  }
   let size = cur_w * cur_h * 4
-  pool_fd = net.shm_create(size * 2)!
+  let new_fd = unix.shm_create(size * 2)!
+  pool_fd = some(new_fd)
   pool = client.new_id()
-  client.send(shm, 0, [pool, size * 2], [pool_fd])!
+  client.send(shm, 0, [pool, size * 2], [new_fd])!
   var made: List[Int] = []
   for slot in 0..<2 {
     let b = client.new_id()
@@ -582,13 +593,13 @@ effect fn make_text_input() -> Result[Unit, String] = {
 }
 
 fn queue(kind: Int, x: Float, y: Float, dx: Float, dy: Float, code: Int) -> Unit = {
-  list.push(inputs, [int.to_float(kind), x, y, dx, dy, int.to_float(code), 0.0])
+  list.push(inputs, [float.from(kind), x, y, dx, dy, float.from(code), 0.0])
   list.push(input_texts, "")
 }
 
 /// A COMPOSE input: `text` with `from ..< to` marked.
 fn queue_compose(text: String, from: Int, to: Int) -> Unit = {
-  list.push(inputs, [int.to_float(COMPOSE), cursor_x, cursor_y, 0.0, 0.0, int.to_float(from), int.to_float(to)])
+  list.push(inputs, [float.from(COMPOSE), cursor_x, cursor_y, 0.0, 0.0, float.from(from), float.from(to)])
   list.push(input_texts, text)
 }
 
@@ -646,7 +657,7 @@ effect fn pointer_event(e: wire.Event) -> Result[Unit, String] = {
     // axis_discrete: axis, steps — a mouse wheel's notches, which some
     // compositors send with a zero distance (a virtual pointer's wheel).
     let i = wheel_axis(wire.uint_at(e.args, 0))
-    wheel_steps = list.set(wheel_steps, i, wheel_steps[i] + int.to_float(wire.int_at(e.args, 4)))
+    wheel_steps = list.set(wheel_steps, i, wheel_steps[i] + float.from(wire.int_at(e.args, 4)))
   } else if e.op == 5 then {
     // frame: the events since the last one are one input.
     flush_wheel()
@@ -679,19 +690,21 @@ effect fn show_cursor() -> Result[Unit, String] = {
 effect fn keyboard_event(e: wire.Event) -> Result[Unit, String] = {
   if e.op == 0 then {
     // keymap: format, fd, size — the fd arrived beside the message.
-    let fd = client.take_fd()
     let size = wire.uint_at(e.args, 4)
-    if fd >= 0 then {
-      keymap = net.shm_read(fd, 0, size)!
-      net.unix_close(fd)!
-      keys = xkb.parse(keymap_text())
-    } else ()
+    match client.take_fd() {
+      some(fd) => {
+        keymap = unix.shm_read(fd, 0, size)!
+        io.close(fd)!
+        keys = xkb.parse(keymap_text())
+      },
+      none => (),
+    }
   } else if e.op == 3 and wire.uint_at(e.args, 12) == 1 then {
     // key: serial, time, key, state (1 pressed). What the key is comes from
     // the keymap, never from the number: a named key, or a character.
     let code = wire.uint_at(e.args, 8)
     let plain = xkb.keysym(keys, code, 1)
-    let typed = string.from_codepoint(xkb.char_of(plain))
+    let typed = string.from_codepoint(xkb.char_of(plain)) ?? ""
     let letter = xkb.char_of(plain) > 0 and string.to_upper(typed) != string.to_lower(typed)
     let level = if shift != (caps and letter) then 2 else 1
     let sym = xkb.keysym(keys, code, level)
@@ -724,7 +737,7 @@ fn next_event() -> Int = {
     current_text = input_texts[0]
     inputs = list.drop(inputs, 1)
     input_texts = list.drop(input_texts, 1)
-    float.to_int(current[0])
+    int.from_saturating(current[0])
   }
 }
 
@@ -741,10 +754,10 @@ fn event_dx() -> Float = current[3]
 fn event_dy() -> Float = current[4]
 
 /// Mouse button (0 left, 1 right, 2 middle), typed code point, or key code.
-fn event_code() -> Int = float.to_int(current[5])
+fn event_code() -> Int = int.from_saturating(current[5])
 
 /// End of the marked part of the current COMPOSE, characters.
-fn event_end() -> Int = float.to_int(current[6])
+fn event_end() -> Int = int.from_saturating(current[6])
 
 /// Text of the current COMPOSE.
 fn event_text() -> String = current_text
@@ -766,7 +779,7 @@ effect fn set_ime(allowed: Bool) -> Result[Unit, String] = {
 /// Tell the input method where the caret is, units, so its candidate window
 /// opens beside it. Call it whenever the caret moves.
 effect fn set_ime_area(x: Float, y: Float, w: Float, h: Float) -> Result[Unit, String] = {
-  let area = [float.to_int(x), float.to_int(y), int.max(1, float.to_int(w)), int.max(1, float.to_int(h))]
+  let area = [int.from_saturating(x), int.from_saturating(y), int.max(1, int.from_saturating(w)), int.max(1, int.from_saturating(h))]
   if area != ime_area then {
     ime_area = area
     if ime_focused and ime_allowed then {
@@ -821,8 +834,8 @@ effect fn text_input_event(e: wire.Event) -> Result[Unit, String] = {
     // done: what was gathered takes effect — the old composition goes, the
     // committed text is typed, the new composition shows.
     let p = ime_pending
-    for c in string.chars(p.commit) {
-      queue(TEXT, cursor_x, cursor_y, 0.0, 0.0, string.codepoint(c) ?? 0)
+    for c in string.to_list(p.commit) {
+      queue(TEXT, cursor_x, cursor_y, 0.0, 0.0, string.to_codepoint(c) ?? 0)
     }
     if p.preedit != "" or composing then {
       queue_compose(p.preedit, ti.char_index(p.preedit, p.begin), ti.char_index(p.preedit, p.end))

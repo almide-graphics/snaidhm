@@ -45,7 +45,7 @@ fn wang_n(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Int = {
   let d2x = d.x - 2.0*c.x + b.x
   let d2y = d.y - 2.0*c.y + b.y
   let dd = float.max(math.sqrt(d1x*d1x + d1y*d1y), math.sqrt(d2x*d2x + d2y*d2y))
-  int.max(1, int.min(256, float.to_int(float.ceil(math.sqrt(3.0 * dd / (4.0 * FLATTEN_TOL))))))
+  int.max(1, int.min(256, int.from_saturating(float.ceil(math.sqrt(3.0 * dd / (4.0 * FLATTEN_TOL))))))
 }
 
 // Whether `p` lies on the chord a→d, within tolerance and between its ends.
@@ -74,10 +74,10 @@ fn segment_count(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Int =
 
 fn flatten_cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], pid: Int) -> List[Seg] = {
   let n = segment_count(a, b, c, d)
-  let nf = int.to_float(n)
+  let nf = float.from(n)
   0..<n |> list.map((i) => {
-    let t0 = int.to_float(i) / nf
-    let t1 = int.to_float(i + 1) / nf
+    let t0 = float.from(i) / nf
+    let t1 = float.from(i + 1) / nf
     { p0: cubic_eval(a, b, c, d, t0), p1: cubic_eval(a, b, c, d, t1), color: color, path_id: pid }
   })
 }
@@ -87,7 +87,7 @@ fn flatten_cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, color: List[Float], pid: In
 // Segment is normalized to walk downward (sy0 ≤ sy1) internally.
 // DDA tile walk (unused in current all-columns-left pipeline, kept for future DDA)
 fn dda_tiles(p0: Vec2, p1: Vec2) -> List[Int] = {
-  let tile_scale = 1.0 / int.to_float(TILE)
+  let tile_scale = 1.0 / float.from(TILE)
   let w_f = 512.0  // DDA uses fixed reference (not used in render path)
   let h_f = 512.0
   let tiles_x = 512 / TILE
@@ -116,9 +116,9 @@ fn dda_tiles(p0: Vec2, p1: Vec2) -> List[Int] = {
   let b = float.min((dy * c + dx * (ytop - sy0)) * idxdy, 0.99999994)
   let span_x = float.max(1.0, float.ceil(float.max(sx0, sx1)) - float.floor(float.min(sx0, sx1)))
   let span_y = float.max(1.0, float.ceil(sy1) - float.floor(sy0))
-  let count_x = float.to_int(span_x) - 1
-  let count = count_x + float.to_int(span_y)
-  let robust_err = float.floor(a_raw * int.to_float(count - 1) + b) - int.to_float(count_x)
+  let count_x = int.from_saturating(span_x) - 1
+  let count = count_x + int.from_saturating(span_y)
+  let robust_err = float.floor(a_raw * float.from(count - 1) + b) - float.from(count_x)
   let a = if robust_err > 0.0 then a_raw - 0.0000002
           else if robust_err < 0.0 then a_raw + 0.0000002
           else a_raw
@@ -126,10 +126,10 @@ fn dda_tiles(p0: Vec2, p1: Vec2) -> List[Int] = {
   var last_z = float.floor(b - a)
   var result: List[Int] = []
   for i in 0..<count {
-    let zf = a * int.to_float(i) + b
+    let zf = a * float.from(i) + b
     let z = float.floor(zf)
-    let ty = float.to_int(y0 + int.to_float(i) - z)
-    let tx = float.to_int(x0 + sign * z)
+    let ty = int.from_saturating(y0 + float.from(i) - z)
+    let tx = int.from_saturating(x0 + sign * z)
     if tx >= 0 and tx < tiles_x and ty >= 0 and ty < tiles_y then {
       let top_edge = if i == 0 then float.floor(sy0) == sy0 else last_z == z
       let tid = ty * tiles_x + tx
@@ -189,16 +189,16 @@ fn circ_shadow(cx: Float, cy: Float, rad: Float, ox: Float, oy: Float, blur: Flo
 
 // ── Text helpers ──
 
-fn str(s: String) -> List[Int] = string.to_bytes(s)
+fn str(s: String) -> List[Int] = bytes.to_list(bytes.from_string(s))
 
 fn text_spec(chars: List[Int], size: Float, x: Float, y: Float, align: Int, color: List[Float]) -> TextSpec =
   { chars: chars, size: size, x: x, y: y, align: align, color: color }
 
 fn measure_text(font: sfnt.Font, chars: List[Int], size: Float, viewport_h: Float) -> Float = {
-  let scale = size * 2.0 / viewport_h / int.to_float(font.units_per_em)
+  let scale = size * 2.0 / viewport_h / float.from(font.units_per_em)
   var w = 0.0
   let n = list.len(chars)
-  for i in 0..<n { w = w + int.to_float(sfnt.advance(font, sfnt.glyph_id(font, chars[i]))) * scale }
+  for i in 0..<n { w = w + float.from(sfnt.advance(font, sfnt.glyph_id(font, chars[i]))) * scale }
   w
 }
 
@@ -302,8 +302,8 @@ fn prepare_scene(
   // ── Coarse raster: packed per-tile command lists (see coarse.almd) ──
   // Lines go to pixel space for tiling and back to normal space for upload,
   // the space raster.wgsl reads them in.
-  let w_f = int.to_float(width)
-  let h_f = int.to_float(height)
+  let w_f = float.from(width)
+  let h_f = float.from(height)
   var path_lines: List[coarse.PathLine] = []
   for seg in segments {
     list.push(path_lines, {
@@ -507,7 +507,7 @@ fn upload_regions(scene: SceneHandle, count: Int,
       gpu.push_f32(bounds_x[i]) gpu.push_f32(bounds_y[i]) gpu.push_f32(bounds_w[i]) gpu.push_f32(bounds_h[i])
       gpu.push_f32(scroll_x[i]) gpu.push_f32(scroll_y[i])
       gpu.push_f32(content_w[i]) gpu.push_f32(content_h[i])
-      gpu.push_f32(int.to_float(parent[i])) gpu.push_f32(int.to_float(count))
+      gpu.push_f32(float.from(parent[i])) gpu.push_f32(float.from(count))
       gpu.push_f32(bar_opacity_y[i]) gpu.push_f32(bar_opacity_x[i])
     } else {
       for _ in 0..<12 { gpu.push_f32(0.0) }
@@ -527,7 +527,7 @@ fn upload_items(scene: SceneHandle, count: Int,
   for i in 0..<int.min(count, 256) {
     gpu.push_f32(xs[i]) gpu.push_f32(ys[i]) gpu.push_f32(ws[i]) gpu.push_f32(hs[i])
     gpu.push_f32(bg_rs[i]) gpu.push_f32(bg_gs[i]) gpu.push_f32(bg_bs[i]) gpu.push_f32(bg_as[i])
-    gpu.push_f32(roundeds[i]) gpu.push_f32(opacities[i]) gpu.push_f32(scrollables[i]) gpu.push_f32(int.to_float(count))
+    gpu.push_f32(roundeds[i]) gpu.push_f32(opacities[i]) gpu.push_f32(scrollables[i]) gpu.push_f32(float.from(count))
   }
   // Pad remaining slots with zeros
   for _ in count..<256 {
@@ -614,7 +614,7 @@ fn build_text_cubics(font: sfnt.Font, specs: List[TextSpec], viewport_h: Float) 
   let ns = list.len(specs)
   for si in 0..<ns {
     let spec = specs[si]
-    let scale = spec.size * 2.0 / viewport_h / int.to_float(font.units_per_em)
+    let scale = spec.size * 2.0 / viewport_h / float.from(font.units_per_em)
     var pen = if spec.align == ALIGN_CENTER then spec.x - measure_text(font, spec.chars, spec.size, viewport_h) / 2.0
               else spec.x
     let nc = list.len(spec.chars)
@@ -634,7 +634,7 @@ fn build_text_cubics(font: sfnt.Font, specs: List[TextSpec], viewport_h: Float) 
         list.push(paints, solid(spec.color[0], spec.color[1], spec.color[2], spec.color[3]))
         pid = pid + 1
       } else ()
-      pen = pen + int.to_float(sfnt.advance(font, gid)) * scale
+      pen = pen + float.from(sfnt.advance(font, gid)) * scale
     }
   }
   { cubics: cubics, paints: paints }
@@ -693,7 +693,7 @@ effect fn render(device: Int, img_vtx: Int, img_idx: Int, img_count: Int, img_te
     { chars: str("all from Almide"), size: 16.0, x: 0.0, y: -0.78, align: ALIGN_CENTER, color: [0.5,0.5,0.6,1.0] },
   ]
 
-  let font = sfnt.load(fs.read_bytes_raw(DEMO_FONT)!, 0)!
+  let font = sfnt.load(fs.read_bytes(DEMO_FONT)!, 0)!
   let text = build_text_cubics(font, text_specs, 512.0)
 
   // Remap text path_ids to continue after shape paints

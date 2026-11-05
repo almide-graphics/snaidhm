@@ -13,7 +13,7 @@ fn empty() -> Pending = { preedit: "", begin: 0 - 1, end: 0 - 1, commit: "" }
 /// inside a character counts the character as before it).
 fn char_index(s: String, byte: Int) -> Int =
   if byte < 0 then 0 - 1
-  else string.len(string.from_bytes(list.take(string.to_bytes(s), byte) |> strip_partial))
+  else string.len(bytes.to_string_lossy(bytes.from_list(list.take(bytes.to_list(bytes.from_string(s)), byte) |> strip_partial)))
 
 /// `bs` without a trailing, incomplete UTF-8 sequence.
 fn strip_partial(bs: List[Int]) -> List[Int] = {

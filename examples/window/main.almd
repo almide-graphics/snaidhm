@@ -37,7 +37,7 @@ fn build(device: Int, width: Int, height: Int, faces: List[sfnt.Font]) -> snaidh
   let no_paths: List[snaidhm.Cubic] = []
   let no_paints: List[snaidhm.Paint] = []
   let title = if list.len(faces) > 0 then
-      snaidhm.build_text_cubics(faces[0], [label("snaidhm", 40.0 * s, 0.0, 0.62, ink)], int.to_float(height))
+      snaidhm.build_text_cubics(faces[0], [label("snaidhm", 40.0 * s, 0.0, 0.62, ink)], float.from(height))
     else { cubics: no_paths, paints: no_paints }
   // Text paths are numbered after the shapes'.
   let offset = list.len(shape_paints)
@@ -55,7 +55,7 @@ fn build(device: Int, width: Int, height: Int, faces: List[sfnt.Font]) -> snaidh
 }
 
 // Pixel x of normal-space x on a `width`-wide drawable.
-fn px(x: Float, width: Int) -> Float = (x + 1.0) * 0.5 * int.to_float(width)
+fn px(x: Float, width: Int) -> Float = (x + 1.0) * 0.5 * float.from(width)
 
 // A run centred on normal-space `x`, its baseline at pixel row `y`.
 fn centred(device: Int, layer: text.TextLayer, s: String, size: Float, x: Float, y: Float,
@@ -63,13 +63,13 @@ fn centred(device: Int, layer: text.TextLayer, s: String, size: Float, x: Float,
   let chars = text.code_points(s)
   let left = px(x, width) - text.measure(layer, chars, size) / 2.0
   text.add_run(device, layer, chars, size, left, y, grey, grey, grey + 0.08, 1.0,
-    0.0, 0.0, int.to_float(width), int.to_float(height))
+    0.0, 0.0, float.from(width), float.from(height))
 }
 
 // Subtitle and labels, from the glyph cache.
 fn labels(device: Int, layer: text.TextLayer, width: Int, height: Int) -> text.TextLayer = {
   let s = window.scale_factor()
-  let h = int.to_float(height)
+  let h = float.from(height)
   var l = text.clear(layer)
   // Without a font there is nothing to draw them with.
   if list.len(l.fonts) == 0 then () else {

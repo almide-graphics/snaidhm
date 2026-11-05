@@ -139,7 +139,7 @@ fn place_color(device: Int, layer: TextLayer, k: Int, rgba: Bytes, off: Int, w: 
   for row in 0..<h {
     for col in 0..<w {
       // r | g << 8 | b << 16 | a << 24: the bytes as they are.
-      gpu.push_u32(bytes.read_u32_le(rgba, off + (row * w + col) * 4))
+      gpu.push_u32(bytes.get_u32_le(rgba, off + (row * w + col) * 4) ?? 0)
     }
   }
   gpu.flush_to_buffer_rect(device, layer.color_buffer, COLOR_ATLAS, x, y, w, h)
@@ -174,17 +174,17 @@ fn clear(layer: TextLayer) -> TextLayer = {
 
 /// The code points of `s`, as `add_run` and `measure` take text.
 fn code_points(s: String) -> List[Int] = {
-  let cs = string.chars(s)
+  let cs = string.to_list(s)
   let n = list.len(cs)
   var out: List[Int] = []
-  for i in 0..<n { list.push(out, string.codepoint(cs[i]) ?? 0) }
+  for i in 0..<n { list.push(out, string.to_codepoint(cs[i]) ?? 0) }
   out
 }
 
 /// Advance of glyph `gid` of font `fi`, px at `size` px per em.
 fn advance_px(layer: TextLayer, fi: Int, gid: Int, size: Float) -> Float = {
   let f = layer.fonts[fi]
-  int.to_float(sfnt.advance(f, gid)) * size / int.to_float(f.units_per_em)
+  float.from(sfnt.advance(f, gid)) * size / float.from(f.units_per_em)
 }
 
 /// The cache key of glyph `gid` of font `fi` at `size_px`.
@@ -204,12 +204,12 @@ fn measure(layer: TextLayer, chars: List[Int], size: Float) -> Float = {
 /// Ascent and descent (positive, down) of a line at `size` px per em.
 fn ascent(layer: TextLayer, size: Float) -> Float = {
   let f = layer.fonts[0]
-  int.to_float(f.ascent) * size / int.to_float(f.units_per_em)
+  float.from(f.ascent) * size / float.from(f.units_per_em)
 }
 
 fn descent(layer: TextLayer, size: Float) -> Float = {
   let f = layer.fonts[0]
-  0.0 - int.to_float(f.descent) * size / int.to_float(f.units_per_em)
+  0.0 - float.from(f.descent) * size / float.from(f.units_per_em)
 }
 
 /// Rasterize glyph `gid` of font `fi` at `size_px` into the atlas if it is
@@ -218,7 +218,7 @@ fn cached(device: Int, layer: TextLayer, fi: Int, gid: Int, size_px: Int) -> Tex
   let k = key(fi, gid, size_px)
   match map.get(layer.keys, k) {
     some(_) => layer,
-    none => place(device, layer, k, glyph.glyph_bitmap(layer.fonts[fi], gid, int.to_float(size_px))),
+    none => place(device, layer, k, glyph.glyph_bitmap(layer.fonts[fi], gid, float.from(size_px))),
   }
 }
 
@@ -293,7 +293,7 @@ fn place(device: Int, layer: TextLayer, k: Int, bm: glyph.Bitmap) -> TextLayer =
 fn add_run(device: Int, layer: TextLayer, chars: List[Int], size: Float, x: Float, y: Float,
            r: Float, g: Float, b: Float, a: Float,
            clip_left: Float, clip_top: Float, clip_right: Float, clip_bottom: Float) -> TextLayer = {
-  let size_px = int.max(1, float.to_int(float.round(size)))
+  let size_px = int.max(1, int.from_saturating(float.round(size)))
   let baseline = float.round(y)
   var cur = layer
   var verts = layer.verts
@@ -308,20 +308,20 @@ fn add_run(device: Int, layer: TextLayer, chars: List[Int], size: Float, x: Floa
     let w = cur.rects[slot * 6 + 2]
     let h = cur.rects[slot * 6 + 3]
     if w > 0 and h > 0 then {
-      let left = float.round(pen) + int.to_float(cur.rects[slot * 6 + 4])
-      let top = baseline - int.to_float(cur.rects[slot * 6 + 5])
+      let left = float.round(pen) + float.from(cur.rects[slot * 6 + 4])
+      let top = baseline - float.from(cur.rects[slot * 6 + 5])
       // Cut to the clip rectangle, moving the atlas texels with the quad's
       // edges so what stays is exactly what was there.
       let x0 = float.max(left, clip_left)
-      let x1 = float.min(left + int.to_float(w), clip_right)
+      let x1 = float.min(left + float.from(w), clip_right)
       let y0 = float.max(top, clip_top)
-      let y1 = float.min(top + int.to_float(h), clip_bottom)
+      let y1 = float.min(top + float.from(h), clip_bottom)
       if x1 > x0 and y1 > y0 then {
-        let atlas = int.to_float(ATLAS)
-        let u0 = (int.to_float(ax) + x0 - left) / atlas
-        let u1 = (int.to_float(ax) + x1 - left) / atlas
-        let v0 = (int.to_float(ay) + y0 - top) / atlas
-        let v1 = (int.to_float(ay) + y1 - top) / atlas
+        let atlas = float.from(ATLAS)
+        let u0 = (float.from(ax) + x0 - left) / atlas
+        let u1 = (float.from(ax) + x1 - left) / atlas
+        let v0 = (float.from(ay) + y0 - top) / atlas
+        let v1 = (float.from(ay) + y1 - top) / atlas
         verts = verts
           + [x0, y0, u0, v0, r, g, b, a,  x1, y0, u1, v0, r, g, b, a,  x0, y1, u0, v1, r, g, b, a]
           + [x0, y1, u0, v1, r, g, b, a,  x1, y0, u1, v0, r, g, b, a,  x1, y1, u1, v1, r, g, b, a]
@@ -340,9 +340,9 @@ fn add_rect(device: Int, layer: TextLayer, x0: Float, y0: Float, x1: Float, y1: 
   let slot = map.get(cur.keys, SOLID) ?? 0
   // Every corner samples the texel's centre: nearest sampling gives full
   // coverage across the whole quad.
-  let atlas = int.to_float(ATLAS)
-  let u = (int.to_float(cur.rects[slot * 6]) + 0.5) / atlas
-  let v = (int.to_float(cur.rects[slot * 6 + 1]) + 0.5) / atlas
+  let atlas = float.from(ATLAS)
+  let u = (float.from(cur.rects[slot * 6]) + 0.5) / atlas
+  let v = (float.from(cur.rects[slot * 6 + 1]) + 0.5) / atlas
   if x1 > x0 and y1 > y0 then {
     let verts = cur.verts
       + [x0, y0, u, v, r, g, b, a,  x1, y0, u, v, r, g, b, a,  x0, y1, u, v, r, g, b, a]
@@ -362,8 +362,8 @@ fn upload(device: Int, layer: TextLayer, width: Int, height: Int) -> TextLayer =
   let vtx = if grow then gpu.create_buffer(device, int.max(1, capacity) * VERTEX_FLOATS * 4, int.bor(gpu.VERTEX, gpu.COPY_DST))
             else layer.vtx
   if count > 0 then {
-    let sx = 2.0 / int.to_float(width)
-    let sy = 2.0 / int.to_float(height)
+    let sx = 2.0 / float.from(width)
+    let sy = 2.0 / float.from(height)
     gpu.begin_data()
     for i in 0..<count {
       let o = i * VERTEX_FLOATS

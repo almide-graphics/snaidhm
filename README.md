@@ -89,7 +89,7 @@ list of fonts, each character from the first that has it.
 A host only reads the file. Natively `snaidhm.native.fonts.system()` finds a
 Latin and a Japanese face by path; in the browser the page hands its fonts to
 the module as WASI files, which the program reads with the same
-`fs.read_bytes_raw`:
+`fs.read_bytes`:
 
 ```js
 import { createWasi } from "./wasi.js";
@@ -108,7 +108,7 @@ compares any installed font the same way.
 
 `snaidhm.wayland.window` is a desktop window over the Wayland protocol, written
 in Almide down to the socket: the wire format (`wayland/wire.almd`), the
-connection (`wayland/client.almd`, over `net`'s Unix-socket and shared-memory
+connection (`wayland/client.almd`, over `unix`'s socket and shared-memory
 primitives), the registry, xdg-shell toplevel, double-buffered wl_shm pixels,
 pointer input, and the keyboard read through the XKB keymap the compositor
 hands over (`wayland/xkb.almd`). Pixels are drawn on the CPU by

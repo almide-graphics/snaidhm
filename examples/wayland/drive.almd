@@ -73,7 +73,7 @@ effect fn main() -> Unit = {
         let dir = if steps < 0 then 0 - 1 else 1
         for _ in 0..<int.abs(steps) {
           client.send(ptr, 5, [0], [])!
-          client.send(ptr, 7, [t, 0, wire.fixed(int.to_float(dir) * 15.0), wire.int32(dir)], [])!
+          client.send(ptr, 7, [t, 0, wire.fixed(float.from(dir) * 15.0), wire.int32(dir)], [])!
           client.send(ptr, 4, [], [])!
         }
         i = i + 2
