@@ -10,7 +10,7 @@ permissions:
 
 env:
   # The compiler the code is checked against; advance it deliberately.
-  ALMIDE_VERSION: v0.66.0-rc1
+  ALMIDE_VERSION: v0.69.0
 
 jobs:
   check:
