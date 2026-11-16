@@ -21,7 +21,7 @@ let MAX_DEPTH = 8
 
 fn glyph_span(data: Bytes, loca: Int, long_loca: Bool, gid: Int) -> (Int, Int) =
   if long_loca then (bytes.get_u32_be(data, loca + gid * 4) ?? 0, bytes.get_u32_be(data, loca + gid * 4 + 4) ?? 0)
-  else (bytes.get_u16_be(data, loca + gid * 2) ?? 0 * 2, bytes.get_u16_be(data, loca + gid * 2 + 2) ?? 0 * 2)
+  else ((bytes.get_u16_be(data, loca + gid * 2) ?? 0) * 2, (bytes.get_u16_be(data, loca + gid * 2 + 2) ?? 0) * 2)
 
 /// Glyph `gid`'s outline, font units, y up. `lsb` is its left side bearing
 /// from hmtx: as TrueType rasterizers place a glyph (the phantom point at
@@ -29,7 +29,7 @@ fn glyph_span(data: Bytes, loca: Int, long_loca: Bool, gid: Int) -> (Int, Int) =
 /// nothing, in a font whose hmtx agrees with its glyf bounding boxes.
 fn outline(data: Bytes, loca: Int, glyf: Int, long_loca: Bool, gid: Int, lsb: Int) -> Outline = {
   let span = glyph_span(data, loca, long_loca, gid)
-  let shift = if span.1 > span.0 then lsb - bytes.get_i16_be(data, glyf + span.0 + 2) ?? 0 else 0
+  let shift = if span.1 > span.0 then lsb - (bytes.get_i16_be(data, glyf + span.0 + 2) ?? 0) else 0
   placed(data, loca, glyf, long_loca, gid, [1.0, 0.0, 0.0, 1.0, float.from(shift), 0.0], 0)
 }
 
@@ -58,7 +58,7 @@ fn simple(data: Bytes, at: Int, contours: Int, m: List[Float]) -> Outline = {
     for c in 0..<contours { list.push(ends, bytes.get_u16_be(data, at + 10 + c * 2) ?? 0) }
     let n = ends[contours - 1] + 1
     var pos = at + 10 + contours * 2
-    pos = pos + 2 + bytes.get_u16_be(data, pos) ?? 0
+    pos = pos + 2 + (bytes.get_u16_be(data, pos) ?? 0)
     // Flags, with their repeats.
     var flags: List[Int] = []
     while list.len(flags) < n {
@@ -81,7 +81,7 @@ fn simple(data: Bytes, at: Int, contours: Int, m: List[Float]) -> Outline = {
         pos = pos + 1
         x = x + (if int.band(f, 0x10) != 0 then d else 0 - d)
       } else if int.band(f, 0x10) == 0 then {
-        x = x + bytes.get_i16_be(data, pos) ?? 0
+        x = x + (bytes.get_i16_be(data, pos) ?? 0)
         pos = pos + 2
       } else ()
       list.push(xs, float.from(x))
@@ -95,7 +95,7 @@ fn simple(data: Bytes, at: Int, contours: Int, m: List[Float]) -> Outline = {
         pos = pos + 1
         y = y + (if int.band(f, 0x20) != 0 then d else 0 - d)
       } else if int.band(f, 0x20) == 0 then {
-        y = y + bytes.get_i16_be(data, pos) ?? 0
+        y = y + (bytes.get_i16_be(data, pos) ?? 0)
         pos = pos + 2
       } else ()
       list.push(ys, float.from(y))
