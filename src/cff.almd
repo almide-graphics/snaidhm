@@ -50,7 +50,7 @@ fn absent() -> Cff = {
 
 fn read_off(b: Bytes, at: Int, size: Int) -> Int = {
   var v = 0
-  for i in 0..<size { v = v * 256 + bytes.get(b, at + i) ?? 0 }
+  for i in 0..<size { v = v * 256 + (bytes.get(b, at + i) ?? 0) }
   v
 }
 
@@ -114,7 +114,7 @@ fn dict(b: Bytes, start: Int, stop: Int) -> Dict = {
   while pos < stop {
     let b0 = bytes.get(b, pos) ?? 0
     if b0 <= 21 then {
-      let op = if b0 == 12 then 1200 + bytes.get(b, pos + 1) ?? 0 else b0
+      let op = if b0 == 12 then 1200 + (bytes.get(b, pos + 1) ?? 0) else b0
       pos = pos + (if b0 == 12 then 2 else 1)
       list.push(ops, op)
       list.push(firsts, first)
@@ -134,10 +134,10 @@ fn dict(b: Bytes, start: Int, stop: Int) -> Dict = {
       list.push(args, float.from(b0 - 139))
       pos = pos + 1
     } else if b0 >= 247 and b0 <= 250 then {
-      list.push(args, float.from((b0 - 247) * 256 + bytes.get(b, pos + 1) ?? 0 + 108))
+      list.push(args, float.from((b0 - 247) * 256 + (bytes.get(b, pos + 1) ?? 0) + 108))
       pos = pos + 2
     } else if b0 >= 251 and b0 <= 254 then {
-      list.push(args, float.from(0 - (b0 - 251) * 256 - bytes.get(b, pos + 1) ?? 0 - 108))
+      list.push(args, float.from(0 - (b0 - 251) * 256 - (bytes.get(b, pos + 1) ?? 0) - 108))
       pos = pos + 2
     } else {
       pos = pos + 1
@@ -170,7 +170,7 @@ fn parse(b: Bytes, at: Int) -> Result[Cff, String] = {
   let major = bytes.get(b, at) ?? 0
   if major != 1 then err("CFF version ${int.to_string(major)} (only 1 is read)")
   else {
-    let names = index_at(b, at + bytes.get(b, at + 2) ?? 0)
+    let names = index_at(b, at + (bytes.get(b, at + 2) ?? 0))
     let tops = index_at(b, index_end(b, names))
     let strings = index_at(b, index_end(b, tops))
     let gsubrs = index_at(b, index_end(b, strings))
@@ -309,10 +309,10 @@ fn run(b: Bytes, c: Cff, lsubrs: Index, start: Int, stop: Int, st0: State, depth
       // Numbers.
       if b0 <= 246 then { st = { ...st, stack: st.stack + [float.from(b0 - 139)] } }
       else if b0 <= 250 then {
-        st = { ...st, stack: st.stack + [float.from((b0 - 247) * 256 + bytes.get(b, pos) ?? 0 + 108)] }
+        st = { ...st, stack: st.stack + [float.from((b0 - 247) * 256 + (bytes.get(b, pos) ?? 0) + 108)] }
         pos = pos + 1
       } else if b0 <= 254 then {
-        st = { ...st, stack: st.stack + [float.from(0 - (b0 - 251) * 256 - bytes.get(b, pos) ?? 0 - 108)] }
+        st = { ...st, stack: st.stack + [float.from(0 - (b0 - 251) * 256 - (bytes.get(b, pos) ?? 0) - 108)] }
         pos = pos + 1
       } else {
         // 16.16 fixed.
