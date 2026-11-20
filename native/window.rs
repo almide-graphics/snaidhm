@@ -37,6 +37,12 @@
 //! caret is, for its candidate window. In the browser a DOM input element
 //! does all of this itself.
 //!
+//! The modifiers an input reports (`event_mods`) are those held as winit
+//! last told of them. Events that come while the program is between pumps —
+//! inside a modal dialog or a menu the program runs itself — winit drops,
+//! so a modifier let go over one stays held here: `resync_mods` reads the
+//! keyboard again, and a window regaining the focus does so itself.
+//!
 //! ## Windows
 //!
 //! `open` opens window 1, `open_window` more. The per-window calls — size,
@@ -262,6 +268,21 @@ impl App {
         }
     }
 
+    /// `mods` read again from the keyboard as it is now. winit tells of a
+    /// change only as an event, and an event that comes while the program is
+    /// outside `pump` — a modal dialog or a menu the program runs between
+    /// pumps — is dropped: Cmd let go over a dialog that Cmd+W opened stayed
+    /// held here, and every key typed after it came as a shortcut.
+    fn resync_mods(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            self.mods = layer::held_mods();
+            // Which Option it is the flags don't say: the one noted, if
+            // Option is still down.
+            self.alt_keys = if self.mods & MOD_ALT == 0 { 0 } else if self.alt_keys != 0 { self.alt_keys } else { 3 };
+        }
+    }
+
     /// Whether the Option held now types as Alt. Off macOS, Alt always does.
     fn option_is_alt(&self) -> bool {
         if !cfg!(target_os = "macos") {
@@ -430,6 +451,11 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(on) => {
                 if let Some(w) = self.win_mut(id) {
                     w.focused = on;
+                }
+                // A key let go while another window had the keyboard was
+                // not seen here.
+                if on {
+                    self.resync_mods();
                 }
                 let input = self.at_cursor(id, FOCUS, if on { 1 } else { 0 });
                 self.push(input);
@@ -1187,6 +1213,22 @@ mod layer {
         unsafe { f(obj, sel(c"isKindOfClass:"), class) }
     }
 
+    /// The modifiers down now, MOD_* bits, as `+[NSEvent modifierFlags]`
+    /// has them — the keyboard's state, not an event's.
+    pub(super) fn held_mods() -> i64 {
+        let flags = unsafe {
+            let f: unsafe extern "C" fn(Id, Id) -> usize = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            f(objc_getClass(c"NSEvent".as_ptr()), sel(c"modifierFlags"))
+        };
+        // NSEventModifierFlagShift, Control, Option, Command.
+        let mut mods = 0;
+        if flags & (1 << 17) != 0 { mods |= super::MOD_SHIFT; }
+        if flags & (1 << 18) != 0 { mods |= super::MOD_CTRL; }
+        if flags & (1 << 19) != 0 { mods |= super::MOD_ALT; }
+        if flags & (1 << 20) != 0 { mods |= super::MOD_SUPER; }
+        mods
+    }
+
     /// The view's layer, then the Metal layers under it.
     fn layers(view: Id) -> Vec<Id> {
         unsafe {
@@ -1367,6 +1409,13 @@ pub fn event_end() -> i64 {
 /// (Option), 8 Super (Command).
 pub fn event_mods() -> i64 {
     with_host(0, |host| host.app.input.mods)
+}
+
+/// The modifiers held read again from the keyboard: for after a modal
+/// dialog or a menu the program ran between pumps, during which a key let
+/// go went unseen (see `App::resync_mods`). Nothing elsewhere than macOS.
+pub fn resync_mods() {
+    with_host((), |host| host.app.resync_mods())
 }
 
 /// Text of the current composition.

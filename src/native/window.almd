@@ -224,6 +224,13 @@ fn event_end() -> Int = _
 @extern(rust, "crate::window", "event_mods")
 fn event_mods() -> Int = _
 
+/// The modifiers held read again from the keyboard: for after a modal
+/// dialog or menu the program ran between pumps, during which a modifier let
+/// go went unseen and would be reported held by every input after. Nothing
+/// elsewhere than macOS.
+@extern(rust, "crate::window", "resync_mods")
+fn resync_mods() -> Unit = _
+
 /// Text of the current COMPOSE, or the path of the current DROP.
 @extern(rust, "crate::window", "event_text")
 fn event_text() -> String = _
